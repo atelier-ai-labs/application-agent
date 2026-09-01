@@ -412,6 +412,7 @@ export class ExecutionSessionRegistry {
           ...(inspection.boundaries ? { boundaries: inspection.boundaries } : {}),
           ...(inspection.navigation ? { navigation: inspection.navigation } : {}),
           ...(inspection.diagnostic ? { diagnostic: inspection.diagnostic } : {}),
+          ...(inspection.captcha ? { captcha: inspection.captcha } : {}),
         });
         if (session.terminal) {
           this.addTelemetry(session, { lateCompletionCount: 1 });
@@ -444,6 +445,7 @@ export class ExecutionSessionRegistry {
         ...(result.state === "submitted" || !result.inspection?.boundaries ? {} : { boundaries: result.inspection.boundaries }),
         ...(result.state === "submitted" || !result.inspection?.navigation ? {} : { navigation: result.inspection.navigation }),
         ...(result.state === "submitted" || !result.inspection?.diagnostic ? {} : { diagnostic: result.inspection.diagnostic }),
+        ...(result.state === "submitted" || !result.inspection?.captcha ? {} : { captcha: result.inspection.captcha }),
       });
       if (result.state === "submitted") {
         // This is a defense-in-depth check. The production Lever executor is
@@ -537,6 +539,7 @@ export class ExecutionSessionRegistry {
         } : {}),
         ...(next.navigation || current?.navigation ? { navigation: next.navigation ?? current?.navigation } : {}),
         ...(next.diagnostic || current?.diagnostic ? { diagnostic: next.diagnostic ?? current?.diagnostic } : {}),
+        ...(next.captcha || current?.captcha ? { captcha: next.captcha ?? current?.captcha } : {}),
       },
     };
   }

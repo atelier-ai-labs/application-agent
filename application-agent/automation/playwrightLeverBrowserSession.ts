@@ -3,6 +3,7 @@ import type {
   ApplicationFieldOption,
   ApplicationFieldType,
   BrowserHumanBoundary,
+  BrowserCaptchaDiagnostics,
   BrowserExecutionBoundaryState,
   BrowserExecutionDiagnostic,
   BrowserNavigationDiagnostics,
@@ -30,6 +31,105 @@ interface InspectedRawField {
   options?: readonly ApplicationFieldOption[];
   section?: string;
   groupName?: string;
+}
+
+export interface CaptchaDomObservation {
+  markerCount: number;
+  visibleMarkerCount: number;
+  challengeIframeCount: number;
+  visibleChallengeIframeCount: number;
+  visibleChallengeControlCount: number;
+  explicitChallengeText: boolean;
+}
+
+/**
+ * Classifies only observable CAPTCHA evidence. Visible but non-specific
+ * provider UI remains a human gate through `uncertain`; hidden infrastructure
+ * is recorded without requiring interaction.
+ */
+export function classifyCaptchaEvidence(observation: CaptchaDomObservation): BrowserCaptchaDiagnostics {
+  if (observation.explicitChallengeText) {
+    return {
+      state: "active_challenge",
+      markerCount: observation.markerCount,
+      visibleMarkerCount: observation.visibleMarkerCount,
+      challengeIframeCount: observation.challengeIframeCount,
+      visibleChallengeIframeCount: observation.visibleChallengeIframeCount,
+      evidenceCategory: "explicit_challenge_text",
+    };
+  }
+  if (observation.visibleChallengeIframeCount > 0) {
+    return {
+      state: "active_challenge",
+      markerCount: observation.markerCount,
+      visibleMarkerCount: observation.visibleMarkerCount,
+      challengeIframeCount: observation.challengeIframeCount,
+      visibleChallengeIframeCount: observation.visibleChallengeIframeCount,
+      evidenceCategory: "visible_challenge_iframe",
+    };
+  }
+  if (observation.visibleChallengeControlCount > 0) {
+    return {
+      state: "active_challenge",
+      markerCount: observation.markerCount,
+      visibleMarkerCount: observation.visibleMarkerCount,
+      challengeIframeCount: observation.challengeIframeCount,
+      visibleChallengeIframeCount: observation.visibleChallengeIframeCount,
+      evidenceCategory: "visible_challenge_control",
+    };
+  }
+  if (observation.markerCount === 0) {
+    return {
+      state: "none",
+      markerCount: 0,
+      visibleMarkerCount: 0,
+      challengeIframeCount: 0,
+      visibleChallengeIframeCount: 0,
+      evidenceCategory: "no_markers",
+    };
+  }
+  if (observation.visibleMarkerCount > 0) {
+    return {
+      state: "uncertain",
+      markerCount: observation.markerCount,
+      visibleMarkerCount: observation.visibleMarkerCount,
+      challengeIframeCount: observation.challengeIframeCount,
+      visibleChallengeIframeCount: observation.visibleChallengeIframeCount,
+      evidenceCategory: "visible_marker_ambiguous",
+    };
+  }
+  return {
+    state: "infrastructure_present",
+    markerCount: observation.markerCount,
+    visibleMarkerCount: 0,
+    challengeIframeCount: observation.challengeIframeCount,
+    visibleChallengeIframeCount: 0,
+    evidenceCategory: "hidden_infrastructure",
+  };
+}
+
+const CAPTCHA_MARKER_SELECTOR = [
+  'iframe[src*="captcha"]',
+  'iframe[src*="recaptcha"]',
+  '[id*="captcha"]',
+  '[class*="captcha"]',
+  'script[src*="captcha"]',
+  'script[src*="recaptcha"]',
+  'input[name*="captcha"]',
+  '[data-sitekey]',
+].join(", ");
+
+const ACTIVE_CAPTCHA_TEXT = /(?:verify\s+you\s+are\s+human|prove\s+you\s+are\s+human|i['’]?m\s+not\s+a\s+robot|select\s+all\b|captcha\s+challenge|recaptcha\s+challenge|complete\s+(?:the\s+)?captcha|checking\s+your\s+browser|security\s+check)/i;
+
+function captchaEvidence(captcha: BrowserCaptchaDiagnostics): string[] {
+  return [
+    `captcha-state:${captcha.state}`,
+    `captcha-elements:${captcha.markerCount}`,
+    `captcha-visible-elements:${captcha.visibleMarkerCount}`,
+    `captcha-challenge-iframes:${captcha.challengeIframeCount}`,
+    `captcha-visible-challenge-iframes:${captcha.visibleChallengeIframeCount}`,
+    `captcha-evidence:${captcha.evidenceCategory}`,
+  ];
 }
 
 function visibleFormControl(locator: Locator): Promise<boolean> {
@@ -164,6 +264,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
   private boundaryState: BrowserExecutionBoundaryState;
   private navigationDiagnostics: BrowserNavigationDiagnostics = { outcome: "not_started" };
   private diagnostic?: BrowserExecutionDiagnostic;
+  private captchaDiagnostics?: BrowserCaptchaDiagnostics;
 
   constructor(
     private readonly page: Page,
@@ -181,6 +282,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       boundaries: { ...this.boundaryState },
       navigation: { ...this.navigationDiagnostics },
       ...(this.diagnostic ? { diagnostic: this.diagnostic } : {}),
+      ...(this.captchaDiagnostics ? { captcha: { ...this.captchaDiagnostics } } : {}),
     };
   }
 
@@ -260,18 +362,78 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
 
   async detectHumanBoundary(): Promise<BrowserHumanBoundary | null> {
     const passwordCount = await this.page.locator('input[type="password"]').count().catch(() => 0);
-    const captchaCount = await this.page.locator(
-      'iframe[src*="captcha"], iframe[src*="recaptcha"], [id*="captcha"], [class*="captcha"]',
-    ).count().catch(() => 0);
+    const captchaObservation = await this.page.locator(CAPTCHA_MARKER_SELECTOR).evaluateAll((elements): Omit<CaptchaDomObservation, "explicitChallengeText"> => {
+      const isVisible = (element: Element): boolean => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return element.getAttribute("aria-hidden") !== "true" &&
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          Number.parseFloat(style.opacity || "1") > 0 &&
+          rect.width > 0 &&
+          rect.height > 0;
+      };
+      const isChallengeIframe = (element: Element): boolean => {
+        if (element.tagName.toLowerCase() !== "iframe") return false;
+        const haystack = [
+          element.getAttribute("src") ?? "",
+          element.getAttribute("title") ?? "",
+          element.getAttribute("aria-label") ?? "",
+        ].join(" ").toLowerCase();
+        return /(?:bframe|anchor|challenge|verify)/.test(haystack);
+      };
+      const isChallengeControl = (element: Element, visible: boolean): boolean => {
+        if (!visible) return false;
+        const haystack = [
+          element.getAttribute("aria-label") ?? "",
+          element.getAttribute("title") ?? "",
+          element.textContent ?? "",
+        ].join(" ");
+        return /(?:verify\s+you\s+are\s+human|prove\s+you\s+are\s+human|i['’]?m\s+not\s+a\s+robot|select\s+all\b|captcha\s+challenge|recaptcha\s+challenge|complete\s+(?:the\s+)?captcha|checking\s+your\s+browser|security\s+check)/i.test(haystack);
+      };
+      let visibleMarkerCount = 0;
+      let challengeIframeCount = 0;
+      let visibleChallengeIframeCount = 0;
+      let visibleChallengeControlCount = 0;
+      for (const element of elements) {
+        const visible = isVisible(element);
+        if (visible) visibleMarkerCount += 1;
+        const challengeIframe = isChallengeIframe(element);
+        if (challengeIframe) challengeIframeCount += 1;
+        if (challengeIframe && visible) visibleChallengeIframeCount += 1;
+        if (isChallengeControl(element, visible)) visibleChallengeControlCount += 1;
+      }
+      return {
+        markerCount: elements.length,
+        visibleMarkerCount,
+        challengeIframeCount,
+        visibleChallengeIframeCount,
+        visibleChallengeControlCount,
+      };
+    }).catch(() => ({
+      markerCount: 0,
+      visibleMarkerCount: 0,
+      challengeIframeCount: 0,
+      visibleChallengeIframeCount: 0,
+      visibleChallengeControlCount: 0,
+    }));
     const bodyText = await this.page.locator("body").innerText({ timeout: this.timeoutMs }).catch(() => "");
     const lowerBody = bodyText.toLowerCase();
+    this.captchaDiagnostics = classifyCaptchaEvidence({
+      ...captchaObservation,
+      explicitChallengeText: ACTIVE_CAPTCHA_TEXT.test(lowerBody),
+    });
 
-    if (captchaCount > 0 || /captcha|recaptcha|prove you are human/.test(lowerBody)) {
+    if (this.captchaDiagnostics.state === "active_challenge" || this.captchaDiagnostics.state === "uncertain") {
       return {
         kind: "captcha",
         question: "Complete the CAPTCHA in the browser",
         reason: "The Lever application is protected by a CAPTCHA or human-verification boundary. The executor will not bypass it.",
-        evidence: [`captcha-elements:${captchaCount}`, "credentials-never-requested", "submit:not-clicked"],
+        evidence: [
+          ...captchaEvidence(this.captchaDiagnostics),
+          "credentials-never-requested",
+          "submit:not-clicked",
+        ],
       };
     }
 

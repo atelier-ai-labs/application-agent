@@ -6,6 +6,7 @@ import type {
   ApplicationFieldOption,
   ApplicationFieldType,
   BrowserHumanBoundary,
+  BrowserCaptchaDiagnostics,
   BrowserExecutionBoundaryState,
   BrowserExecutionDiagnostic,
   BrowserExecutionDiagnosticStage,
@@ -86,6 +87,17 @@ function initialBoundaryState(phase: InspectionPhase): BrowserExecutionBoundaryS
     executorInspectionCompleted: false,
     browserClosed: false,
   };
+}
+
+function captchaEvidence(captcha: BrowserCaptchaDiagnostics): string[] {
+  return [
+    `captcha-state:${captcha.state}`,
+    `captcha-elements:${captcha.markerCount}`,
+    `captcha-visible-elements:${captcha.visibleMarkerCount}`,
+    `captcha-challenge-iframes:${captcha.challengeIframeCount}`,
+    `captcha-visible-challenge-iframes:${captcha.visibleChallengeIframeCount}`,
+    `captcha-evidence:${captcha.evidenceCategory}`,
+  ];
 }
 
 interface FieldDecision {
@@ -247,6 +259,7 @@ function inspection(
     boundaries?: BrowserExecutionBoundaryState;
     navigation?: BrowserNavigationDiagnostics;
     diagnostic?: BrowserExecutionDiagnostic;
+    captcha?: BrowserCaptchaDiagnostics;
   } = {},
 ): ExecutionInspection {
   return {
@@ -270,6 +283,7 @@ function inspection(
 function inspectionTelemetry(base: ExecutionInspection | undefined): Pick<
   ExecutionInspection,
   "durationMs" | "domInspectionCount" | "boundaries" | "navigation" | "diagnostic"
+  | "captcha"
 > {
   return {
     ...(base?.durationMs !== undefined ? { durationMs: base.durationMs } : {}),
@@ -277,6 +291,7 @@ function inspectionTelemetry(base: ExecutionInspection | undefined): Pick<
     ...(base?.boundaries ? { boundaries: base.boundaries } : {}),
     ...(base?.navigation ? { navigation: base.navigation } : {}),
     ...(base?.diagnostic ? { diagnostic: base.diagnostic } : {}),
+    ...(base?.captcha ? { captcha: base.captcha } : {}),
   };
 }
 
@@ -933,6 +948,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
     let boundaries: BrowserExecutionBoundaryState = initialBoundaryState(phase);
     let navigation: BrowserNavigationDiagnostics | undefined;
     let diagnostic: BrowserExecutionDiagnostic | undefined;
+    let captcha: BrowserCaptchaDiagnostics | undefined;
     const targetResult = trustedTarget(request);
     if (!targetResult.target) {
       const completedBoundaries = phase === "preflight"
@@ -966,6 +982,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       boundaries = { ...boundaries, ...(sessionDiagnostics.boundaries ?? {}) };
       navigation = sessionDiagnostics.navigation ?? navigation;
       diagnostic = sessionDiagnostics.diagnostic ?? diagnostic;
+      captcha = sessionDiagnostics.captcha ?? captcha;
     };
     const finish = (observed: ObservedForm): ObservedForm => {
       mergeSessionDiagnostics(observed.session);
@@ -988,6 +1005,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
           boundaries: completedBoundaries,
           ...(navigation ? { navigation } : {}),
           ...(completedDiagnostic ? { diagnostic: completedDiagnostic } : {}),
+          ...(captcha ? { captcha } : {}),
         },
       };
     };
@@ -1009,6 +1027,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         `lever-site:${target.site}`,
         `provider-job-id:${target.postingId}`,
         "navigation:verified",
+        ...(captcha ? captchaEvidence(captcha) : []),
       ];
       if (boundary) {
         const blocker = boundaryBlocker(boundary);

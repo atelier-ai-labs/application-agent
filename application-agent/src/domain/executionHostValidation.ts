@@ -1,6 +1,7 @@
 import type {
   ApplicationFieldDescriptor,
   ApplicationFieldOption,
+  BrowserCaptchaDiagnostics,
   BrowserExecutionBoundaryState,
   BrowserExecutionDiagnostic,
   BrowserNavigationDiagnostics,
@@ -110,6 +111,19 @@ function isBrowserExecutionDiagnostic(value: unknown): value is BrowserExecution
     (value.navigation === undefined || isBrowserNavigationDiagnostics(value.navigation));
 }
 
+function isBrowserCaptchaDiagnostics(value: unknown): value is BrowserCaptchaDiagnostics {
+  if (!isRecord(value)) return false;
+  return (value.state === "none" || value.state === "infrastructure_present" ||
+    value.state === "active_challenge" || value.state === "uncertain") &&
+    isNonNegativeInteger(value.markerCount) &&
+    isNonNegativeInteger(value.visibleMarkerCount) &&
+    isNonNegativeInteger(value.challengeIframeCount) &&
+    isNonNegativeInteger(value.visibleChallengeIframeCount) &&
+    (value.evidenceCategory === "no_markers" || value.evidenceCategory === "hidden_infrastructure" ||
+      value.evidenceCategory === "visible_challenge_iframe" || value.evidenceCategory === "visible_challenge_control" ||
+      value.evidenceCategory === "explicit_challenge_text" || value.evidenceCategory === "visible_marker_ambiguous");
+}
+
 function isBrowserExecutionTelemetry(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return (value.preflightInspectionDurationMs === undefined || isNonNegativeNumber(value.preflightInspectionDurationMs)) &&
@@ -120,7 +134,8 @@ function isBrowserExecutionTelemetry(value: unknown): boolean {
     (value.lateCompletionCount === undefined || isNonNegativeInteger(value.lateCompletionCount)) &&
     (value.boundaries === undefined || isBrowserExecutionBoundaryState(value.boundaries)) &&
     (value.navigation === undefined || isBrowserNavigationDiagnostics(value.navigation)) &&
-    (value.diagnostic === undefined || isBrowserExecutionDiagnostic(value.diagnostic));
+    (value.diagnostic === undefined || isBrowserExecutionDiagnostic(value.diagnostic)) &&
+    (value.captcha === undefined || isBrowserCaptchaDiagnostics(value.captcha));
 }
 
 function isFieldType(value: unknown): boolean {
@@ -188,6 +203,7 @@ export function isExecutionInspection(value: unknown): value is ExecutionInspect
     (value.boundaries === undefined || isBrowserExecutionBoundaryState(value.boundaries)) &&
     (value.navigation === undefined || isBrowserNavigationDiagnostics(value.navigation)) &&
     (value.diagnostic === undefined || isBrowserExecutionDiagnostic(value.diagnostic)) &&
+    (value.captcha === undefined || isBrowserCaptchaDiagnostics(value.captcha)) &&
     isTimestamp(value.startedAt) &&
     isTimestamp(value.updatedAt);
 }

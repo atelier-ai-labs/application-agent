@@ -75,6 +75,26 @@ export interface BrowserHumanBoundary {
   evidence: readonly string[];
 }
 
+export type BrowserCaptchaState = "none" | "infrastructure_present" | "active_challenge" | "uncertain";
+
+export type BrowserCaptchaEvidenceCategory =
+  | "no_markers"
+  | "hidden_infrastructure"
+  | "visible_challenge_iframe"
+  | "visible_challenge_control"
+  | "explicit_challenge_text"
+  | "visible_marker_ambiguous";
+
+/** Safe CAPTCHA observations; no iframe content, token, cookie, or HTML is retained. */
+export interface BrowserCaptchaDiagnostics {
+  state: BrowserCaptchaState;
+  markerCount: number;
+  visibleMarkerCount: number;
+  challengeIframeCount: number;
+  visibleChallengeIframeCount: number;
+  evidenceCategory: BrowserCaptchaEvidenceCategory;
+}
+
 /** Stable browser-boundary stages used for safe local diagnostics. */
 export type BrowserExecutionDiagnosticStage =
   | "browser_launch"
@@ -210,6 +230,7 @@ export interface LeverBrowserSession {
     boundaries?: BrowserExecutionBoundaryState;
     navigation?: BrowserNavigationDiagnostics;
     diagnostic?: BrowserExecutionDiagnostic;
+    captcha?: BrowserCaptchaDiagnostics;
   };
   close(): Promise<void>;
 }
@@ -231,6 +252,7 @@ export interface BrowserExecutionTelemetry {
   boundaries?: BrowserExecutionBoundaryState;
   navigation?: BrowserNavigationDiagnostics;
   diagnostic?: BrowserExecutionDiagnostic;
+  captcha?: BrowserCaptchaDiagnostics;
 }
 
 export interface ExecutionInspection {
@@ -247,6 +269,7 @@ export interface ExecutionInspection {
   boundaries?: BrowserExecutionBoundaryState;
   navigation?: BrowserNavigationDiagnostics;
   diagnostic?: BrowserExecutionDiagnostic;
+  captcha?: BrowserCaptchaDiagnostics;
   startedAt: string;
   updatedAt: string;
 }

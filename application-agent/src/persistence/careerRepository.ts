@@ -22,6 +22,7 @@ import type { AnswerValue } from "../domain/types";
 import type {
   BrowserExecutionBoundaryState,
   BrowserExecutionDiagnostic,
+  BrowserCaptchaDiagnostics,
   BrowserNavigationDiagnostics,
 } from "../domain/executor";
 import {
@@ -183,6 +184,19 @@ function isBrowserExecutionDiagnostic(value: unknown): value is BrowserExecution
     (value.navigation === undefined || isBrowserNavigationDiagnostics(value.navigation));
 }
 
+function isBrowserCaptchaDiagnostics(value: unknown): value is BrowserCaptchaDiagnostics {
+  if (!isRecord(value)) return false;
+  return (value.state === "none" || value.state === "infrastructure_present" ||
+    value.state === "active_challenge" || value.state === "uncertain") &&
+    isNonNegativeInteger(value.markerCount) &&
+    isNonNegativeInteger(value.visibleMarkerCount) &&
+    isNonNegativeInteger(value.challengeIframeCount) &&
+    isNonNegativeInteger(value.visibleChallengeIframeCount) &&
+    (value.evidenceCategory === "no_markers" || value.evidenceCategory === "hidden_infrastructure" ||
+      value.evidenceCategory === "visible_challenge_iframe" || value.evidenceCategory === "visible_challenge_control" ||
+      value.evidenceCategory === "explicit_challenge_text" || value.evidenceCategory === "visible_marker_ambiguous");
+}
+
 function isBrowserExecutionTelemetry(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return [
@@ -195,7 +209,8 @@ function isBrowserExecutionTelemetry(value: unknown): boolean {
   ].every((key) => value[key] === undefined || (typeof value[key] === "number" && Number.isFinite(value[key]) && value[key] >= 0)) &&
     (value.boundaries === undefined || isBrowserExecutionBoundaryState(value.boundaries)) &&
     (value.navigation === undefined || isBrowserNavigationDiagnostics(value.navigation)) &&
-    (value.diagnostic === undefined || isBrowserExecutionDiagnostic(value.diagnostic));
+    (value.diagnostic === undefined || isBrowserExecutionDiagnostic(value.diagnostic)) &&
+    (value.captcha === undefined || isBrowserCaptchaDiagnostics(value.captcha));
 }
 
 function isSearchCriteria(value: unknown): value is SearchCriteria {
@@ -463,6 +478,7 @@ function isCareerExecutionState(value: unknown): boolean {
     (value.boundaries === undefined || isBrowserExecutionBoundaryState(value.boundaries)) &&
     (value.navigation === undefined || isBrowserNavigationDiagnostics(value.navigation)) &&
     (value.diagnostic === undefined || isBrowserExecutionDiagnostic(value.diagnostic)) &&
+    (value.captcha === undefined || isBrowserCaptchaDiagnostics(value.captcha)) &&
     isTimestamp(value.startedAt) &&
     isTimestamp(value.updatedAt)
   );

@@ -9,6 +9,7 @@ import {
   type ApplicationExecutionRequest,
   type ApplicationFieldOption,
   type ApplicationFieldType,
+  type BrowserCaptchaDiagnostics,
   type CareerBlocker,
   type CareerJob,
   type Campaign,
@@ -16,6 +17,7 @@ import {
   type LeverBrowserSession,
   type LeverBrowserSessionFactory,
 } from "../application-agent/src";
+import { classifyCaptchaEvidence, type CaptchaDomObservation } from "../application-agent/automation/playwrightLeverBrowserSession";
 
 const capturedAt = "2026-08-30T12:00:00.000Z";
 const hostedUrl = "https://jobs.lever.co/h1/post-1";
@@ -81,6 +83,7 @@ class FakeSession implements LeverBrowserSession {
   closeCalls = 0;
   submitClicks = 0;
   boundary: Awaited<ReturnType<LeverBrowserSession["detectHumanBoundary"]>> = null;
+  captchaDiagnostics?: BrowserCaptchaDiagnostics;
   submitControl = true;
 
   constructor(readonly fields: FakeField[]) {}
@@ -99,7 +102,19 @@ class FakeSession implements LeverBrowserSession {
   }
 
   async detectHumanBoundary() {
+    if (this.captchaDiagnostics && (this.captchaDiagnostics.state === "active_challenge" || this.captchaDiagnostics.state === "uncertain")) {
+      return {
+        kind: "captcha" as const,
+        question: "Complete the CAPTCHA in the browser",
+        reason: "A visible or uncertain CAPTCHA boundary requires human action.",
+        evidence: [`captcha-state:${this.captchaDiagnostics.state}`],
+      };
+    }
     return this.boundary;
+  }
+
+  diagnostics() {
+    return this.captchaDiagnostics ? { captcha: this.captchaDiagnostics } : {};
   }
 
   async hasSubmitControl(): Promise<boolean> {
@@ -267,6 +282,95 @@ function resolvedCareerBlocker(field: string, value: string | boolean | number):
 }
 
 describe("LeverBrowserExecutor", () => {
+  const captchaObservation = (overrides: Partial<CaptchaDomObservation> = {}): CaptchaDomObservation => ({
+    markerCount: 0,
+    visibleMarkerCount: 0,
+    challengeIframeCount: 0,
+    visibleChallengeIframeCount: 0,
+    visibleChallengeControlCount: 0,
+    explicitChallengeText: false,
+    ...overrides,
+  });
+
+  it("classifies CAPTCHA evidence without treating marker presence as an active challenge", () => {
+    expect(classifyCaptchaEvidence(captchaObservation())).toMatchObject({
+      state: "none",
+      evidenceCategory: "no_markers",
+    });
+    expect(classifyCaptchaEvidence(captchaObservation({ markerCount: 5 }))).toMatchObject({
+      state: "infrastructure_present",
+      evidenceCategory: "hidden_infrastructure",
+    });
+    expect(classifyCaptchaEvidence(captchaObservation({
+      markerCount: 1,
+      visibleMarkerCount: 1,
+      challengeIframeCount: 1,
+      visibleChallengeIframeCount: 1,
+    }))).toMatchObject({
+      state: "active_challenge",
+      evidenceCategory: "visible_challenge_iframe",
+    });
+    expect(classifyCaptchaEvidence(captchaObservation({
+      markerCount: 1,
+      visibleMarkerCount: 1,
+      visibleChallengeControlCount: 1,
+    }))).toMatchObject({
+      state: "active_challenge",
+      evidenceCategory: "visible_challenge_control",
+    });
+    expect(classifyCaptchaEvidence(captchaObservation({
+      markerCount: 1,
+      visibleMarkerCount: 1,
+    }))).toMatchObject({
+      state: "uncertain",
+      evidenceCategory: "visible_marker_ambiguous",
+    });
+    expect(classifyCaptchaEvidence(captchaObservation({
+      markerCount: 3,
+      explicitChallengeText: true,
+    }))).toMatchObject({
+      state: "active_challenge",
+      evidenceCategory: "explicit_challenge_text",
+    });
+  });
+
+  it("records hidden CAPTCHA infrastructure without creating a human gate", async () => {
+    const session = new FakeSession([new FakeField({ id: "email", label: "Email", type: "email", required: true })]);
+    session.captchaDiagnostics = classifyCaptchaEvidence(captchaObservation({ markerCount: 5 }));
+    const result = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      now: () => capturedAt,
+    }).inspect(request());
+
+    expect(result.status).toBe("inspected");
+    expect(result.blockers).toHaveLength(0);
+    expect(result.captcha).toMatchObject({ state: "infrastructure_present", markerCount: 5, visibleMarkerCount: 0 });
+    expect(result.evidence).toContain("captcha-state:infrastructure_present");
+  });
+
+  it.each([
+    ["active_challenge", "active_challenge"],
+    ["uncertain", "uncertain"],
+  ] as const)("preserves the human gate for %s CAPTCHA evidence", async (state, expectedState) => {
+    const session = new FakeSession([new FakeField({ id: "email", label: "Email", type: "email", required: true })]);
+    session.captchaDiagnostics = {
+      state,
+      markerCount: 1,
+      visibleMarkerCount: state === "active_challenge" ? 1 : 1,
+      challengeIframeCount: state === "active_challenge" ? 1 : 0,
+      visibleChallengeIframeCount: state === "active_challenge" ? 1 : 0,
+      evidenceCategory: state === "active_challenge" ? "visible_challenge_iframe" : "visible_marker_ambiguous",
+    };
+    const result = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      now: () => capturedAt,
+    }).inspect(request());
+
+    expect(result.status).toBe("needs_input");
+    expect(result.blockers[0]?.kind).toBe("captcha");
+    expect(result.captcha?.state).toBe(expectedState);
+  });
+
   it("records a typed browser-launch diagnostic without leaking sensitive error text", async () => {
     const failure = new BrowserExecutionDiagnosticError({
       stage: "browser_launch",
