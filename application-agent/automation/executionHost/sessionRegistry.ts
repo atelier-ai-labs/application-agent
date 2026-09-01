@@ -3,8 +3,10 @@ import type {
   ApplicationExecutionRequest,
   ApplicationExecutor,
   ApplicationExecutorResult,
+  BrowserExecutionTelemetry,
   ExecutionInspection,
 } from "../../src/domain/executor";
+import { executionFailureReason, monotonicNow } from "../../src/domain/executionTrace";
 import type {
   ExecutionHostRequest,
   ExecutionHostResult,
@@ -49,6 +51,7 @@ interface ExecutionSession {
   timer?: ReturnType<typeof setTimeout>;
   running: boolean;
   terminal: boolean;
+  attempt: number;
 }
 
 const ACTIVE_STATUSES: ReadonlySet<ExecutionHostStatus> = new Set([
@@ -198,9 +201,11 @@ export class ExecutionSessionRegistry {
         status: "starting",
         startedAt,
         updatedAt: startedAt,
+        attempt: 1,
       },
       running: false,
       terminal: false,
+      attempt: 1,
     };
     this.sessions.set(id, session);
     this.touch(session);
@@ -236,6 +241,12 @@ export class ExecutionSessionRegistry {
       }
       session.request = replacement;
     }
+    session.attempt += 1;
+    session.snapshot = {
+      ...session.snapshot,
+      attempt: session.attempt,
+      retryReasonCode: "human_gate",
+    };
     this.update(session, "resuming");
     void this.run(session, true);
     return this.snapshot(session);
@@ -246,6 +257,8 @@ export class ExecutionSessionRegistry {
     if (!session) throw new ExecutionHostRegistryError("Execution session was not found.", "not_found");
     if (session.terminal) return this.snapshot(session);
     session.terminal = true;
+    this.addTelemetry(session, { cancellationCount: 1 });
+    session.snapshot = { ...session.snapshot, failureReasonCode: "cancelled" };
     this.clearTimer(session);
     await this.closeExecutor(session);
     this.update(session, "cancelled", "Local browser execution was cancelled; no application was submitted.");
@@ -328,6 +341,7 @@ export class ExecutionSessionRegistry {
   private async expire(session: ExecutionSession): Promise<void> {
     if (session.terminal || !ACTIVE_STATUSES.has(session.snapshot.status)) return;
     session.terminal = true;
+    session.snapshot = { ...session.snapshot, failureReasonCode: "timeout" };
     await this.closeExecutor(session);
     this.update(session, "failed", "The local browser execution session timed out; no application was submitted.");
     this.log(session, "failed", "session_timeout");
@@ -344,6 +358,7 @@ export class ExecutionSessionRegistry {
   private async run(session: ExecutionSession, resuming: boolean): Promise<void> {
     if (session.terminal || session.running) return;
     session.running = true;
+    const browserPreparationStartedAt = monotonicNow();
     try {
       const request = () => requestForHost(session.request, this.now());
       if (this.executor.supports && !this.executor.supports(request())) {
@@ -356,8 +371,18 @@ export class ExecutionSessionRegistry {
 
       this.update(session, resuming ? "resuming" : "inspecting");
       if (this.executor.inspect) {
-        const inspection = await this.executor.inspect(request());
-        if (session.terminal) return;
+        const inspectionStartedAt = monotonicNow();
+        let inspection: ExecutionInspection;
+        try {
+          inspection = await this.executor.inspect(request());
+        } finally {
+          this.addTelemetry(session, { preflightInspectionDurationMs: monotonicNow() - inspectionStartedAt });
+        }
+        if (session.terminal) {
+          this.addTelemetry(session, { lateCompletionCount: 1 });
+          return;
+        }
+        this.addTelemetry(session, { domInspectionCount: inspection.domInspectionCount ?? 0 });
         session.snapshot = {
           ...session.snapshot,
           inspection: clone(inspection),
@@ -372,8 +397,16 @@ export class ExecutionSessionRegistry {
 
       if (session.terminal) return;
       this.update(session, "executing");
-      const result = await this.executor.execute(request());
-      if (session.terminal) return;
+      let result: ApplicationExecutorResult;
+      result = await this.executor.execute(request());
+      if (session.terminal) {
+        this.addTelemetry(session, { lateCompletionCount: 1 });
+        return;
+      }
+      this.addTelemetry(session, {
+        executorInspectionDurationMs: result.state === "submitted" ? undefined : result.inspection?.durationMs,
+        domInspectionCount: result.state === "submitted" ? 0 : result.inspection?.domInspectionCount ?? 0,
+      });
       if (result.state === "submitted") {
         // This is a defense-in-depth check. The production Lever executor is
         // preparation-only, and this host never forwards submission proof.
@@ -395,6 +428,7 @@ export class ExecutionSessionRegistry {
         });
       }
     } finally {
+      this.addTelemetry(session, { browserPreparationDurationMs: monotonicNow() - browserPreparationStartedAt });
       session.running = false;
     }
   }
@@ -405,6 +439,11 @@ export class ExecutionSessionRegistry {
     session.snapshot = {
       ...session.snapshot,
       status,
+      failureReasonCode: result.state === "requires_human"
+        ? "human_gate"
+        : result.state === "unsupported"
+          ? "validation_error"
+          : result.state === "failed" ? executionFailureReason(result.reason) : undefined,
       ...(result.inspection ? { inspection: clone(result.inspection) } : {}),
       result: clone(result),
       updatedAt: this.now(),
@@ -419,5 +458,26 @@ export class ExecutionSessionRegistry {
       this.touch(session);
       this.log(session, "status");
     }
+  }
+
+  private addTelemetry(session: ExecutionSession, next: BrowserExecutionTelemetry): void {
+    const current = session.snapshot.telemetry;
+    const sum = (left: number | undefined, right: number | undefined): number | undefined =>
+      left === undefined && right === undefined ? undefined : (left ?? 0) + (right ?? 0);
+    session.snapshot = {
+      ...session.snapshot,
+      telemetry: {
+        ...(sum(current?.preflightInspectionDurationMs, next.preflightInspectionDurationMs) !== undefined
+          ? { preflightInspectionDurationMs: sum(current?.preflightInspectionDurationMs, next.preflightInspectionDurationMs) } : {}),
+        ...(sum(current?.executorInspectionDurationMs, next.executorInspectionDurationMs) !== undefined
+          ? { executorInspectionDurationMs: sum(current?.executorInspectionDurationMs, next.executorInspectionDurationMs) } : {}),
+        ...(sum(current?.browserPreparationDurationMs, next.browserPreparationDurationMs) !== undefined
+          ? { browserPreparationDurationMs: sum(current?.browserPreparationDurationMs, next.browserPreparationDurationMs) } : {}),
+        ...(sum(current?.domInspectionCount, next.domInspectionCount) !== undefined
+          ? { domInspectionCount: sum(current?.domInspectionCount, next.domInspectionCount) } : {}),
+        ...(sum(current?.cancellationCount, next.cancellationCount) !== undefined
+          ? { cancellationCount: sum(current?.cancellationCount, next.cancellationCount) } : {}),
+      },
+    };
   }
 }

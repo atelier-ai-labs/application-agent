@@ -3,6 +3,8 @@ import {
   DEFAULT_ANSWER_POLICIES,
   ApplicationService,
   DeterministicModelClient,
+  EXECUTION_RUN_HISTORY_LIMIT,
+  ExecutionTraceBuilder,
   InMemoryApplicationRepository,
   InMemoryCareerRepository,
   InMemoryJobTracker,
@@ -36,7 +38,7 @@ import {
 } from "../application-agent/src";
 import { applyHardFilters, verifyPreparedApplication } from "../application-agent/src/domain/policies";
 import { CareerAgentService } from "../application-agent/src/service/careerAgentService";
-import { LocalStorageCareerRepository } from "../application-agent/src/persistence/careerRepository";
+import { CAMPAIGNS_STORAGE_KEY, LocalStorageCareerRepository } from "../application-agent/src/persistence/careerRepository";
 
 const capturedAt = "2026-08-30T12:00:00.000Z";
 
@@ -578,6 +580,7 @@ describe("Autonomous Career Agent deterministic acceptance workflow", () => {
     const waitingBlocker = waiting.blockers.find((blocker) => blocker.status === "open")!;
     const resumed = await service.resolveCareerBlocker(campaign.id, waiting.id, waitingBlocker.id, "authenticated test session");
     expect(resumed.status).toBe("applied");
+    expect(resumed.applicationResumeAttempt).toBe(1);
     expect(resumeCalls.count).toBe(2);
     expect(tracker.listUpdates()).toHaveLength(2);
     expect(tracker.listUpdates()[0].notes).toContain("SIMULATED");
@@ -586,6 +589,11 @@ describe("Autonomous Career Agent deterministic acceptance workflow", () => {
     expect(secondRun.discovered).toBe(0);
     expect(secondRun.alreadyApplied).toBe(2);
     expect(secondRun.alreadySeen).toBe(1);
+    expect(secondRun.trace?.retryCount).toBe(0);
+    expect(secondRun.trace?.nodes.some((node) => node.attempt > 1)).toBe(false);
+    expect(secondRun.trace?.humanWaitDurationMs).toBeGreaterThan(0);
+    expect(secondRun.trace?.summary?.humanWaitDurationMs).toBe(secondRun.trace?.humanWaitDurationMs);
+    expect(secondRun.trace?.summary?.totalDurationMs).toBe(secondRun.trace?.durationMs);
     expect(applicationRepository.listApplications()).toHaveLength(2);
     expect(service.listJobs(campaign.id).filter((job) => job.status === "applied")).toHaveLength(2);
     expect(service.listEvents(campaign.id).some((event) => event.type === "application.applied")).toBe(true);
@@ -624,6 +632,27 @@ describe("Career repository persistence", () => {
     expect(second.getCampaign(campaign.id)).toEqual(campaign);
     expect(second.listEvents(campaign.id)).toEqual(expect.arrayContaining([expect.objectContaining({ id: event.id })]));
     expect(isCampaign(second.getCampaign(campaign.id))).toBe(true);
+
+    const traces = Array.from({ length: EXECUTION_RUN_HISTORY_LIMIT + 2 }, (_, index) =>
+      new ExecutionTraceBuilder(`history-${index}`, "campaign_run", () => capturedAt, capturedAt).finish(capturedAt));
+    first.saveCampaign({
+      ...campaign,
+      lastRunTrace: traces[traces.length - 1],
+      runHistory: traces,
+    });
+    expect(second.getCampaign(campaign.id)?.runHistory?.map((trace) => trace.runId)).toEqual([
+      "history-2",
+      "history-3",
+      "history-4",
+      "history-5",
+      "history-6",
+    ]);
+
+    const rawCampaigns = JSON.parse(storage.getItem(CAMPAIGNS_STORAGE_KEY) ?? "[]") as Array<Record<string, unknown>>;
+    rawCampaigns[0].runHistory = [traces[0], { malformed: true }, traces[1]];
+    storage.setItem(CAMPAIGNS_STORAGE_KEY, JSON.stringify(rawCampaigns));
+    expect(second.getCampaign(campaign.id)?.runHistory?.map((trace) => trace.runId)).toEqual(["history-0", "history-1"]);
+
     clearCareerRepositoryStorage(storage);
     expect(second.listCampaigns()).toHaveLength(0);
   });

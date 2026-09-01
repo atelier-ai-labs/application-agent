@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ExecutionTraceBuilder,
+  createExecutionNodeTrace,
   InMemoryApplicationRepository,
   InMemoryCareerRepository,
   InMemoryJobTracker,
@@ -13,6 +14,7 @@ import {
   isCampaign,
   isExecutionRunTrace,
   mapWithConcurrencyLimit,
+  normalizeJobPosting,
   type Campaign,
   type DiscoveredJobReference,
   type JobSource,
@@ -141,6 +143,7 @@ describe("execution graph audit seams", () => {
     const result = await run;
     expect(result.jobs.map((job) => job.sourceId)).toEqual(["source-a", "source-b", "source-c"]);
     expect(result.executionNodes?.map((node) => node.nodeId)).toEqual([
+      "scout.source-fanout",
       "scout.source.source-a",
       "scout.source.source-b",
       "scout.source.source-c",
@@ -170,7 +173,7 @@ describe("execution graph audit seams", () => {
     const result = await new JobScout(sources, () => now).discover(campaign(["partial", "failed", "skipped"]));
     expect(result.jobs).toHaveLength(1);
     expect(result.failures.map((failure) => failure.sourceId)).toEqual(["partial", "partial", "failed", "skipped"]);
-    expect(result.executionNodes?.map((node) => node.outcome)).toEqual(["partial", "failed", "skipped", "partial"]);
+    expect(result.executionNodes?.map((node) => node.outcome)).toEqual(["partial", "partial", "failed", "skipped", "partial"]);
   });
 
   it("bounds independent reference resolution while preserving resolver order", async () => {
@@ -293,5 +296,104 @@ describe("execution graph audit seams", () => {
       cacheHit: true,
     });
     expect(isExecutionRunTrace(result)).toBe(true);
+  });
+
+  it("derives nested self time without treating inclusive parent and child time as additive", () => {
+    const trace = new ExecutionTraceBuilder("nested-run", "campaign_run", () => now, now);
+    trace.add(createExecutionNodeTrace({
+      nodeId: "scout.fetch-and-reduce",
+      nodeKind: "external_io",
+      startedAt: "2026-08-31T12:00:00.000Z",
+      completedAt: "2026-08-31T12:00:03.000Z",
+      durationMs: 3_000,
+      outcome: "success",
+      metadata: { stage: "scout.total" },
+    }));
+    trace.add(createExecutionNodeTrace({
+      nodeId: "scout.source-a",
+      nodeKind: "external_io",
+      startedAt: "2026-08-31T12:00:00.000Z",
+      completedAt: "2026-08-31T12:00:01.000Z",
+      durationMs: 1_000,
+      outcome: "success",
+      parentNodeId: "scout.fetch-and-reduce",
+      metadata: { stage: "scout.source.source-a" },
+    }));
+    trace.add(createExecutionNodeTrace({
+      nodeId: "scout.reduce",
+      nodeKind: "deterministic",
+      startedAt: "2026-08-31T12:00:00.500Z",
+      completedAt: "2026-08-31T12:00:02.000Z",
+      durationMs: 1_500,
+      outcome: "success",
+      parentNodeId: "scout.fetch-and-reduce",
+      metadata: { stage: "scout.reduce" },
+    }));
+
+    const result = trace.finish(now);
+    expect(result.nodes.find((node) => node.nodeId === "scout.fetch-and-reduce")?.exclusiveDurationMs).toBe(1_000);
+    expect(result.summary?.stageSummaries.find((stage) => stage.stage === "scout.total")).toMatchObject({
+      inclusiveDurationMs: 3_000,
+      exclusiveDurationMs: 1_000,
+      wallClockDurationMs: 3_000,
+    });
+    expect(result.summary?.stageSummaries.find((stage) => stage.stage === "scout.source.source-a")?.wallClockDurationMs).toBe(1_000);
+  });
+
+  it("records typed safe failures, external counters, attention categories, and no fake model usage", async () => {
+    const trace = new ExecutionTraceBuilder("safe-run", "campaign_run", () => now, now);
+    await expect(trace.measure(
+      "provider.request",
+      "external_io",
+      async () => { throw new Error("provider failed for private.person@example.test"); },
+      { externalMetricsOnError: { requestCount: 1, failureCount: 1 }, metadata: { stage: "scout.source.fixture" } },
+    )).rejects.toThrow("private.person@example.test");
+    trace.setHumanAttentionEvents(2, { captcha: 1, manual_submission: 1 });
+    trace.setHumanWaitDuration(1_234);
+    const result = trace.finish(now);
+    expect(result.nodes[0]).toMatchObject({
+      failureReason: "provider_error",
+      externalRequestCount: 1,
+      externalFailureCount: 1,
+    });
+    expect(JSON.stringify(result)).not.toContain("private.person@example.test");
+    expect(result.summary).toMatchObject({
+      humanWaitDurationMs: 1_234,
+      externalRequestCount: 1,
+      failureCount: 1,
+      attentionByCategory: { captcha: 1, manual_submission: 1 },
+    });
+    expect(JSON.stringify(result)).not.toContain("inputTokens");
+    expect(JSON.stringify(result)).not.toContain("estimatedCost");
+    expect(isExecutionRunTrace(result)).toBe(true);
+  });
+
+  it("records resume, answer, and blocker-evaluation preparation boundaries", async () => {
+    const repository = new InMemoryApplicationRepository();
+    const applicationService = createApplicationService(exampleCandidateProfile, repository);
+    const job = normalizeJobPosting({
+      companyHint: "Trace Company",
+      titleHint: "Platform Engineer",
+      sourceUrl: "https://jobs.example.invalid/trace-preparation",
+      rawText: "Trace Company\nPlatform Engineer\nLocation: Remote\n\nBuild platform systems.\n\nRequired qualifications\n- Platform",
+    }, now);
+    const created = await applicationService.createApplicationFromJob(job, true);
+    const fit = await applicationService.assessJob(job);
+    const evaluated = await applicationService.evaluateApplication(created.id, fit);
+    const trace = new ExecutionTraceBuilder("preparation-run", "campaign_run", () => now, now);
+    await trace.measure("preparation.total.app", "judgment", () => applicationService.prepareApplication(evaluated.id, {
+      trace,
+      parentNodeId: "preparation.total.app",
+    }), {
+      metadata: { stage: "preparation.total" },
+    });
+    const result = trace.finish(now);
+    expect(result.nodes.map((node) => node.metadata?.stage)).toEqual(expect.arrayContaining([
+      "preparation.total",
+      "preparation.resume",
+      "preparation.answers",
+      "preparation.blocker-evaluation",
+    ]));
+    expect(result.nodes.find((node) => node.metadata?.stage === "preparation.resume")?.parentNodeId).toBe("preparation.total.app");
   });
 });

@@ -16,6 +16,7 @@ import {
   type JobSourceResponse,
 } from "./scout";
 import { mapWithConcurrencyLimit } from "./concurrency";
+import { createExecutionNodeTrace, monotonicNow } from "./executionTrace";
 
 export type ReferenceResolutionStatus = "resolved" | "known_unsupported" | "fallback_required" | "invalid";
 
@@ -304,9 +305,29 @@ export class JobReferenceSource implements JobSource {
       uniqueReferences.push(reference);
     }
 
+    const resolutionStartedAt = now;
+    const resolutionMonotonicStartedAt = monotonicNow();
     const resolutions = await this.resolver.resolveMany(uniqueReferences, criteria, {
       now,
       maxResults,
+    });
+    const resolutionNode = createExecutionNodeTrace({
+      nodeId: `scout.reference-resolution.${this.id}`,
+      nodeKind: "external_io",
+      startedAt: resolutionStartedAt,
+      completedAt: new Date().toISOString(),
+      durationMs: monotonicNow() - resolutionMonotonicStartedAt,
+      outcome: resolutions.some((resolution) => resolution.sourceFailure)
+        ? resolutions.some((resolution) => resolution.status === "resolved") ? "partial" : "failed"
+        : "success",
+      parentNodeId: `scout.source.${this.id}`,
+      inputCount: uniqueReferences.length,
+      outputCount: resolutions.filter((resolution) => resolution.status === "resolved").length,
+      metadata: {
+        stage: "scout.reference-resolution",
+        sourceId: this.id,
+        referenceCount: String(uniqueReferences.length),
+      },
     });
 
     const leverSites = new Set<string>();
@@ -376,6 +397,7 @@ export class JobReferenceSource implements JobSource {
       ...(normalized.reason ? { reason: normalized.reason } : {}),
       ...(normalized.cached !== undefined ? { cached: normalized.cached } : {}),
       ...(normalized.sourceFetchedAt ? { sourceFetchedAt: normalized.sourceFetchedAt } : {}),
+      executionNodes: [resolutionNode],
       referenceMetrics: metrics,
     };
   }

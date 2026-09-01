@@ -19,7 +19,12 @@ import type {
   TrackerSyncState,
 } from "../domain/campaignTypes";
 import type { AnswerValue } from "../domain/types";
-import { isExecutionRunTrace } from "../domain/executionTrace";
+import {
+  EXECUTION_RUN_HISTORY_LIMIT,
+  isExecutionFailureReason,
+  isHumanAttentionCategory,
+  isExecutionRunTrace,
+} from "../domain/executionTrace";
 import {
   isFitAssessment,
   isJobPosting,
@@ -59,6 +64,21 @@ function loadArray(storage: KeyValueStorage, key: string): unknown[] {
   }
 }
 
+function boundedHistory(value: unknown): unknown {
+  if (!isRecord(value) || !Array.isArray(value.runHistory)) return value;
+  return {
+    ...value,
+    // A malformed historical item must not hide an otherwise valid campaign.
+    runHistory: value.runHistory.filter(isExecutionRunTrace).slice(-EXECUTION_RUN_HISTORY_LIMIT),
+  };
+}
+
+function boundedCampaign(campaign: Campaign): Campaign {
+  return campaign.runHistory
+    ? { ...campaign, runHistory: campaign.runHistory.slice(-EXECUTION_RUN_HISTORY_LIMIT) }
+    : campaign;
+}
+
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -96,6 +116,18 @@ function isPositiveInteger(value: unknown): value is number {
 
 function isNonNegativeInteger(value: unknown): value is number {
   return Number.isInteger(value) && typeof value === "number" && value >= 0;
+}
+
+function isBrowserExecutionTelemetry(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return [
+    "preflightInspectionDurationMs",
+    "executorInspectionDurationMs",
+    "browserPreparationDurationMs",
+    "domInspectionCount",
+    "cancellationCount",
+    "lateCompletionCount",
+  ].every((key) => value[key] === undefined || (typeof value[key] === "number" && Number.isFinite(value[key]) && value[key] >= 0));
 }
 
 function isSearchCriteria(value: unknown): value is SearchCriteria {
@@ -299,6 +331,7 @@ export function isCampaign(value: unknown): value is Campaign {
     isNonNegativeInteger(value.consecutiveSystemicFailures) &&
     (value.lastDiscovery === undefined || isDiscoverySummary(value.lastDiscovery)) &&
     (value.lastRunTrace === undefined || isExecutionRunTrace(value.lastRunTrace)) &&
+    (value.runHistory === undefined || (Array.isArray(value.runHistory) && value.runHistory.every(isExecutionRunTrace))) &&
     isTimestamp(value.createdAt) &&
     isTimestamp(value.updatedAt)
   );
@@ -355,6 +388,10 @@ function isCareerExecutionState(value: unknown): boolean {
     isStringArray(value.unresolvedFields) &&
     isOptionalNonEmptyString(value.resumeUsed) &&
     isStringArray(value.evidence) &&
+    (value.attempt === undefined || isPositiveInteger(value.attempt)) &&
+    (value.retryReasonCode === undefined || isExecutionFailureReason(value.retryReasonCode)) &&
+    (value.failureReasonCode === undefined || isExecutionFailureReason(value.failureReasonCode)) &&
+    (value.telemetry === undefined || isBrowserExecutionTelemetry(value.telemetry)) &&
     isTimestamp(value.startedAt) &&
     isTimestamp(value.updatedAt)
   );
@@ -364,10 +401,16 @@ function isTrackerSyncState(value: unknown): value is TrackerSyncState {
   if (!isRecord(value)) return false;
   return (
     (value.status === "not_required" || value.status === "pending" || value.status === "synced" || value.status === "failed") &&
+    (value.attempt === undefined || isPositiveInteger(value.attempt)) &&
     (value.attemptedAt === undefined || isTimestamp(value.attemptedAt)) &&
     (value.updatedAt === undefined || isTimestamp(value.updatedAt)) &&
     isOptionalNonEmptyString(value.trackerRecordId) &&
-    isOptionalNonEmptyString(value.failureReason)
+    isOptionalNonEmptyString(value.failureReason) &&
+    (value.durationMs === undefined || (typeof value.durationMs === "number" && Number.isFinite(value.durationMs) && value.durationMs >= 0)) &&
+    (value.requestCount === undefined || isNonNegativeInteger(value.requestCount)) &&
+    (value.successCount === undefined || isNonNegativeInteger(value.successCount)) &&
+    (value.failureCount === undefined || isNonNegativeInteger(value.failureCount)) &&
+    (value.timeoutCount === undefined || isNonNegativeInteger(value.timeoutCount))
   );
 }
 
@@ -390,6 +433,7 @@ export function isCareerJob(value: unknown): value is CareerJob {
     (value.fit === null || isFitAssessment(value.fit)) &&
     isOptionalNonEmptyString(value.applicationId) &&
     isOptionalNonEmptyString(value.applicationStartedAt) &&
+    (value.applicationResumeAttempt === undefined || isPositiveInteger(value.applicationResumeAttempt)) &&
     (value.status === "discovered" || value.status === "rejected" || value.status === "held" || value.status === "pursuing" || value.status === "preparing" || value.status === "needs_input" || value.status === "ready_to_submit" || value.status === "submitted" || value.status === "applied" || value.status === "failed") &&
     isOptionalNonEmptyString(value.decisionReason) &&
     Array.isArray(value.blockers) && value.blockers.every(isCareerBlocker) &&
@@ -453,6 +497,7 @@ export function isCareerEvent(value: unknown): value is CareerEvent {
     isOptionalNonEmptyString(value.applicationId) &&
     isTimestamp(value.occurredAt) &&
     typeof value.attention === "boolean" &&
+    (value.attentionCategory === undefined || isHumanAttentionCategory(value.attentionCategory)) &&
     (value.metadata === undefined || (isRecord(value.metadata) && Object.values(value.metadata).every((item) => typeof item === "string")))
   );
 }
@@ -472,6 +517,7 @@ export class InMemoryCareerRepository implements CareerRepository {
   }
 
   saveCampaign(campaign: Campaign): void {
+    campaign = boundedCampaign(campaign);
     const index = this.campaigns.findIndex((candidate) => candidate.id === campaign.id);
     if (index === -1) this.campaigns.push(clone(campaign));
     else this.campaigns[index] = clone(campaign);
@@ -507,7 +553,7 @@ export class LocalStorageCareerRepository implements CareerRepository {
   constructor(private readonly storage: KeyValueStorage) {}
 
   listCampaigns(): readonly Campaign[] {
-    return loadArray(this.storage, CAMPAIGNS_STORAGE_KEY).filter(isCampaign);
+    return loadArray(this.storage, CAMPAIGNS_STORAGE_KEY).map(boundedHistory).filter(isCampaign);
   }
 
   getCampaign(id: string): Campaign | null {
@@ -515,6 +561,7 @@ export class LocalStorageCareerRepository implements CareerRepository {
   }
 
   saveCampaign(campaign: Campaign): void {
+    campaign = boundedCampaign(campaign);
     const campaigns = [...this.listCampaigns()];
     const index = campaigns.findIndex((candidate) => candidate.id === campaign.id);
     if (index === -1) campaigns.push(clone(campaign));

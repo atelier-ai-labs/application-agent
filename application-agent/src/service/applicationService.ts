@@ -3,6 +3,7 @@ import {
   prepareApplicationAnswers,
 } from "../domain/answers";
 import { createApplicationEvent } from "../domain/events";
+import type { ExecutionTraceBuilder } from "../domain/executionTrace";
 import { assertTransition } from "../domain/lifecycle";
 import {
   deterministicModelClient,
@@ -29,6 +30,12 @@ let fallbackId = 0;
 export interface ApplicationServiceOptions {
   now?: () => string;
   createId?: (prefix: string) => string;
+}
+
+/** Narrow opt-in recorder used only when Career Agent owns a run trace. */
+export interface ApplicationInstrumentation {
+  trace: ExecutionTraceBuilder;
+  parentNodeId?: string;
 }
 
 function defaultCreateId(prefix: string): string {
@@ -149,12 +156,13 @@ export class ApplicationService {
     return evaluated;
   }
 
-  async prepareApplication(applicationId: string): Promise<Application> {
+  async prepareApplication(applicationId: string, instrumentation?: ApplicationInstrumentation): Promise<Application> {
     const application = this.getApplication(applicationId);
     assertTransition(application.status, "preparing");
     if (!application.fit) {
       throw new Error("Application must be evaluated before preparation.");
     }
+    const fit = application.fit;
 
     const preparing: Application = {
       ...application,
@@ -165,20 +173,58 @@ export class ApplicationService {
 
     try {
       const generatedAt = this.now();
-      const resume = await this.model.draftResume(
+      const resumeOperation = () => this.model.draftResume(
         application.job,
         this.profile,
-        application.fit,
+        fit,
         generatedAt,
       );
-      const answers = await prepareApplicationAnswers(
+      const resume = instrumentation
+        ? await instrumentation.trace.measure(
+          `preparation.resume.${applicationId}`,
+          "judgment",
+          resumeOperation,
+          {
+            parentNodeId: instrumentation.parentNodeId,
+            inputCount: 1,
+            outputCount: () => 1,
+            metadata: { stage: "preparation.resume", applicationId },
+          },
+        )
+        : await resumeOperation();
+      const answersOperation = () => prepareApplicationAnswers(
         application.job,
         this.profile,
-        application.fit,
+        fit,
         resume,
         (context) => this.model.draftAnswer(context),
       );
-      const blockers = blockersFromAnswers(answers);
+      const answers = instrumentation
+        ? await instrumentation.trace.measure(
+          `preparation.answers.${applicationId}`,
+          "judgment",
+          answersOperation,
+          {
+            parentNodeId: instrumentation.parentNodeId,
+            inputCount: 1,
+            outputCount: (value) => value.length,
+            metadata: { stage: "preparation.answers", applicationId },
+          },
+        )
+        : await answersOperation();
+      const blockers = instrumentation
+        ? instrumentation.trace.measureSync(
+          `preparation.blocker-evaluation.${applicationId}`,
+          "deterministic",
+          () => blockersFromAnswers(answers),
+          {
+            parentNodeId: instrumentation.parentNodeId,
+            inputCount: answers.length,
+            outputCount: (value) => value.length,
+            metadata: { stage: "preparation.blocker-evaluation", applicationId },
+          },
+        )
+        : blockersFromAnswers(answers);
       const status: ApplicationStatus = blockers.length > 0
         ? "needs_input"
         : "ready_for_review";

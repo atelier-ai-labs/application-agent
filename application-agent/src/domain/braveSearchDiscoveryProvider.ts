@@ -488,6 +488,6 @@ export class BraveSearchDiscoveryProvider implements JobDiscoveryProvider {
         expiresAt: nowMs + this.cacheTtlMs,
       });
     }
-    return { ...batch, sourceFetchedAt: discoveredAt };
+    return { ...batch, cached: false, sourceFetchedAt: discoveredAt };
   }
 }

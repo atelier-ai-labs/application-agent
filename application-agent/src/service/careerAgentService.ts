@@ -8,8 +8,14 @@ import {
 } from "../domain/policies";
 import { assertCampaignTransition } from "../domain/campaignLifecycle";
 import { createApplicationService, type ApplicationService } from "./applicationService";
-import { isAttentionWorthyEvent } from "../domain/notifications";
-import { ExecutionTraceBuilder } from "../domain/executionTrace";
+import { attentionCategoryForEvent, isAttentionWorthyEvent } from "../domain/notifications";
+import {
+  EXECUTION_RUN_HISTORY_LIMIT,
+  ExecutionTraceBuilder,
+  executionFailureReason,
+  monotonicNow,
+  type HumanAttentionCategory,
+} from "../domain/executionTrace";
 import type {
   AnswerValue,
   Application,
@@ -99,7 +105,9 @@ interface ProcessOutcome {
   prepared?: boolean;
   rejected?: boolean;
   held?: boolean;
+  blocked?: boolean;
   failure?: boolean;
+  resumeAttempt?: number;
 }
 
 interface PreparedExecutionOverride {
@@ -325,6 +333,26 @@ function isCareerBlockerDraft(value: unknown): value is CareerBlockerDraft {
     (candidate.resumeAfterHuman === undefined || typeof candidate.resumeAfterHuman === "boolean");
 }
 
+function humanAttentionCategoryForBlocker(
+  blocker: { kind?: CareerBlockerDraft["kind"]; field?: string } | undefined,
+): HumanAttentionCategory {
+  const kind = blocker?.kind ?? blocker?.field?.toLowerCase();
+  switch (kind) {
+    case "captcha": return "captcha";
+    case "external_login": return "login";
+    case "external_verification": return "mfa";
+    case "subjective_answer": return "subjective_answer";
+    case "resume_missing":
+    case "required_file_missing": return "resume_artifact_missing";
+    case "unknown_form_field":
+    case "unsupported_widget": return "unsupported_field";
+    case "submission_approval": return "manual_submission";
+    case "why_company":
+    case "cover_letter": return "subjective_answer";
+    default: return "candidate_fact_missing";
+  }
+}
+
 function careerExecutionState(
   inspection: ExecutionInspection,
   status: CareerExecutionState["status"],
@@ -399,6 +427,12 @@ function executionStateFromHostSnapshot(
     unresolvedFields: inspection?.unresolvedFields ?? previous?.unresolvedFields ?? [],
     ...(inspection?.resumeUsed ? { resumeUsed: inspection.resumeUsed } : previous?.resumeUsed ? { resumeUsed: previous.resumeUsed } : {}),
     evidence: [...new Set(evidence)],
+    ...(snapshot.attempt !== undefined ? { attempt: snapshot.attempt } : previous?.attempt !== undefined ? { attempt: previous.attempt } : {}),
+    ...(snapshot.retryReasonCode ? { retryReasonCode: snapshot.retryReasonCode } : previous?.retryReasonCode ? { retryReasonCode: previous.retryReasonCode } : {}),
+    ...(snapshot.failureReasonCode
+      ? { failureReasonCode: snapshot.failureReasonCode }
+      : status === "ready_to_submit" ? {} : previous?.failureReasonCode ? { failureReasonCode: previous.failureReasonCode } : {}),
+    ...(snapshot.telemetry ? { telemetry: snapshot.telemetry } : previous?.telemetry ? { telemetry: previous.telemetry } : {}),
     startedAt: previous?.startedAt ?? snapshot.startedAt,
     updatedAt: snapshot.updatedAt,
   };
@@ -660,7 +694,14 @@ export class CareerAgentService {
       this.now,
       runStartedAt,
     );
-    const finish = (): CampaignRunResult => this.finishRun(campaignId, accumulator, trace, eventBaseline);
+    const previousTraceCompletedAt = campaign.lastRunTrace?.completedAt;
+    const finish = (): CampaignRunResult => this.finishRun(
+      campaignId,
+      accumulator,
+      trace,
+      eventBaseline,
+      previousTraceCompletedAt,
+    );
 
     if (campaign.status !== "active") {
       return finish();
@@ -672,16 +713,28 @@ export class CareerAgentService {
     }
 
     for (const job of this.listJobs(campaignId).filter((candidate) => candidate.status === "needs_input")) {
+      let resumeAttempt = 1;
+      if (job.applicationResumeAttempt !== undefined && job.applicationId) {
+        try {
+          const application = this.applicationService.getApplication(job.applicationId);
+          if (application.status === "ready_for_review") resumeAttempt = job.applicationResumeAttempt + 1;
+        } catch {
+          // The measured resume node will record the packet lookup failure.
+        }
+      }
       const outcome = await trace.measure(
         `application.resume.${job.id}`,
         "human_gate",
-        () => this.resumeBlockedJob(campaign, job),
+        () => this.resumeBlockedJob(campaign, job, trace, `application.resume.${job.id}`),
         {
           inputCount: 1,
           outputCount: () => 1,
           outcome: (result) => result.failure ? "failed" : result.careerJob.status === "needs_input" ? "blocked" : "success",
           humanAttentionRequired: (result) => result.careerJob.status === "needs_input",
-          metadata: { jobId: job.id },
+          humanAttentionCategory: (result) => result.careerJob.status === "needs_input" ? "candidate_fact_missing" : undefined,
+          attempt: resumeAttempt,
+          ...(resumeAttempt > 1 ? { retryReasonCode: "blocker" as const, previousOutcome: "blocked" as const } : {}),
+          metadata: { jobId: job.id, stage: "preparation.resume" },
         },
       );
       if (outcome.applied) accumulator.applied += 1;
@@ -702,7 +755,7 @@ export class CareerAgentService {
         inputCount: campaign.searchSources.length,
         outputCount: (result) => result.jobs.length,
         outcome: (result) => result.failures.length === 0 ? "success" : result.jobs.length > 0 ? "partial" : "failed",
-        metadata: { sourceCount: String(campaign.searchSources.length) },
+        metadata: { sourceCount: String(campaign.searchSources.length), stage: "scout.total" },
       },
     );
     trace.addMany(scoutResult.executionNodes ?? []);
@@ -717,7 +770,7 @@ export class CareerAgentService {
       {
         inputCount: scoutResult.jobs.length,
         outputCount: (count) => count,
-        metadata: { historicalJobCount: String(existingBeforeDiscovery.length) },
+        metadata: { historicalJobCount: String(existingBeforeDiscovery.length), stage: "scout.history-dedupe" },
       },
     );
     const allSourcesNotConfigured = scoutResult.sourceSummaries.length > 0 &&
@@ -823,12 +876,12 @@ export class CareerAgentService {
           const outcome = await trace.measure(
             `application.resume-cap.${enriched.id}`,
             "deterministic",
-            () => this.resumeCapHeldJob(campaign, enriched),
+            () => this.resumeCapHeldJob(campaign, enriched, trace),
             {
               inputCount: 1,
               outputCount: () => 1,
               outcome: (result) => result.failure ? "failed" : "success",
-              metadata: { jobId: enriched.id },
+              metadata: { jobId: enriched.id, stage: "preparation.total" },
             },
           );
           if (outcome.applied) accumulator.applied += 1;
@@ -846,15 +899,16 @@ export class CareerAgentService {
       const outcome = await trace.measure(
         `job.process.${accumulator.discovered}`,
         "judgment",
-        () => this.processScoutedJob(campaign, scouted),
+        () => this.processScoutedJob(campaign, scouted, trace, `job.process.${accumulator.discovered}`),
         {
           inputCount: 1,
           outputCount: () => 1,
-          outcome: (result) => result.failure ? "failed" : result.held ? "blocked" : "success",
-          humanAttentionRequired: (result) => Boolean(result.held || result.failure),
+          outcome: (result) => result.failure ? "failed" : result.held || result.blocked ? "blocked" : "success",
+          humanAttentionRequired: (result) => Boolean(result.held || result.blocked || result.failure),
           metadata: {
             sourceId: scouted.sourceId,
             actionability: scouted.actionability,
+            stage: "job.total",
           },
         },
       );
@@ -1029,6 +1083,7 @@ export class CareerAgentService {
         ...careerEventMetadata(marked),
         executionId: snapshot.id,
         mode: "real_local",
+        ...(snapshot.attempt !== undefined ? { attempt: String(snapshot.attempt) } : {}),
       });
       this.appendEvent(campaign.id, "application.execution_started", {
         ...careerEventMetadata(marked),
@@ -1040,6 +1095,8 @@ export class CareerAgentService {
       this.appendEvent(campaign.id, "application.execution_resumed", {
         ...careerEventMetadata(marked),
         executionId: snapshot.id,
+        ...(snapshot.attempt !== undefined ? { attempt: String(snapshot.attempt) } : {}),
+        ...browserTelemetryMetadata(snapshot.telemetry),
       });
     }
 
@@ -1067,10 +1124,11 @@ export class CareerAgentService {
       this.appendEvent(campaign.id, "application.form_inspected", {
         ...careerEventMetadata(marked),
         fieldsDetected: String(inspection.fields.length),
-        fieldsFilled: String(inspection.fieldsFilled.length),
-        unresolvedFields: String(inspection.unresolvedFields.length),
-        executionHost: "real_local",
-      });
+          fieldsFilled: String(inspection.fieldsFilled.length),
+          unresolvedFields: String(inspection.unresolvedFields.length),
+          executionHost: "real_local",
+          ...browserTelemetryMetadata(snapshot.telemetry),
+        });
     }
     return marked;
   }
@@ -1113,6 +1171,7 @@ export class CareerAgentService {
         mode: "real_local",
         hostExecutionId: executionId,
         status: "cancelled",
+        failureReasonCode: "cancelled",
         evidence: [...(job.execution?.evidence ?? []), "execution:cancelled", "submit:not-clicked", "submission:manual-only"],
         updatedAt: this.now(),
       },
@@ -1145,6 +1204,7 @@ export class CareerAgentService {
         mode: "real_local",
         hostExecutionId: executionId,
         status: "failed",
+        failureReasonCode: "browser_interrupted",
         evidence: [...new Set([...(job.execution?.evidence ?? []), "execution-host:unavailable", "submit:not-clicked", "submission:manual-only"])],
         updatedAt: this.now(),
       },
@@ -1185,18 +1245,29 @@ export class CareerAgentService {
     accumulator: RunAccumulator,
     trace?: ExecutionTraceBuilder,
     eventBaseline: ReadonlySet<string> = new Set(),
+    previousTraceCompletedAt?: string,
   ): CampaignRunResult {
     const runTrace = trace
       ? (() => {
-        const attentionEvents = this.listEvents(campaignId)
-          .filter((event) => !eventBaseline.has(event.id) && event.attention)
-          .length;
-        trace.setHumanAttentionEvents(attentionEvents);
+        const newAttentionEvents = this.listEvents(campaignId)
+          .filter((event) => !eventBaseline.has(event.id) && event.attention);
+        const attentionByCategory = newAttentionEvents.reduce<Partial<Record<HumanAttentionCategory, number>>>((counts, event) => {
+          const category = event.attentionCategory ?? attentionCategoryForEvent(event.type, event.metadata);
+          if (category) counts[category] = (counts[category] ?? 0) + 1;
+          return counts;
+        }, {});
+        trace.setHumanAttentionEvents(newAttentionEvents.length, attentionByCategory);
+        trace.setHumanWaitDuration(humanWaitDurationSince(
+          this.listJobs(campaignId),
+          previousTraceCompletedAt ?? trace.startedAt,
+          this.now(),
+        ));
         const completed = trace.finish(this.now());
         const campaign = this.getCampaign(campaignId);
         this.careerRepository.saveCampaign({
           ...campaign,
           lastRunTrace: completed,
+          runHistory: [...(campaign.runHistory ?? []), completed].slice(-EXECUTION_RUN_HISTORY_LIMIT),
           updatedAt: this.now(),
         });
         return completed;
@@ -1279,7 +1350,12 @@ export class CareerAgentService {
     return merged;
   }
 
-  private async processScoutedJob(campaign: Campaign, scouted: ScoutedJob): Promise<ProcessOutcome> {
+  private async processScoutedJob(
+    campaign: Campaign,
+    scouted: ScoutedJob,
+    trace?: ExecutionTraceBuilder,
+    parentNodeId?: string,
+  ): Promise<ProcessOutcome> {
     const createdAt = this.now();
     let careerJob: CareerJob = {
       id: this.createId("career-job"),
@@ -1301,10 +1377,30 @@ export class CareerAgentService {
       createdAt,
       updatedAt: createdAt,
     };
-    this.careerRepository.saveJob(careerJob);
-    this.appendEvent(campaign.id, "job.discovered", careerEventMetadata(careerJob));
+    const persistDiscovered = () => {
+      this.careerRepository.saveJob(careerJob);
+      this.appendEvent(campaign.id, "job.discovered", careerEventMetadata(careerJob));
+      return careerJob;
+    };
+    careerJob = trace
+      ? trace.measureSync(`job.persist-discovered.${careerJob.id}`, "persistence", persistDiscovered, {
+        parentNodeId,
+        inputCount: 1,
+        outputCount: () => 1,
+        metadata: { stage: "job.persist-discovered", jobId: careerJob.id },
+      })
+      : persistDiscovered();
 
-    const hardFilter = applyHardFilters(careerJob.job, campaign.searchCriteria);
+    const hardFilter = trace
+      ? trace.measureSync(`job.hard-filter.${careerJob.id}`, "deterministic", () => applyHardFilters(careerJob.job, campaign.searchCriteria), {
+        parentNodeId,
+        inputCount: 1,
+        outputCount: () => 1,
+        outcome: (result) => result.decision === "pass" ? "success" : "blocked",
+        failureReason: (result) => result.decision === "pass" ? undefined : "policy_rejected",
+        metadata: { stage: "job.hard-filter", jobId: careerJob.id },
+      })
+      : applyHardFilters(careerJob.job, campaign.searchCriteria);
     if (hardFilter.decision === "reject") {
       careerJob = this.decideJob(careerJob, "rejected", hardFilter.reason);
       this.appendEvent(campaign.id, "job.rejected", careerEventMetadata(careerJob, hardFilter));
@@ -1319,7 +1415,19 @@ export class CareerAgentService {
 
     let fit: FitAssessment;
     try {
-      fit = await this.applicationService.assessJob(careerJob.job);
+      fit = trace
+        ? await trace.measure(
+          `job.fit.${careerJob.id}`,
+          "judgment",
+          () => this.applicationService.assessJob(careerJob.job),
+          {
+            parentNodeId,
+            inputCount: 1,
+            outputCount: () => 1,
+            metadata: { stage: "job.fit", jobId: careerJob.id },
+          },
+        )
+        : await this.applicationService.assessJob(careerJob.job);
     } catch (error) {
       const reason = error instanceof Error ? error.message : "Fit assessment failed.";
       careerJob = this.decideJob(careerJob, "failed", reason);
@@ -1329,7 +1437,16 @@ export class CareerAgentService {
     }
 
     careerJob = this.saveJob({ ...careerJob, fit, status: "pursuing", updatedAt: this.now() });
-    const pursuit = decidePursuit(fit, campaign.fitPolicy);
+    const pursuit = trace
+      ? trace.measureSync(`job.pursuit-policy.${careerJob.id}`, "deterministic", () => decidePursuit(fit, campaign.fitPolicy), {
+        parentNodeId,
+        inputCount: 1,
+        outputCount: () => 1,
+        outcome: (result) => result.decision === "pursue" ? "success" : "blocked",
+        failureReason: (result) => result.decision === "pursue" ? undefined : "policy_rejected",
+        metadata: { stage: "job.pursuit-policy", jobId: careerJob.id },
+      })
+      : decidePursuit(fit, campaign.fitPolicy);
     if (pursuit.decision !== "pursue") {
       const status = pursuit.decision === "reject" ? "rejected" : "held";
       careerJob = this.decideJob(careerJob, status, pursuit.reason);
@@ -1356,11 +1473,16 @@ export class CareerAgentService {
       status: "preparing",
       applicationStartedAt: this.now(),
       updatedAt: this.now(),
-    });
+    }, trace, parentNodeId);
     return { ...outcome, prepared: true };
   }
 
-  private async resumeCapHeldJob(campaign: Campaign, job: CareerJob): Promise<ProcessOutcome> {
+  private async resumeCapHeldJob(
+    campaign: Campaign,
+    job: CareerJob,
+    trace?: ExecutionTraceBuilder,
+    parentNodeId?: string,
+  ): Promise<ProcessOutcome> {
     if (!job.fit || this.applicationCapReached(campaign, this.now())) return { held: true };
     const outcome = await this.prepareAndMaybeExecute(campaign, {
       ...job,
@@ -1368,33 +1490,97 @@ export class CareerAgentService {
       applicationStartedAt: this.now(),
       updatedAt: this.now(),
       decisionReason: undefined,
-    });
+    }, trace, parentNodeId);
     return { ...outcome, prepared: true };
   }
 
   private async prepareAndMaybeExecute(
     campaign: Campaign,
     initialJob: CareerJob,
+    trace?: ExecutionTraceBuilder,
+    parentNodeId?: string,
   ): Promise<ProcessOutcome> {
     let careerJob = this.saveJob(initialJob);
     let application: Application | null = null;
+    const preparationNodeId = `preparation.total.${careerJob.id}`;
 
     try {
-      const created = await this.applicationService.createApplicationFromJob(careerJob.job, careerJob.isExample);
+      const created = trace
+        ? await trace.measure(
+          `job.application-create.${careerJob.id}`,
+          "persistence",
+          () => this.applicationService.createApplicationFromJob(careerJob.job, careerJob.isExample),
+          {
+            parentNodeId,
+            inputCount: 1,
+            outputCount: () => 1,
+            metadata: { stage: "job.application-create", jobId: careerJob.id },
+          },
+        )
+        : await this.applicationService.createApplicationFromJob(careerJob.job, careerJob.isExample);
       application = created;
       careerJob = this.saveJob({ ...careerJob, applicationId: created.id, updatedAt: this.now() });
       this.appendEvent(campaign.id, "application.created", careerEventMetadata(careerJob));
 
-      const evaluated = await this.applicationService.evaluateApplication(created.id, careerJob.fit ?? undefined);
+      const evaluated = trace
+        ? await trace.measure(
+          `job.application-evaluate.${careerJob.id}`,
+          "judgment",
+          () => this.applicationService.evaluateApplication(created.id, careerJob.fit ?? undefined),
+          {
+            parentNodeId,
+            inputCount: 1,
+            outputCount: () => 1,
+            metadata: { stage: "job.application-evaluate", jobId: careerJob.id },
+          },
+        )
+        : await this.applicationService.evaluateApplication(created.id, careerJob.fit ?? undefined);
       application = evaluated;
       careerJob = this.saveJob({ ...careerJob, fit: evaluated.fit, updatedAt: this.now() });
       this.appendEvent(campaign.id, "application.evaluated", careerEventMetadata(careerJob));
 
-      const prepared = await this.applicationService.prepareApplication(evaluated.id);
+      const prepared = trace
+        ? await trace.measure(
+          preparationNodeId,
+          "judgment",
+          () => this.applicationService.prepareApplication(evaluated.id, {
+            trace,
+            parentNodeId: preparationNodeId,
+          }),
+          {
+            parentNodeId,
+            inputCount: 1,
+            outputCount: () => 1,
+            outcome: (result) => result.status === "needs_input" ? "blocked" : "success",
+            humanAttentionRequired: (result) => result.status === "needs_input",
+            humanAttentionCategory: (result) => result.status === "needs_input"
+              ? humanAttentionCategoryForBlocker(result.blockers[0])
+              : undefined,
+            metadata: { stage: "preparation.total", jobId: careerJob.id, applicationId: evaluated.id },
+          },
+        )
+        : await this.applicationService.prepareApplication(evaluated.id);
       application = prepared;
       this.appendEvent(campaign.id, "application.prepared", careerEventMetadata(careerJob, undefined, String(prepared.blockers.filter((blocker) => blocker.status === "open").length)));
 
-      const preparationDrafts = careerBlockerDraftsForApplication(prepared);
+      const preparationDrafts = trace
+        ? trace.measureSync(
+          `preparation.validation.${careerJob.id}`,
+          "deterministic",
+          () => careerBlockerDraftsForApplication(prepared),
+          {
+            parentNodeId,
+            inputCount: 1,
+            outputCount: (value) => value.length,
+            outcome: (value) => value.length > 0 ? "blocked" : "success",
+            humanAttentionRequired: (value) => value.length > 0,
+            humanAttentionCategory: (value) => value.length > 0
+              ? humanAttentionCategoryForBlocker(value[0])
+              : undefined,
+            metadata: { stage: "preparation.validation", jobId: careerJob.id },
+          },
+        )
+        : careerBlockerDraftsForApplication(prepared);
       careerJob = this.saveJob({
         ...careerJob,
         status: preparationDrafts.length > 0 ? "needs_input" : "preparing",
@@ -1405,11 +1591,11 @@ export class CareerAgentService {
       if (preparationDrafts.length > 0) {
         this.appendEvent(campaign.id, "application.needs_input", careerEventMetadata(careerJob, undefined, String(preparationDrafts.length)));
         this.appendEvent(campaign.id, "campaign.review_needed", careerEventMetadata(careerJob, undefined, "application_preparation"));
-        return {};
+        return { blocked: true };
       }
 
       this.appendEvent(campaign.id, "application.ready_for_review", careerEventMetadata(careerJob));
-      return this.executePreparedApplication(campaign, careerJob, application);
+      return this.executePreparedApplication(campaign, careerJob, application, {}, trace, parentNodeId);
     } catch (error) {
       const reason = error instanceof Error ? error.message : "Application preparation failed.";
       if (application && application.status !== "applied" && application.status !== "failed") {
@@ -1434,6 +1620,8 @@ export class CareerAgentService {
   private async resumeBlockedJob(
     campaign: Campaign,
     careerJob: CareerJob,
+    trace?: ExecutionTraceBuilder,
+    parentNodeId?: string,
   ): Promise<{ careerJob: CareerJob } & ProcessOutcome> {
     if (!careerJob.applicationId || careerJob.status === "applied") return { careerJob };
 
@@ -1452,14 +1640,26 @@ export class CareerAgentService {
     }
 
     if (application.status === "needs_input") {
-      const drafts = careerBlockerDraftsForApplication(application);
+      const drafts = trace
+        ? trace.measureSync(
+          `preparation.blocker-evaluation.resume.${careerJob.id}`,
+          "deterministic",
+          () => careerBlockerDraftsForApplication(application),
+          {
+            parentNodeId,
+            inputCount: 1,
+            outputCount: (value) => value.length,
+            metadata: { stage: "preparation.blocker-evaluation", jobId: careerJob.id },
+          },
+        )
+        : careerBlockerDraftsForApplication(application);
       const synchronized = this.saveJob({
         ...careerJob,
         status: drafts.length > 0 ? "needs_input" : careerJob.status,
         blockers: this.mergeBlockers(careerJob, drafts, application.id),
         updatedAt: this.now(),
       });
-      if (drafts.length > 0) return { careerJob: synchronized };
+      if (drafts.length > 0) return { careerJob: synchronized, blocked: true };
       careerJob = synchronized;
     }
 
@@ -1467,9 +1667,13 @@ export class CareerAgentService {
       return { careerJob };
     }
 
+    const resumeAttempt = (careerJob.applicationResumeAttempt ?? 0) + 1;
+    careerJob = this.saveJob({ ...careerJob, applicationResumeAttempt: resumeAttempt, updatedAt: this.now() });
+    const resumed = await this.executePreparedApplication(campaign, careerJob, application, {}, trace, parentNodeId);
     return {
-      careerJob: careerJob,
-      ...(await this.executePreparedApplication(campaign, careerJob, application)),
+      careerJob: resumed.careerJob ?? careerJob,
+      ...resumed,
+      resumeAttempt,
     };
   }
 
@@ -1478,6 +1682,8 @@ export class CareerAgentService {
     careerJob: CareerJob,
     application: Application,
     override: PreparedExecutionOverride = {},
+    trace?: ExecutionTraceBuilder,
+    parentNodeId?: string,
   ): Promise<ProcessOutcome & { careerJob?: CareerJob }> {
     const resolvedKinds = new Set(
       careerJob.blockers.filter((blocker) => blocker.status === "resolved").map((blocker) => careerBlockerKey(blocker)),
@@ -1494,14 +1700,37 @@ export class CareerAgentService {
     // transport result is being recorded.
     const preparationOnly = override.result !== undefined ||
       this.executor.executionMode?.(executionRequest) === "preparation_only";
-    const gate = verifyPreparedApplication(
-      application,
-      campaign.applicationPolicy,
-      campaign.submissionPolicy,
-      campaign,
-      resolvedKinds,
-      preparationOnly,
-    );
+    const gate = trace
+      ? trace.measureSync(
+        `execution.policy-check.${careerJob.id}`,
+        "deterministic",
+        () => verifyPreparedApplication(
+          application,
+          campaign.applicationPolicy,
+          campaign.submissionPolicy,
+          campaign,
+          resolvedKinds,
+          preparationOnly,
+        ),
+        {
+          parentNodeId,
+          inputCount: 1,
+          outputCount: (result) => result.blockers.length,
+          outcome: (result) => result.allowed ? "success" : "blocked",
+          humanAttentionRequired: (result) => !result.allowed,
+          humanAttentionCategory: (result) => result.allowed ? undefined : "policy_decision",
+          failureReason: (result) => result.allowed ? undefined : "policy_rejected",
+          metadata: { stage: "execution.policy-check", jobId: careerJob.id },
+        },
+      )
+      : verifyPreparedApplication(
+        application,
+        campaign.applicationPolicy,
+        campaign.submissionPolicy,
+        campaign,
+        resolvedKinds,
+        preparationOnly,
+      );
 
     if (!gate.allowed) {
       const updated = this.saveJob({
@@ -1512,7 +1741,7 @@ export class CareerAgentService {
       });
       this.appendEvent(campaign.id, "application.needs_input", careerEventMetadata(updated, undefined, String(gate.blockers.length)));
       this.appendEvent(campaign.id, "campaign.review_needed", careerEventMetadata(updated, undefined, gate.reason));
-      return { careerJob: updated };
+      return { careerJob: updated, blocked: true };
     }
 
     let ready = this.saveJob({
@@ -1529,23 +1758,36 @@ export class CareerAgentService {
 
     if (!override.result && (this.executor.inspect || preparationOnly)) {
       const executionStartedAt = this.now();
-      ready = this.saveJob({
-        ...ready,
-        execution: {
-          status: "inspecting",
-          fieldsDetected: [],
-          fieldsFilled: [],
-          unresolvedFields: [],
-          evidence: [`executor:${this.executor.id}`, "submission:manual-only"],
-          startedAt: executionStartedAt,
+      const markHostStarted = () => {
+        ready = this.saveJob({
+          ...ready,
+          execution: {
+            status: "inspecting",
+            fieldsDetected: [],
+            fieldsFilled: [],
+            unresolvedFields: [],
+            evidence: [`executor:${this.executor.id}`, "submission:manual-only"],
+            startedAt: executionStartedAt,
+            updatedAt: executionStartedAt,
+          },
           updatedAt: executionStartedAt,
-        },
-        updatedAt: executionStartedAt,
-      });
-      this.appendEvent(campaign.id, "application.execution_started", {
-        ...careerEventMetadata(ready),
-        executor: this.executor.id,
-      });
+        });
+        this.appendEvent(campaign.id, "application.execution_started", {
+          ...careerEventMetadata(ready),
+          executor: this.executor.id,
+        });
+        return ready;
+      };
+      if (trace) {
+        trace.measureSync(`execution.host-start.${careerJob.id}`, "persistence", markHostStarted, {
+          parentNodeId,
+          inputCount: 1,
+          outputCount: () => 1,
+          metadata: { stage: "execution.host-start", jobId: careerJob.id, executor: this.executor.id },
+        });
+      } else {
+        markHostStarted();
+      }
     }
 
     let execution: ApplicationExecutorResult;
@@ -1554,7 +1796,31 @@ export class CareerAgentService {
         execution = override.result;
       } else {
         const request: ApplicationExecutionRequest = { ...executionRequest, careerJob: ready, now: this.now() };
-        execution = await this.executor.execute(request);
+        execution = trace
+          ? await trace.measure(
+            `execution.lever-execute.${careerJob.id}`,
+            "external_io",
+            () => this.executor.execute(request),
+            {
+              parentNodeId,
+              inputCount: 1,
+              outputCount: () => 1,
+              outcome: (result) => result.state === "failed"
+                ? "failed"
+                : result.state === "ready_to_submit" || result.state === "submitted" ? "success" : "blocked",
+              humanAttentionRequired: (result) => result.state !== "ready_to_submit" && result.state !== "submitted",
+              humanAttentionCategory: (result) => result.state === "requires_human"
+                ? humanAttentionCategoryForBlocker(result.blocker)
+                : result.state === "unsupported"
+                  ? "unsupported_field"
+                  : result.state === "failed" ? "operational_failure" : undefined,
+              failureReason: (result) => result.state === "failed"
+                ? executionFailureReason(result.reason)
+                : result.state === "requires_human" ? "human_gate" : result.state === "unsupported" ? "validation_error" : undefined,
+              metadata: { stage: "execution.lever-execute", jobId: careerJob.id, executor: this.executor.id },
+            },
+          )
+          : await this.executor.execute(request);
       }
     } catch (error) {
       const reason = error instanceof Error ? error.message : "Application executor failed.";
@@ -1608,7 +1874,7 @@ export class CareerAgentService {
       }
       this.appendEvent(campaign.id, "application.needs_input", careerEventMetadata(blocked, undefined, drafts.map((draft) => draft.kind).join(",")));
       this.appendEvent(campaign.id, "campaign.review_needed", careerEventMetadata(blocked, undefined, drafts[0].reason));
-      return { careerJob: blocked };
+      return { careerJob: blocked, blocked: true };
     }
 
     if (execution.state === "unsupported") {
@@ -1648,7 +1914,7 @@ export class CareerAgentService {
       }
       this.appendEvent(campaign.id, "application.needs_input", careerEventMetadata(unsupported, undefined, blocker.kind));
       this.appendEvent(campaign.id, "campaign.review_needed", careerEventMetadata(unsupported, undefined, blocker.reason));
-      return { careerJob: unsupported };
+      return { careerJob: unsupported, blocked: true };
     }
 
     if (execution.state === "ready_to_submit") {
@@ -1740,7 +2006,7 @@ export class CareerAgentService {
     });
     this.appendEvent(campaign.id, "application.applied", careerEventMetadata(applied, undefined, execution.proof.mode));
 
-    applied = await this.syncTrackerForAppliedJob(campaign, applied, appliedApplication, execution.proof, "tracker.update_started");
+    applied = await this.syncTrackerForAppliedJob(campaign, applied, appliedApplication, execution.proof, "tracker.update_started", trace, parentNodeId);
 
     return { careerJob: applied, applied: true };
   }
@@ -1751,12 +2017,16 @@ export class CareerAgentService {
     application: Application,
     evidence: SubmissionEvidence,
     startEvent: "tracker.update_started" | "tracker.retry_started",
+    trace?: ExecutionTraceBuilder,
+    parentNodeId?: string,
   ): Promise<CareerJob> {
+    const attempt = (job.trackerSync?.attempt ?? 0) + 1;
     const pending = this.saveJob({
       ...job,
       trackerFailureReason: undefined,
       trackerSync: {
         status: "pending",
+        attempt,
         attemptedAt: this.now(),
         updatedAt: this.now(),
       },
@@ -1765,12 +2035,37 @@ export class CareerAgentService {
     this.appendEvent(campaign.id, startEvent, {
       ...careerEventMetadata(pending),
       tracker: this.tracker.id,
+      attempt: String(attempt),
     });
 
     const update = trackerUpdateForJob(pending, evidence);
     const context = trackerSyncContextForJob(campaign, pending, application, evidence);
+    const trackerStartedAt = monotonicNow();
     try {
-      const result = await this.tracker.recordApplied(update, context);
+      const record = () => this.tracker.recordApplied(update, context);
+      const result = trace
+        ? await trace.measure(
+          `tracker.sync.${job.id}`,
+          "external_io",
+          record,
+          {
+            parentNodeId,
+            attempt,
+            retryReasonCode: startEvent === "tracker.retry_started" ? "tracker_failure" : undefined,
+            previousOutcome: startEvent === "tracker.retry_started" ? "failed" : undefined,
+            inputCount: 1,
+            outputCount: () => 1,
+            externalMetrics: (value) => isJobTrackerResult(value)
+              ? {
+                requestCount: value.simulated ? 0 : 1,
+                successCount: value.ok && !value.simulated ? 1 : 0,
+                failureCount: !value.ok && !value.simulated ? 1 : 0,
+              }
+              : { requestCount: 1, successCount: 0, failureCount: 1 },
+            metadata: { stage: startEvent === "tracker.retry_started" ? "tracker.retry" : "tracker.sync", jobId: job.id, tracker: this.tracker.id },
+          },
+        )
+        : await record();
       if (isJobTrackerResult(result) && result.ok) {
         const synced = this.saveJob({
           ...pending,
@@ -1778,9 +2073,15 @@ export class CareerAgentService {
           trackerFailureReason: undefined,
           trackerSync: {
             status: "synced",
+            attempt,
             ...(pending.trackerSync?.attemptedAt ? { attemptedAt: pending.trackerSync.attemptedAt } : {}),
             updatedAt: this.now(),
             ...(result.trackerRecordId ? { trackerRecordId: result.trackerRecordId } : {}),
+            durationMs: Math.max(0, Math.round(monotonicNow() - trackerStartedAt)),
+            requestCount: 1,
+            successCount: 1,
+            failureCount: 0,
+            timeoutCount: 0,
           },
           updatedAt: this.now(),
         });
@@ -1790,26 +2091,44 @@ export class CareerAgentService {
       const reason = isJobTrackerResult(result)
         ? result.error ?? "Tracker update failed."
         : "Tracker returned a malformed result.";
-      return this.markTrackerSyncFailed(campaign, pending, reason);
+      return this.markTrackerSyncFailed(campaign, pending, reason, {
+        durationMs: Math.max(0, Math.round(monotonicNow() - trackerStartedAt)),
+        timeoutCount: 0,
+      });
     } catch (error) {
       return this.markTrackerSyncFailed(
         campaign,
         pending,
         error instanceof Error ? error.message : "Tracker update failed.",
+        {
+          durationMs: Math.max(0, Math.round(monotonicNow() - trackerStartedAt)),
+          timeoutCount: executionFailureReason(error) === "timeout" ? 1 : 0,
+        },
       );
     }
   }
 
-  private markTrackerSyncFailed(campaign: Campaign, job: CareerJob, reason: string): CareerJob {
+  private markTrackerSyncFailed(
+    campaign: Campaign,
+    job: CareerJob,
+    reason: string,
+    telemetry: { durationMs: number; timeoutCount: number },
+  ): CareerJob {
     const failed = this.saveJob({
       ...job,
       trackerRecordId: undefined,
       trackerFailureReason: reason,
       trackerSync: {
         status: "failed",
+        ...(job.trackerSync?.attempt !== undefined ? { attempt: job.trackerSync.attempt } : {}),
         ...(job.trackerSync?.attemptedAt ? { attemptedAt: job.trackerSync.attemptedAt } : {}),
         updatedAt: this.now(),
         failureReason: reason,
+        durationMs: telemetry.durationMs,
+        requestCount: 1,
+        successCount: 0,
+        failureCount: 1,
+        timeoutCount: telemetry.timeoutCount,
       },
       updatedAt: this.now(),
     });
@@ -1921,6 +2240,7 @@ export class CareerAgentService {
     jobId?: string,
     applicationId?: string,
   ): void {
+    const attentionCategory = attentionCategoryForEvent(type, metadata);
     const event: CareerEvent = {
       id: this.createId("career-event"),
       type,
@@ -1929,6 +2249,7 @@ export class CareerAgentService {
       ...(applicationId || metadata?.applicationId ? { applicationId: applicationId ?? metadata?.applicationId } : {}),
       occurredAt: this.now(),
       attention: isAttentionWorthyEvent(type),
+      ...(attentionCategory ? { attentionCategory } : {}),
       ...(metadata ? { metadata } : {}),
     };
     this.careerRepository.appendEvent(event);
@@ -1960,4 +2281,32 @@ function careerEventMetadata(
     ...(filter ? [["filterDecision", filter.decision] as [string, string]] : []),
     ...(reason ? [["reason", reason] as [string, string]] : []),
   ]);
+}
+
+function humanWaitDurationSince(
+  jobs: readonly CareerJob[],
+  since: string,
+  until: string,
+): number {
+  const sinceMs = Date.parse(since);
+  const untilMs = Date.parse(until);
+  if (Number.isNaN(sinceMs) || Number.isNaN(untilMs)) return 0;
+  return jobs.reduce((total, job) => total + job.blockers.reduce((jobTotal, blocker) => {
+    if (blocker.status !== "resolved" || !blocker.resolvedAt) return jobTotal;
+    const createdMs = Date.parse(blocker.createdAt);
+    const resolvedMs = Date.parse(blocker.resolvedAt);
+    if (Number.isNaN(createdMs) || Number.isNaN(resolvedMs) || resolvedMs <= sinceMs || resolvedMs > untilMs) return jobTotal;
+    return jobTotal + Math.max(0, resolvedMs - Math.max(createdMs, sinceMs));
+  }, 0), 0);
+}
+
+function browserTelemetryMetadata(
+  telemetry: ExecutionHostSnapshot["telemetry"],
+): Readonly<Record<string, string>> {
+  if (!telemetry) return {};
+  const entries: Array<[string, string]> = [];
+  for (const [key, value] of Object.entries(telemetry)) {
+    if (typeof value === "number" && Number.isFinite(value)) entries.push([key, String(Math.round(value))]);
+  }
+  return metadataFrom(entries);
 }

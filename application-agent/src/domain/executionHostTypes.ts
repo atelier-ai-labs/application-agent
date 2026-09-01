@@ -1,7 +1,9 @@
 import type {
   ApplicationExecutorResult,
+  BrowserExecutionTelemetry,
   ExecutionInspection,
 } from "./executor";
+import type { ExecutionFailureReason } from "./executionTrace";
 import type {
   CareerJob,
   Campaign,
@@ -57,6 +59,11 @@ export interface ExecutionHostSnapshot {
   status: ExecutionHostStatus;
   startedAt: string;
   updatedAt: string;
+  /** Attempt 1 is the initial host run; it increments only on explicit resume. */
+  attempt?: number;
+  retryReasonCode?: ExecutionFailureReason;
+  failureReasonCode?: ExecutionFailureReason;
+  telemetry?: BrowserExecutionTelemetry;
   inspection?: ExecutionInspection;
   result?: ExecutionHostResult;
   /** High-level server error only; no profile values or browser content. */

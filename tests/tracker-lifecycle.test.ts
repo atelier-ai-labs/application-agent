@@ -120,7 +120,7 @@ describe("manual applied state and tracker sync", () => {
     expect(applied.status).toBe("applied");
     expect(applied.manualSubmissionConfirmation?.mode).toBe("manual");
     expect(applied.submissionProof).toBeUndefined();
-    expect(applied.trackerSync).toMatchObject({ status: "synced", trackerRecordId: "row-2" });
+    expect(applied.trackerSync).toMatchObject({ status: "synced", attempt: 1, trackerRecordId: "row-2", requestCount: 1, successCount: 1, failureCount: 0 });
     expect(fixture.applicationService.getApplication(fixture.careerJob.applicationId!).status).toBe("applied");
     expect(tracker.calls).toHaveLength(1);
     expect(tracker.calls[0].update.proofMode).toBe("manual");
@@ -139,17 +139,17 @@ describe("manual applied state and tracker sync", () => {
     const fixture = await readyFixture(tracker);
     const failed = await fixture.service.confirmManualApplication(fixture.campaign.id, fixture.careerJob.id);
     expect(failed.status).toBe("applied");
-    expect(failed.trackerSync?.status).toBe("failed");
+    expect(failed.trackerSync).toMatchObject({ status: "failed", attempt: 1, requestCount: 1, successCount: 0, failureCount: 1 });
     expect(fixture.applicationService.getApplication(fixture.careerJob.applicationId!).status).toBe("applied");
     expect(fixture.service.snapshot(fixture.campaign.id).counts.needsYou).toBe(1);
 
     tracker.fail = false;
     const retried = await fixture.service.retryTrackerSync(fixture.campaign.id, fixture.careerJob.id);
     expect(retried.status).toBe("applied");
-    expect(retried.trackerSync).toMatchObject({ status: "synced", trackerRecordId: "row-2" });
+    expect(retried.trackerSync).toMatchObject({ status: "synced", attempt: 2, trackerRecordId: "row-2", requestCount: 1, successCount: 1, failureCount: 0 });
     expect(tracker.calls).toHaveLength(2);
     expect(fixture.service.listEvents(fixture.campaign.id).filter((event) => event.type === "application.applied")).toHaveLength(1);
-    expect(fixture.service.listEvents(fixture.campaign.id).some((event) => event.type === "tracker.retry_started")).toBe(true);
+    expect(fixture.service.listEvents(fixture.campaign.id).some((event) => event.type === "tracker.retry_started" && event.metadata?.attempt === "2")).toBe(true);
   });
 
   it("does not turn confirmation into a second application or a tracker write on idempotent retry", async () => {

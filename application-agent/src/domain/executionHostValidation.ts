@@ -20,6 +20,7 @@ import {
   isJobPosting,
   isRecord,
 } from "./validation";
+import { isExecutionFailureReason } from "./executionTrace";
 import { isCampaign, isCareerJob } from "../persistence/careerRepository";
 
 function isNonEmptyString(value: unknown): value is string {
@@ -32,6 +33,28 @@ function isTimestamp(value: unknown): value is string {
 
 function isStringArray(value: unknown): value is readonly string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isNonNegativeNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return Number.isInteger(value) && typeof value === "number" && value >= 0;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return Number.isInteger(value) && typeof value === "number" && value > 0;
+}
+
+function isBrowserExecutionTelemetry(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (value.preflightInspectionDurationMs === undefined || isNonNegativeNumber(value.preflightInspectionDurationMs)) &&
+    (value.executorInspectionDurationMs === undefined || isNonNegativeNumber(value.executorInspectionDurationMs)) &&
+    (value.browserPreparationDurationMs === undefined || isNonNegativeNumber(value.browserPreparationDurationMs)) &&
+    (value.domInspectionCount === undefined || isNonNegativeInteger(value.domInspectionCount)) &&
+    (value.cancellationCount === undefined || isNonNegativeInteger(value.cancellationCount)) &&
+    (value.lateCompletionCount === undefined || isNonNegativeInteger(value.lateCompletionCount));
 }
 
 function isFieldType(value: unknown): boolean {
@@ -94,6 +117,8 @@ export function isExecutionInspection(value: unknown): value is ExecutionInspect
     Array.isArray(value.blockers) && value.blockers.every(isCareerBlockerDraft) &&
     (value.resumeUsed === undefined || isNonEmptyString(value.resumeUsed)) &&
     isStringArray(value.evidence) &&
+    (value.durationMs === undefined || isNonNegativeNumber(value.durationMs)) &&
+    (value.domInspectionCount === undefined || isNonNegativeInteger(value.domInspectionCount)) &&
     isTimestamp(value.startedAt) &&
     isTimestamp(value.updatedAt);
 }
@@ -133,6 +158,10 @@ export function isExecutionHostSnapshot(value: unknown): value is ExecutionHostS
     isExecutionHostStatus(value.status) &&
     isTimestamp(value.startedAt) &&
     isTimestamp(value.updatedAt) &&
+    (value.attempt === undefined || isPositiveInteger(value.attempt)) &&
+    (value.retryReasonCode === undefined || isExecutionFailureReason(value.retryReasonCode)) &&
+    (value.failureReasonCode === undefined || isExecutionFailureReason(value.failureReasonCode)) &&
+    (value.telemetry === undefined || isBrowserExecutionTelemetry(value.telemetry)) &&
     (value.inspection === undefined || isExecutionInspection(value.inspection)) &&
     (value.result === undefined || isExecutionHostResult(value.result)) &&
     (value.error === undefined || isNonEmptyString(value.error));

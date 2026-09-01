@@ -99,6 +99,16 @@ export interface LeverBrowserSessionFactory {
 
 export type ExecutionInspectionStatus = "inspected" | "needs_input" | "unsupported" | "failed";
 
+/** Safe browser-boundary measurements; no DOM values or form contents. */
+export interface BrowserExecutionTelemetry {
+  preflightInspectionDurationMs?: number;
+  executorInspectionDurationMs?: number;
+  browserPreparationDurationMs?: number;
+  domInspectionCount?: number;
+  cancellationCount?: number;
+  lateCompletionCount?: number;
+}
+
 export interface ExecutionInspection {
   status: ExecutionInspectionStatus;
   fields: readonly ApplicationFieldDescriptor[];
@@ -107,6 +117,9 @@ export interface ExecutionInspection {
   blockers: readonly CareerBlockerDraft[];
   resumeUsed?: string;
   evidence: readonly string[];
+  /** Active inspection duration, excluding any human wait between attempts. */
+  durationMs?: number;
+  domInspectionCount?: number;
   startedAt: string;
   updatedAt: string;
 }

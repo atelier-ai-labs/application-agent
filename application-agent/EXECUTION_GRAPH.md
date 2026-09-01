@@ -104,19 +104,80 @@ per-batch source response cache during concurrent reference resolution.
 `domain/executionTrace.ts` provides a typed observation model:
 
 - `ExecutionNodeTrace` records node ID/kind, timestamps, duration, outcome,
-  attempt, counts, cache hit, retry reason, and a safe metadata map;
-- `ExecutionRunTrace` records the run duration, derived retry count, node list,
-  and `humanAttentionEvents`;
-- persisted campaign state retains only the latest trace, and runtime
-  validation rejects malformed traces.
+  derived exclusive duration, parent ID, attempt, typed reason codes, safe
+  counters, cache hit, human-attention category, optional future model fields,
+  and a safe metadata map;
+- `ExecutionRunTrace.summary` is deterministic and reports total agent
+  runtime, human wait separately, retry/failure/external/cache/attention
+  counts, per-stage summaries, and the five slowest stages;
+- persisted campaign state retains the latest trace plus a bounded last-five
+  `runHistory`; malformed historical entries are isolated during rehydration;
+  runtime validation rejects malformed traces.
 
 `humanAttentionEvents` counts newly appended career events whose existing
-  attention policy marks them as attention-worthy. It counts blockers, review
-  conditions, ready-to-submit/manual gates, meaningful application failures,
-  and tracker failures according to the current event policy; it does not count
-  passive UI reads. Trace metadata contains IDs, counts, provider/source names,
-  and statuses only. It never contains profile content, answers, tokens,
-  cookies, resume contents, or page HTML.
+attention policy marks them as attention-worthy. Each event receives a bounded
+category such as `candidate_fact_missing`, `captcha`, `manual_submission`,
+`tracker_failure`, or `operational_failure`. It counts blockers, review
+conditions, ready-to-submit/manual gates, meaningful application failures, and
+tracker failures according to the current event policy; it does not count
+passive UI reads. Trace metadata contains IDs, counts, provider/source names,
+and statuses only. It never contains profile content, answers, tokens, cookies,
+resume contents, or page HTML.
+
+## Instrumentation semantics
+
+Instrumentation is attached to existing service, Scout, application-preparation,
+browser-host, Lever, and tracker boundaries. It does not introduce a graph
+runtime or alter ordering, caps, retries, browser actions, or submission
+authority. The stable stage vocabulary currently emitted is:
+
+```text
+scout.total
+scout.source-fanout
+scout.source.<sourceId>
+scout.reference-resolution
+scout.reduce
+scout.history-dedupe
+job.total
+job.persist-discovered
+job.hard-filter
+job.fit
+job.pursuit-policy
+job.application-create
+job.application-evaluate
+preparation.total
+preparation.resume
+preparation.answers
+preparation.blocker-evaluation
+preparation.validation
+execution.policy-check
+execution.host-start
+execution.lever-execute
+tracker.sync
+tracker.retry
+```
+
+Node `durationMs` is inclusive elapsed time. A node with children receives a
+derived `exclusiveDurationMs` after the union of its direct-child intervals is
+removed. Stage `inclusiveDurationMs` is a sum and may overlap; stage
+`wallClockDurationMs` is an interval union and is the safe value for
+end-to-end reporting. Parent plus child durations must never be added as if
+they were independent wall-clock work. Fixed-clock tests fall back to the
+largest observed child duration when timestamp precision cannot show overlap.
+
+External counters are attached only where the boundary owns an observable
+request. Brave query count is taken from its existing query metrics; cached
+responses and demo/in-memory sources do not claim external requests. Browser
+network requests are not currently observable through the narrow browser
+session contract. Host telemetry separately records preflight inspection,
+Lever executor inspection, total browser-preparation work for each active
+attempt, DOM/form inspection count, cancellation, and late completion.
+
+Attempts represent repeated work on the same unit only: explicit browser or
+application resume and tracker retry. A new campaign run starts at attempt one.
+Human wait is derived from resolved blocker timestamps when both endpoints are
+available and is kept out of the agent runtime duration. The optional model
+fields remain absent for the current deterministic local implementations.
 
 ## Controlled benchmark evidence
 

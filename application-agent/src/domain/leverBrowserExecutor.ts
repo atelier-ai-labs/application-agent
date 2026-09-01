@@ -29,6 +29,7 @@ import {
   isVerifiedLeverHostedUrl,
   leverSourceId,
 } from "./leverJobSource";
+import { monotonicNow } from "./executionTrace";
 
 export interface LeverBrowserExecutorOptions {
   sessionFactory: LeverBrowserSessionFactory;
@@ -213,6 +214,8 @@ function inspection(
     blockers?: readonly CareerBlockerDraft[];
     resumeUsed?: string;
     evidence?: readonly string[];
+    durationMs?: number;
+    domInspectionCount?: number;
   } = {},
 ): ExecutionInspection {
   return {
@@ -223,8 +226,17 @@ function inspection(
     blockers: values.blockers ?? [],
     ...(values.resumeUsed ? { resumeUsed: values.resumeUsed } : {}),
     evidence: values.evidence ?? [],
+    ...(values.durationMs !== undefined ? { durationMs: Math.max(0, Math.round(values.durationMs)) } : {}),
+    ...(values.domInspectionCount !== undefined ? { domInspectionCount: Math.max(0, Math.round(values.domInspectionCount)) } : {}),
     startedAt,
     updatedAt,
+  };
+}
+
+function inspectionTelemetry(base: ExecutionInspection | undefined): Pick<ExecutionInspection, "durationMs" | "domInspectionCount"> {
+  return {
+    ...(base?.durationMs !== undefined ? { durationMs: base.durationMs } : {}),
+    ...(base?.domInspectionCount !== undefined ? { domInspectionCount: base.domInspectionCount } : {}),
   };
 }
 
@@ -233,15 +245,18 @@ function unsupportedResult(
   startedAt: string,
   now: string,
   blocker?: CareerBlockerDraft,
+  base?: ExecutionInspection,
 ): Extract<ApplicationExecutorResult, { state: "unsupported" }> {
   const inspectionResult = inspection(
     "unsupported",
-    [],
-    startedAt,
+    base?.fields ?? [],
+    base?.startedAt ?? startedAt,
     now,
     {
       ...(blocker ? { blockers: [blocker], unresolvedFields: blocker.field ? [blocker.field] : [] } : {}),
-      evidence: ["executor:lever-browser", `unsupported:${reason}`],
+      ...(base ? { fieldsFilled: base.fieldsFilled, unresolvedFields: base.unresolvedFields } : {}),
+      ...(base ? inspectionTelemetry(base) : {}),
+      evidence: [...(base?.evidence ?? ["executor:lever-browser"]), `unsupported:${reason}`],
     },
   );
   return { state: "unsupported", reason, ...(blocker ? { blocker } : {}), inspection: inspectionResult };
@@ -644,6 +659,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         startedAt,
         this.now(),
         observed.inspection.blockers[0],
+        observed.inspection,
       );
     }
     if (observed.inspection.blockers.length > 0) {
@@ -729,6 +745,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
             unresolvedFields: [...unresolvedFields],
             blockers,
             ...(resumeUsed ? { resumeUsed } : {}),
+            ...inspectionTelemetry(observed.inspection),
             evidence: [...evidence, `error:${reason}`],
           },
         ));
@@ -747,6 +764,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
           unresolvedFields: [...unresolvedFields],
           blockers: dedupedBlockers,
           ...(resumeUsed ? { resumeUsed } : {}),
+          ...inspectionTelemetry(observed.inspection),
           evidence: [...evidence, "submit:not-clicked"],
         },
       );
@@ -779,6 +797,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         unresolvedFields: [...unresolvedFields],
         blockers: dedupeBlockers(dedupedBlockers),
         ...(resumeUsed ? { resumeUsed } : {}),
+        ...inspectionTelemetry(observed.inspection),
         evidence: [...evidence, "submit:not-clicked"],
       });
       return {
@@ -797,7 +816,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         required: true,
         classification: "unknown",
       }, "The expected final Submit control was not found; the page may not be a complete Lever application form.", "unsupported_widget");
-      return unsupportedResult("final Submit control was not detected", startedAt, this.now(), blocker);
+      return unsupportedResult("final Submit control was not detected", startedAt, this.now(), blocker, observed.inspection);
     }
 
     const currentUrl = await observed.session.currentUrl();
@@ -808,13 +827,14 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         reason: "The browser page changed away from the verified Lever application route; no further action was taken.",
         evidence: ["navigation:unexpected-page", "submit:not-clicked"],
       });
-      return unsupportedResult("browser page no longer matches the verified Lever application route", startedAt, this.now(), blocker);
+      return unsupportedResult("browser page no longer matches the verified Lever application route", startedAt, this.now(), blocker, observed.inspection);
     }
 
     const readyInspection = inspection("inspected", observed.inspection.fields, observed.inspection.startedAt, this.now(), {
       fieldsFilled: [...fieldsFilled],
       unresolvedFields: [...unresolvedFields],
       ...(resumeUsed ? { resumeUsed } : {}),
+      ...inspectionTelemetry(observed.inspection),
       evidence: [...evidence, "navigation:verified", "submit-control:detected", "submit:not-clicked", "submission:manual-only"],
     });
     return {
@@ -856,6 +876,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
     request: ApplicationExecutionRequest,
     startedAt = this.now(),
   ): Promise<ObservedForm> {
+    const inspectionMonotonicStartedAt = monotonicNow();
     const targetResult = trustedTarget(request);
     if (!targetResult.target) {
       return {
@@ -864,15 +885,27 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         fields: [],
         inspection: inspection("unsupported", [], startedAt, this.now(), {
           evidence: [`unsupported:${targetResult.reason ?? "untrusted Lever posting"}`],
+          durationMs: monotonicNow() - inspectionMonotonicStartedAt,
+          domInspectionCount: 0,
         }),
       };
     }
 
     const target = targetResult.target;
+    let domInspectionCount = 0;
+    const finish = (observed: ObservedForm): ObservedForm => ({
+      ...observed,
+      inspection: {
+        ...observed.inspection,
+        durationMs: monotonicNow() - inspectionMonotonicStartedAt,
+        domInspectionCount,
+      },
+    });
     try {
       const state = await this.sessionFor(request, target);
       const boundary = await state.session.detectHumanBoundary();
       const rawFields = await state.session.inspectFields();
+      domInspectionCount += 1;
       const descriptors = rawFields.map(descriptor);
       const baseEvidence = [
         "executor:lever-browser",
@@ -883,7 +916,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       ];
       if (boundary) {
         const blocker = boundaryBlocker(boundary);
-        return {
+        return finish({
           target,
           session: state.session,
           fields: rawFields,
@@ -892,7 +925,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
             blockers: [blocker],
             evidence: [...baseEvidence, ...boundary.evidence, "submit:not-clicked"],
           }),
-        };
+        });
       }
       if (descriptors.length === 0) {
         const blocker = formBlocker({
@@ -902,7 +935,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
           required: true,
           classification: "unknown",
         }, "No supported application fields were found on the verified page.", "unknown_form_field");
-        return {
+        return finish({
           target,
           session: state.session,
           fields: rawFields,
@@ -911,30 +944,30 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
             blockers: [blocker],
             evidence: [...baseEvidence, "unsupported:form-fields-not-found"],
           }),
-        };
+        });
       }
-      return {
+      return finish({
         target,
         session: state.session,
         fields: rawFields,
         inspection: inspection("inspected", descriptors, startedAt, this.now(), {
           evidence: [...baseEvidence, `fields-detected:${descriptors.length}`],
         }),
-      };
+      });
     } catch (error) {
       const reason = safeErrorMessage(error, "Lever form inspection failed.");
       const key = request.application.id || request.careerJob.id;
       const failedSession = this.sessions.get(key);
       this.sessions.delete(key);
       await failedSession?.session.close().catch(() => undefined);
-      return {
+      return finish({
         target,
         session: { currentUrl: () => "", navigate: async () => undefined, inspectFields: async () => [], detectHumanBoundary: async () => null, hasSubmitControl: async () => false, close: async () => undefined },
         fields: [],
         inspection: inspection("failed", [], startedAt, this.now(), {
           evidence: ["executor:lever-browser", `error:${reason}`],
         }),
-      };
+      });
     }
   }
 }

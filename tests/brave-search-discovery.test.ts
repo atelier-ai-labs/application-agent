@@ -216,7 +216,7 @@ describe("bounded Brave broad discovery", () => {
     const first = await provider.discover({ ...criteria, searchQueries: ["platform"] }, { now, maxResults: 1 });
     const second = await provider.discover({ ...criteria, searchQueries: ["platform"] }, { now, maxResults: 1 });
     expect(calls).toBe(1);
-    expect(first.cached).toBeUndefined();
+    expect(first.cached).toBe(false);
     expect(first.sourceFetchedAt).toBe(now);
     expect(second.cached).toBe(true);
     expect(second.sourceFetchedAt).toBe(now);

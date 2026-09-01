@@ -319,6 +319,8 @@ describe("LeverBrowserExecutor", () => {
     expect(fields[6].current).toBe(true);
     expect(fields[7].uploadCalls).toEqual(["/tmp/safe-example-resume.pdf"]);
     expect(session.submitClicks).toBe(0);
+    expect(result.inspection.durationMs).toBeGreaterThanOrEqual(0);
+    expect(result.inspection.domInspectionCount).toBe(1);
     expect(result.inspection.evidence).toContain("submit:not-clicked");
     expect(result.inspection.evidence).toContain("submission:manual-only");
   });
@@ -336,6 +338,8 @@ describe("LeverBrowserExecutor", () => {
     const first = await executor.execute(request());
     expect(first.state).toBe("requires_human");
     if (first.state !== "requires_human") return;
+    expect(first.inspection?.durationMs).toBeGreaterThanOrEqual(0);
+    expect(first.inspection?.domInspectionCount).toBe(1);
     expect(first.blocker.kind).toBe("salary");
     expect(fields[0].fillCalls).toBe(1);
     expect(fields[1].fillCalls).toBe(1);
@@ -345,6 +349,9 @@ describe("LeverBrowserExecutor", () => {
       careerJob: careerJob({ blockers: [resolvedCareerBlocker("salary", "USD 150000")] }),
     }));
     expect(second.state).toBe("ready_to_submit");
+    if (second.state !== "ready_to_submit") return;
+    expect(second.inspection.durationMs).toBeGreaterThanOrEqual(0);
+    expect(second.inspection.domInspectionCount).toBe(1);
     expect(factory.opens).toBe(1);
     expect(session.navigations).toBe(1);
     expect(fields[0].fillCalls).toBe(1);

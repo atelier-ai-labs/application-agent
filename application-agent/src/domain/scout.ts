@@ -50,6 +50,8 @@ export interface JobSourceBatch {
   cached?: boolean;
   /** When the provider response was fetched from the external source. */
   sourceFetchedAt?: string;
+  /** Safe stage traces emitted by a source-owned sub-boundary. */
+  executionNodes?: readonly ExecutionNodeTrace[];
 }
 
 export type JobSourceResponse = readonly JobSourceListing[] | JobSourceBatch;
@@ -83,6 +85,7 @@ interface SourceDiscoveryResult {
   sourceFetchedAt?: string;
   failure?: string;
   executionNode?: ExecutionNodeTrace;
+  executionNodes?: readonly ExecutionNodeTrace[];
 }
 
 export interface ScoutedJob {
@@ -380,6 +383,43 @@ function sourceTraceOutcome(result: SourceDiscoveryResult): ExecutionNodeOutcome
   return "success";
 }
 
+function sourceFailureReason(result: SourceDiscoveryResult): "timeout" | "provider_error" | "provider_configuration" | undefined {
+  if (result.status === "not_configured" || `${result.failure ?? ""} ${result.reason ?? ""}`.toLowerCase().includes("not configured")) {
+    return "provider_configuration";
+  }
+  if (result.failure || result.status === "failed") {
+    return `${result.failure ?? result.reason ?? ""}`.toLowerCase().includes("timeout") ||
+      `${result.failure ?? result.reason ?? ""}`.toLowerCase().includes("timed out")
+      ? "timeout"
+      : "provider_error";
+  }
+  return undefined;
+}
+
+function sourceExternalMetrics(result: SourceDiscoveryResult): {
+  requestCount: number;
+  successCount: number;
+  failureCount: number;
+  timeoutCount: number;
+} {
+  const isLive = Boolean(result.source) && (result.source?.mode ?? "live") !== "demo";
+  const requestCount = result.cached === true || result.status === "not_configured" || !isLive
+    ? 0
+    : result.referenceMetrics?.queriesExecuted ?? 1;
+  const failedQueryCount = result.referenceMetrics?.queryMetrics?.filter((metric) => metric.status === "failed").length ?? 0;
+  const failureCount = requestCount === 0
+    ? 0
+    : Math.min(requestCount, Math.max(failedQueryCount, result.failure || result.status === "failed" ? requestCount : 0));
+  const timeoutCount = requestCount > 0 && (`${result.failure ?? result.reason ?? ""}`.toLowerCase().includes("timeout") ||
+    `${result.failure ?? result.reason ?? ""}`.toLowerCase().includes("timed out")) ? 1 : 0;
+  return {
+    requestCount,
+    successCount: Math.max(0, requestCount - failureCount),
+    failureCount,
+    timeoutCount,
+  };
+}
+
 export class JobScout {
   private readonly timeoutMs: number;
   private readonly maxResultsPerSource: number;
@@ -436,6 +476,8 @@ export class JobScout {
       };
     }
 
+    const fanoutStartedAt = this.now();
+    const fanoutMonotonicStartedAt = monotonicNow();
     const sourceResults: SourceDiscoveryResult[] = await mapWithConcurrencyLimit(
       campaign.searchSources,
       this.maxConcurrentSources,
@@ -454,8 +496,12 @@ export class JobScout {
             inputCount: 1,
             outputCount: result.listings.length,
             ...(result.cached !== undefined ? { cacheHit: result.cached } : {}),
+            ...(sourceFailureReason(result) ? { failureReason: sourceFailureReason(result) } : {}),
+            ...sourceExternalMetrics(result),
+            parentNodeId: "scout.source-fanout",
             metadata: {
               sourceId,
+              stage: `scout.source.${sourceId}`,
               status: result.status ?? (result.failure ? "failed" : "success"),
               warningCount: String(result.warnings.length),
             },
@@ -503,6 +549,7 @@ export class JobScout {
               ...(cached !== undefined ? { cached } : {}),
               ...(sourceFetchedAt ? { sourceFetchedAt } : {}),
               referenceMetrics: sourceReferenceMetrics,
+              ...(isJobSourceBatch(response) && response.executionNodes ? { executionNodes: response.executionNodes } : {}),
               failure: "Job source returned a malformed listing collection.",
             });
           }
@@ -514,6 +561,7 @@ export class JobScout {
             status,
             reason,
             referenceMetrics: sourceReferenceMetrics,
+            ...(isJobSourceBatch(response) && response.executionNodes ? { executionNodes: response.executionNodes } : {}),
             ...(cached !== undefined ? { cached } : {}),
             ...(sourceFetchedAt ? { sourceFetchedAt } : {}),
           });
@@ -529,6 +577,23 @@ export class JobScout {
         }
       },
     );
+
+    const fanoutNode = createExecutionNodeTrace({
+      nodeId: "scout.source-fanout",
+      nodeKind: "external_io",
+      startedAt: fanoutStartedAt,
+      completedAt: this.now(),
+      durationMs: monotonicNow() - fanoutMonotonicStartedAt,
+      outcome: sourceResults.some((result) => sourceTraceOutcome(result) === "failed") ||
+        sourceResults.some((result) => sourceTraceOutcome(result) === "partial") ? "partial" : "success",
+      inputCount: campaign.searchSources.length,
+      outputCount: sourceResults.length,
+      parentNodeId: "scout.fetch-and-reduce",
+      metadata: {
+        stage: "scout.source-fanout",
+        sourceCount: String(sourceResults.length),
+      },
+    });
 
     const reductionStartedAt = this.now();
     const reductionMonotonicStartedAt = monotonicNow();
@@ -661,7 +726,9 @@ export class JobScout {
       outcome: failures.length > 0 ? (jobs.length > 0 ? "partial" : "failed") : "success",
       inputCount: sourceResults.reduce((total, result) => total + result.listings.length, 0),
       outputCount: jobs.length,
+      parentNodeId: "scout.fetch-and-reduce",
       metadata: {
+        stage: "scout.reduce",
         sourceCount: String(sourceResults.length),
         failureCount: String(failures.length),
         duplicateCount: String(duplicateCount),
@@ -678,6 +745,8 @@ export class JobScout {
       normalizedCount,
       duplicateCount,
       executionNodes: [
+        fanoutNode,
+        ...sourceResults.flatMap((result) => result.executionNodes ?? []),
         ...sourceResults.flatMap((result) => result.executionNode ? [result.executionNode] : []),
         reductionNode,
       ],

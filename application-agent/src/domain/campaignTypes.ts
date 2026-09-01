@@ -7,7 +7,12 @@ import type {
   ResumeFamilyId,
   SubmissionProof,
 } from "./types";
-import type { ExecutionRunTrace } from "./executionTrace";
+import type {
+  ExecutionFailureReason,
+  ExecutionRunTrace,
+  HumanAttentionCategory,
+} from "./executionTrace";
+import type { BrowserExecutionTelemetry } from "./executor";
 
 export type CampaignStatus = "draft" | "active" | "paused" | "completed" | "failed";
 
@@ -186,6 +191,8 @@ export interface Campaign {
   lastDiscovery?: DiscoverySummary;
   /** Latest campaign-run telemetry; operational metadata only. */
   lastRunTrace?: ExecutionRunTrace;
+  /** Bounded operational history used for before/after comparisons. */
+  runHistory?: readonly ExecutionRunTrace[];
   createdAt: string;
   updatedAt: string;
 }
@@ -307,6 +314,10 @@ export interface CareerExecutionState {
   unresolvedFields: readonly string[];
   resumeUsed?: string;
   evidence: readonly string[];
+  attempt?: number;
+  retryReasonCode?: ExecutionFailureReason;
+  failureReasonCode?: ExecutionFailureReason;
+  telemetry?: BrowserExecutionTelemetry;
   startedAt: string;
   updatedAt: string;
 }
@@ -315,10 +326,16 @@ export type TrackerSyncStatus = "not_required" | "pending" | "synced" | "failed"
 
 export interface TrackerSyncState {
   status: TrackerSyncStatus;
+  attempt?: number;
   attemptedAt?: string;
   updatedAt?: string;
   trackerRecordId?: string;
   failureReason?: string;
+  durationMs?: number;
+  requestCount?: number;
+  successCount?: number;
+  failureCount?: number;
+  timeoutCount?: number;
 }
 
 export interface CareerJob {
@@ -338,6 +355,8 @@ export interface CareerJob {
   fit: FitAssessment | null;
   applicationId?: string;
   applicationStartedAt?: string;
+  /** Counts actual preparation-resume attempts, not ordinary campaign runs. */
+  applicationResumeAttempt?: number;
   status: CareerJobStatus;
   decisionReason?: string;
   blockers: readonly CareerBlocker[];
@@ -405,6 +424,7 @@ export interface CareerEvent {
   applicationId?: string;
   occurredAt: string;
   attention: boolean;
+  attentionCategory?: HumanAttentionCategory;
   metadata?: Readonly<Record<string, string>>;
 }
 

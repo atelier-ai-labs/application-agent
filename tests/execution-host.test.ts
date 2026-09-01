@@ -63,6 +63,8 @@ function inspection(
     unresolvedFields: blockers.map((blocker) => blocker.question),
     blockers,
     evidence: ["executor:test", "submit:not-clicked", "submission:manual-only"],
+    durationMs: 7,
+    domInspectionCount: 1,
     startedAt: capturedAt,
     updatedAt: capturedAt,
   };
@@ -263,6 +265,10 @@ describe("trusted local execution host", () => {
     const blocked = await registry.waitForStatus(started.id, ["waiting_for_human"]);
     expect(blocked.result?.state).toBe("requires_human");
     expect(blocked.result && blocked.result.state === "requires_human" ? blocked.result.blocker.kind : undefined).toBe("captcha");
+    expect(blocked.attempt).toBe(1);
+    expect(blocked.telemetry?.preflightInspectionDurationMs).toBeGreaterThanOrEqual(0);
+    expect(blocked.telemetry?.browserPreparationDurationMs).toBeGreaterThanOrEqual(0);
+    expect(blocked.telemetry?.domInspectionCount).toBe(1);
     expect(JSON.stringify(blocked)).not.toContain("browserSessionHandle");
     expect(JSON.stringify(blocked)).not.toContain("server-only");
 
@@ -270,12 +276,19 @@ describe("trusted local execution host", () => {
     registry.resume(started.id, request);
     const ready = await registry.waitForStatus(started.id, ["ready_to_submit"]);
     expect(ready.result?.state).toBe("ready_to_submit");
+    expect(ready.attempt).toBe(2);
+    expect(ready.retryReasonCode).toBe("human_gate");
+    expect(ready.telemetry?.preflightInspectionDurationMs).toBeGreaterThanOrEqual(0);
+    expect(ready.telemetry?.executorInspectionDurationMs).toBe(7);
+    expect(ready.telemetry?.browserPreparationDurationMs).toBeGreaterThanOrEqual(0);
+    expect(ready.telemetry?.domInspectionCount).toBe(3);
     expect(executor.inspectCalls).toBe(2);
     expect(executor.executeCalls).toBe(1);
     expect(executor.closeCalls).toBe(0);
 
     const cancelled = await registry.cancel(started.id);
     expect(cancelled.status).toBe("cancelled");
+    expect(cancelled.telemetry?.cancellationCount).toBe(1);
     expect(executor.closeCalls).toBe(1);
   });
 
@@ -313,6 +326,7 @@ describe("trusted local execution host", () => {
     const started = registry.start(request);
     const timedOut = await registry.waitForStatus(started.id, ["failed"], 1_000);
     expect(timedOut.error).toContain("timed out");
+    expect(timedOut.failureReasonCode).toBe("timeout");
     expect(executor.closeCalls).toBe(1);
     await registry.closeAll();
   });
