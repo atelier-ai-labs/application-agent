@@ -1,6 +1,7 @@
 import type {
   ApplicationFieldDescriptor,
   ApplicationFieldOption,
+  ApplicationFieldQuestionDescriptor,
   BrowserCaptchaDiagnostics,
   BrowserExecutionBoundaryState,
   BrowserExecutionDiagnostic,
@@ -154,6 +155,23 @@ function isApplicationFieldOption(value: unknown): value is ApplicationFieldOpti
   return isRecord(value) && isNonEmptyString(value.label) && isNonEmptyString(value.value);
 }
 
+function isBoundedDescriptorText(value: unknown, maximum = 240): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= maximum &&
+    !/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(value);
+}
+
+function isApplicationFieldQuestionDescriptor(value: unknown): value is ApplicationFieldQuestionDescriptor {
+  if (!isRecord(value)) return false;
+  return (value.promptText === undefined || isBoundedDescriptorText(value.promptText)) &&
+    (value.sectionTitle === undefined || isBoundedDescriptorText(value.sectionTitle, 160)) &&
+    (value.accessibleName === undefined || isBoundedDescriptorText(value.accessibleName)) &&
+    (value.nearbyInstructionText === undefined || isBoundedDescriptorText(value.nearbyInstructionText, 160)) &&
+    (value.sourceStrategy === "fieldset_legend" || value.sourceStrategy === "aria_labelledby" ||
+      value.sourceStrategy === "question_container" || value.sourceStrategy === "nearby_text" ||
+      value.sourceStrategy === "unavailable") &&
+    (value.confidence === "high" || value.confidence === "medium" || value.confidence === "uncertain");
+}
+
 function isApplicationFieldDescriptor(value: unknown): value is ApplicationFieldDescriptor {
   if (!isRecord(value)) return false;
   return isNonEmptyString(value.id) &&
@@ -163,6 +181,7 @@ function isApplicationFieldDescriptor(value: unknown): value is ApplicationField
     (value.options === undefined || (Array.isArray(value.options) && value.options.every(isApplicationFieldOption))) &&
     (value.section === undefined || isNonEmptyString(value.section)) &&
     (value.sourceSelector === undefined || isNonEmptyString(value.sourceSelector)) &&
+    (value.questionDescriptor === undefined || isApplicationFieldQuestionDescriptor(value.questionDescriptor)) &&
     isFieldClassification(value.classification);
 }
 

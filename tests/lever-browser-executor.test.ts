@@ -3,6 +3,7 @@ import {
   LeverBrowserExecutor,
   classifyLeverApplicationField,
   exampleCandidateProfile,
+  isExecutionInspection,
   BrowserExecutionDiagnosticError,
   safeBrowserDiagnosticMessage,
   type Application,
@@ -18,7 +19,11 @@ import {
   type LeverBrowserSession,
   type LeverBrowserSessionFactory,
 } from "../application-agent/src";
-import { classifyCaptchaEvidence, type CaptchaDomObservation } from "../application-agent/automation/playwrightLeverBrowserSession";
+import {
+  classifyCaptchaEvidence,
+  questionDescriptorFromEvidence,
+  type CaptchaDomObservation,
+} from "../application-agent/automation/playwrightLeverBrowserSession";
 
 const capturedAt = "2026-08-30T12:00:00.000Z";
 const hostedUrl = "https://jobs.lever.co/h1/post-1";
@@ -31,6 +36,7 @@ class FakeField implements LeverBrowserField {
   readonly type: ApplicationFieldType;
   readonly required: boolean;
   readonly options?: readonly ApplicationFieldOption[];
+  readonly questionDescriptor?: LeverBrowserField["questionDescriptor"];
   current: string | boolean | null;
   fillCalls = 0;
   selectCalls = 0;
@@ -43,6 +49,7 @@ class FakeField implements LeverBrowserField {
     type: ApplicationFieldType | string;
     required?: boolean;
     options?: readonly ApplicationFieldOption[];
+    questionDescriptor?: LeverBrowserField["questionDescriptor"];
     current?: string | boolean | null;
   }) {
     this.id = options.id;
@@ -50,6 +57,7 @@ class FakeField implements LeverBrowserField {
     this.type = options.type as ApplicationFieldType;
     this.required = options.required ?? false;
     this.options = options.options;
+    this.questionDescriptor = options.questionDescriptor;
     this.current = options.current ?? null;
   }
 
@@ -372,6 +380,119 @@ describe("LeverBrowserExecutor", () => {
     expect(result.captcha?.state).toBe(expectedState);
   });
 
+  it("extracts high-confidence question context from explicit associations", () => {
+    expect(questionDescriptorFromEvidence({
+      fieldsetLegend: "Are you authorized to work in the United States?",
+      sectionTitle: "Work authorization",
+      nearbyInstructionText: "Choose one.",
+    })).toMatchObject({
+      promptText: "Are you authorized to work in the United States?",
+      sectionTitle: "Work authorization",
+      nearbyInstructionText: "Choose one.",
+      sourceStrategy: "fieldset_legend",
+      confidence: "high",
+    });
+    expect(questionDescriptorFromEvidence({
+      ariaLabelledByText: "What is your preferred work location?",
+      accessibleName: "What is your preferred work location?",
+    })).toMatchObject({
+      promptText: "What is your preferred work location?",
+      sourceStrategy: "aria_labelledby",
+      confidence: "high",
+    });
+    expect(questionDescriptorFromEvidence({
+      questionContainerPrompts: ["Are you legally eligible to work in the US?"],
+      sectionTitle: "Standard Work Authorization - US",
+    })).toMatchObject({
+      promptText: "Are you legally eligible to work in the US?",
+      sectionTitle: "Standard Work Authorization - US",
+      sourceStrategy: "question_container",
+      confidence: "high",
+    });
+  });
+
+  it("does not promote unrelated or ambiguous nearby text to an authoritative prompt", () => {
+    const unrelated = questionDescriptorFromEvidence({
+      sectionTitle: "General application",
+      nearbyInstructionText: "Unrelated navigation text",
+    });
+    expect(unrelated).toMatchObject({ sourceStrategy: "unavailable", confidence: "uncertain" });
+    expect(unrelated?.promptText).toBeUndefined();
+
+    const ambiguous = questionDescriptorFromEvidence({
+      questionContainerPrompts: ["First possible question", "Second possible question"],
+    });
+    expect(ambiguous).toMatchObject({ sourceStrategy: "unavailable", confidence: "uncertain" });
+    expect(ambiguous?.promptText).toBeUndefined();
+
+    expect(questionDescriptorFromEvidence({
+      nearbyPromptText: "Possibly related question text",
+    })).toMatchObject({
+      promptText: "Possibly related question text",
+      sourceStrategy: "nearby_text",
+      confidence: "uncertain",
+    });
+  });
+
+  it("bounds question context and never copies a candidate field value", async () => {
+    const descriptor = questionDescriptorFromEvidence({
+      questionContainerPrompts: ["Q".repeat(300)],
+      sectionTitle: "S".repeat(200),
+      nearbyInstructionText: "I".repeat(200),
+    });
+    expect(descriptor?.promptText).toHaveLength(240);
+    expect(descriptor?.sectionTitle).toHaveLength(160);
+    expect(descriptor?.nearbyInstructionText).toHaveLength(160);
+
+    const candidateValue = "candidate@example.invalid";
+    const session = new FakeSession([new FakeField({
+      id: "cards_unknown__field0_",
+      label: "Yes",
+      type: "radio",
+      required: true,
+      current: candidateValue,
+      options: [{ label: "Yes", value: "yes" }, { label: "No", value: "no" }],
+      questionDescriptor: descriptor,
+    })]);
+    const result = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      now: () => capturedAt,
+    }).inspect(request());
+    expect(result.status).toBe("inspected");
+    expect(JSON.stringify(result)).not.toContain(candidateValue);
+  });
+
+  it("validates bounded question descriptors while keeping older inspections loadable", async () => {
+    const descriptor = questionDescriptorFromEvidence({
+      questionContainerPrompts: ["Which work location do you prefer?"],
+    });
+    const session = new FakeSession([new FakeField({
+      id: "location",
+      label: "Location",
+      type: "text",
+      questionDescriptor: descriptor,
+    })]);
+    const inspection = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      now: () => capturedAt,
+    }).inspect(request());
+    expect(isExecutionInspection(inspection)).toBe(true);
+    expect(isExecutionInspection({
+      ...inspection,
+      fields: inspection.fields.map(({ questionDescriptor: _questionDescriptor, ...field }) => field),
+    })).toBe(true);
+    expect(isExecutionInspection({
+      ...inspection,
+      fields: [{
+        ...inspection.fields[0],
+        questionDescriptor: {
+          ...descriptor,
+          promptText: "Q".repeat(241),
+        },
+      }],
+    })).toBe(false);
+  });
+
   it("preserves an ambiguous generated yes/no radio control as an actionable human blocker", async () => {
     const fieldId = "cards_1d794e0f-e60d-479b-9c6e-2b60b82b13aa__field0_";
     const session = new FakeSession([new FakeField({
@@ -380,6 +501,12 @@ describe("LeverBrowserExecutor", () => {
       type: "radio",
       required: true,
       options: [{ label: "Yes", value: "yes" }, { label: "No", value: "no" }],
+      questionDescriptor: {
+        promptText: "Are you legally eligible to work in the US?",
+        sectionTitle: "Standard Work Authorization - US",
+        sourceStrategy: "question_container",
+        confidence: "high",
+      },
     })]);
     const result = await new LeverBrowserExecutor({
       sessionFactory: new FakeSessionFactory(session),
@@ -391,11 +518,13 @@ describe("LeverBrowserExecutor", () => {
     if (result.state !== "requires_human") return;
     expect(result.blocker.kind).toBe("unknown_form_field");
     expect(result.blocker.field).toBe(fieldId);
-    expect(result.blocker.question).toBe(`Required yes/no application question (control ${fieldId}); the question text was not exposed.`);
+    expect(result.blocker.question).toBe(`Required question under "Standard Work Authorization - US": "Are you legally eligible to work in the US?" — choose Yes or No.`);
     expect(result.blocker.reason).toContain("no value was guessed");
     expect(result.blocker.evidence).toContain("field-type:radio");
     expect(result.blocker.evidence).toContain("field-required:true");
     expect(result.blocker.evidence).toContain("options:Yes|No");
+    expect(result.blocker.evidence).toContain("question-source:question_container");
+    expect(result.blocker.evidence).toContain("question-confidence:high");
     expect(session.fields[0].selectCalls).toBe(0);
     expect(session.submitClicks).toBe(0);
   });

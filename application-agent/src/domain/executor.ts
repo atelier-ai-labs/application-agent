@@ -54,6 +54,25 @@ export interface ApplicationFieldOption {
   value: string;
 }
 
+export type ApplicationFieldQuestionSource =
+  | "fieldset_legend"
+  | "aria_labelledby"
+  | "question_container"
+  | "nearby_text"
+  | "unavailable";
+
+export type ApplicationFieldQuestionConfidence = "high" | "medium" | "uncertain";
+
+/** Bounded, non-value context associated with a form control. */
+export interface ApplicationFieldQuestionDescriptor {
+  promptText?: string;
+  sectionTitle?: string;
+  accessibleName?: string;
+  nearbyInstructionText?: string;
+  sourceStrategy: ApplicationFieldQuestionSource;
+  confidence: ApplicationFieldQuestionConfidence;
+}
+
 /** Serializable description of a form field. It intentionally contains no field value. */
 export interface ApplicationFieldDescriptor {
   id: string;
@@ -63,6 +82,7 @@ export interface ApplicationFieldDescriptor {
   options?: readonly ApplicationFieldOption[];
   section?: string;
   sourceSelector?: string;
+  questionDescriptor?: ApplicationFieldQuestionDescriptor;
   classification: ApplicationFieldClassification;
 }
 

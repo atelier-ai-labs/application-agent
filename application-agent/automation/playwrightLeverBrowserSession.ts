@@ -1,6 +1,7 @@
 import { chromium, type Browser, type BrowserContext, type Locator, type Page, type Response } from "playwright";
 import type {
   ApplicationFieldOption,
+  ApplicationFieldQuestionDescriptor,
   ApplicationFieldType,
   BrowserHumanBoundary,
   BrowserCaptchaDiagnostics,
@@ -31,6 +32,95 @@ interface InspectedRawField {
   options?: readonly ApplicationFieldOption[];
   section?: string;
   groupName?: string;
+  questionEvidence?: LeverQuestionAssociationEvidence;
+}
+
+export interface LeverQuestionAssociationEvidence {
+  fieldsetLegend?: string;
+  ariaLabelledByText?: string;
+  accessibleName?: string;
+  questionContainerPrompts?: readonly string[];
+  nearbyPromptText?: string;
+  sectionTitle?: string;
+  nearbyInstructionText?: string;
+}
+
+function boundedDescriptorText(value: string | undefined, maximum = 240): string | undefined {
+  const normalized = value?.replace(/\s+/g, " ").replace(/\s*[✱]\s*$/, "").trim();
+  return normalized ? normalized.slice(0, maximum) : undefined;
+}
+
+function uniqueDescriptorTexts(values: readonly (string | undefined)[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const bounded = boundedDescriptorText(value);
+    if (!bounded) continue;
+    const key = bounded.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(bounded);
+  }
+  return result;
+}
+
+/** Resolves only explicit or tightly bounded question associations. */
+export function questionDescriptorFromEvidence(
+  evidence: LeverQuestionAssociationEvidence,
+): ApplicationFieldQuestionDescriptor | undefined {
+  const sectionTitle = boundedDescriptorText(evidence.sectionTitle, 160);
+  const accessibleName = boundedDescriptorText(evidence.accessibleName);
+  const nearbyInstructionText = boundedDescriptorText(evidence.nearbyInstructionText, 160);
+  const context = {
+    ...(sectionTitle ? { sectionTitle } : {}),
+    ...(accessibleName ? { accessibleName } : {}),
+    ...(nearbyInstructionText ? { nearbyInstructionText } : {}),
+  };
+  const explicitSources: readonly [string | undefined, ApplicationFieldQuestionDescriptor["sourceStrategy"]][] = [
+    [evidence.fieldsetLegend, "fieldset_legend"],
+    [evidence.ariaLabelledByText, "aria_labelledby"],
+  ];
+  for (const [candidate, sourceStrategy] of explicitSources) {
+    const promptText = boundedDescriptorText(candidate);
+    if (promptText) {
+      return {
+        ...context,
+        promptText,
+        sourceStrategy,
+        confidence: "high",
+      };
+    }
+  }
+
+  const prompts = uniqueDescriptorTexts(evidence.questionContainerPrompts ?? []);
+  if (prompts.length === 1) {
+    return {
+      ...context,
+      promptText: prompts[0],
+      sourceStrategy: "question_container",
+      confidence: "high",
+    };
+  }
+  if (prompts.length > 1) {
+    return {
+      ...context,
+      sourceStrategy: "unavailable",
+      confidence: "uncertain",
+    };
+  }
+
+  const nearbyPromptText = boundedDescriptorText(evidence.nearbyPromptText);
+  if (nearbyPromptText) {
+    return {
+      ...context,
+      promptText: nearbyPromptText,
+      sourceStrategy: "nearby_text",
+      confidence: "uncertain",
+    };
+  }
+  return Object.keys(context).length > 0
+    ? { ...context, sourceStrategy: "unavailable", confidence: "uncertain" }
+    : undefined;
 }
 
 export interface CaptchaDomObservation {
@@ -174,6 +264,7 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
   public readonly options?: readonly ApplicationFieldOption[];
   public readonly section?: string;
   public readonly sourceSelector: string;
+  public readonly questionDescriptor?: ApplicationFieldQuestionDescriptor;
 
   constructor(
     private readonly page: Page,
@@ -186,6 +277,9 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
     this.options = raw.options;
     this.section = raw.section;
     this.sourceSelector = `form-control-index:${raw.index}`;
+    this.questionDescriptor = raw.questionEvidence
+      ? questionDescriptorFromEvidence(raw.questionEvidence)
+      : undefined;
   }
 
   private locator(): Locator {
@@ -461,8 +555,55 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       const associated = control.id
         ? labels.find((label) => label.htmlFor === control.id)
         : labels.find((label) => label.contains(control));
+      const descriptorText = (value: string | null | undefined, maximum = 240): string | undefined => {
+        const compact = (value ?? "").replace(/\s+/g, " ").replace(/\s*[✱]\s*$/, "").trim();
+        return compact ? compact.slice(0, maximum) : undefined;
+      };
+      const textFrom = (element: Element | null | undefined, maximum = 240): string | undefined =>
+        descriptorText(element?.textContent, maximum);
       const fieldset = control.closest("fieldset");
-      const legend = fieldset?.querySelector("legend")?.textContent?.trim();
+      const legend = textFrom(fieldset?.querySelector("legend"));
+      const labelledByIds = (control.getAttribute("aria-labelledby") ?? "")
+        .split(/\s+/)
+        .map((id) => id.trim())
+        .filter(Boolean);
+      const ariaLabelledByText = descriptorText(labelledByIds
+        .map((id) => document.getElementById(id))
+        .map((element) => element?.textContent ?? "")
+        .join(" "));
+      const ariaLabel = descriptorText(control.getAttribute("aria-label"));
+      const questionContainer = control.closest(".application-question");
+      const promptElements = questionContainer
+        ? Array.from(questionContainer.querySelectorAll(
+            '.application-label .text, [data-qa="question"], [data-qa="question-text"], .question-prompt',
+          ))
+        : [];
+      const fallbackPromptElements = questionContainer && promptElements.length === 0
+        ? Array.from(questionContainer.querySelectorAll(".application-label"))
+        : [];
+      const questionContainerPrompts = [...promptElements, ...fallbackPromptElements]
+        .map((element) => textFrom(element))
+        .filter((value): value is string => Boolean(value))
+        .slice(0, 4);
+      const sectionContainer = control.closest(".section.application-form, .section");
+      const sectionHeading = sectionContainer?.querySelector('h4[data-qa="card-name"]') ?? sectionContainer?.querySelector("h4");
+      const sectionTitle = textFrom(sectionHeading, 160);
+      const instructionElement = questionContainer?.querySelector('.application-label .description, [data-qa="description"]');
+      const nearbyInstructionText = textFrom(instructionElement, 160);
+      const adjacentPrompt = control.previousElementSibling;
+      const nearbyPromptText = adjacentPrompt &&
+        adjacentPrompt.matches('[data-qa="question"], [data-qa="question-text"], .question-prompt')
+        ? textFrom(adjacentPrompt)
+        : undefined;
+      const questionEvidence = {
+        ...(legend ? { fieldsetLegend: legend } : {}),
+        ...(ariaLabelledByText ? { ariaLabelledByText } : {}),
+        ...((ariaLabelledByText || ariaLabel) ? { accessibleName: ariaLabelledByText ?? ariaLabel } : {}),
+        ...(questionContainerPrompts.length > 0 ? { questionContainerPrompts } : {}),
+        ...(nearbyPromptText ? { nearbyPromptText } : {}),
+        ...(sectionTitle ? { sectionTitle } : {}),
+        ...(nearbyInstructionText ? { nearbyInstructionText } : {}),
+      };
       const label = (
         associated?.textContent?.trim() ||
         control.getAttribute("aria-label")?.trim() ||
@@ -523,6 +664,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
         ...(control instanceof HTMLInputElement && control.type.toLowerCase() === "radio" && control.name
           ? { groupName: control.name }
           : {}),
+        ...(Object.keys(questionEvidence).length > 0 ? { questionEvidence } : {}),
       }];
     }));
 

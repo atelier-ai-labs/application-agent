@@ -183,6 +183,9 @@ function descriptor(field: LeverBrowserField): ApplicationFieldDescriptor {
     ...(field.options && field.options.length > 0 ? { options: field.options.map((option) => ({ ...option })) } : {}),
     ...(field.section ? { section: field.section } : {}),
     ...(field.sourceSelector ? { sourceSelector: field.sourceSelector } : {}),
+    ...(field.questionDescriptor ? {
+      questionDescriptor: { ...field.questionDescriptor },
+    } : {}),
     classification: classifyLeverApplicationField({ ...field, id, label }),
   };
 }
@@ -199,6 +202,13 @@ function fieldEvidence(field: ApplicationFieldDescriptor): string[] {
       : []),
     ...(field.section ? [`field-section:${field.section}`] : []),
     ...(field.sourceSelector ? [`field-source-selector:${field.sourceSelector}`] : []),
+    ...(field.questionDescriptor?.promptText ? [`question-prompt:${field.questionDescriptor.promptText}`] : []),
+    ...(field.questionDescriptor?.sectionTitle ? [`question-section:${field.questionDescriptor.sectionTitle}`] : []),
+    ...(field.questionDescriptor ? [`question-source:${field.questionDescriptor.sourceStrategy}`] : []),
+    ...(field.questionDescriptor ? [`question-confidence:${field.questionDescriptor.confidence}`] : []),
+    ...(field.questionDescriptor?.nearbyInstructionText
+      ? [`question-instruction:${field.questionDescriptor.nearbyInstructionText}`]
+      : []),
   ];
 }
 
@@ -209,6 +219,15 @@ function blockerQuestion(field: ApplicationFieldDescriptor): string {
     labels.includes("yes") &&
     labels.includes("no") &&
     (normalized(field.label) === "yes" || normalized(field.label) === "no");
+  const questionDescriptor = field.questionDescriptor;
+  if (field.classification === "unknown" && isUnlabeledBinaryRadio && questionDescriptor?.promptText) {
+    if (questionDescriptor.confidence === "high") {
+      return questionDescriptor.sectionTitle
+        ? `Required question under "${questionDescriptor.sectionTitle}": "${questionDescriptor.promptText}" — choose Yes or No.`
+        : `Required application question: "${questionDescriptor.promptText}" — choose Yes or No.`;
+    }
+    return `Required Yes/No application question. Nearby text may be: "${questionDescriptor.promptText}". Please answer manually.`;
+  }
   return isUnlabeledBinaryRadio
     ? `Required yes/no application question (control ${field.id}); the question text was not exposed.`
     : field.label;
