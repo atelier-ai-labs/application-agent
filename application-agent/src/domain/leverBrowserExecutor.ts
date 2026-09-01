@@ -192,11 +192,26 @@ function fieldEvidence(field: ApplicationFieldDescriptor): string[] {
     "executor:lever-browser",
     `field-id:${field.id}`,
     `field-type:${field.type}`,
+    `field-required:${field.required}`,
     `classification:${field.classification}`,
     ...(field.options && field.options.length > 0
       ? [`options:${field.options.map((option) => option.label).join("|")}`]
       : []),
+    ...(field.section ? [`field-section:${field.section}`] : []),
+    ...(field.sourceSelector ? [`field-source-selector:${field.sourceSelector}`] : []),
   ];
+}
+
+function blockerQuestion(field: ApplicationFieldDescriptor): string {
+  const labels = field.options?.map((option) => normalized(option.label)) ?? [];
+  const isUnlabeledBinaryRadio = field.type === "radio" &&
+    labels.length === 2 &&
+    labels.includes("yes") &&
+    labels.includes("no") &&
+    (normalized(field.label) === "yes" || normalized(field.label) === "no");
+  return isUnlabeledBinaryRadio
+    ? `Required yes/no application question (control ${field.id}); the question text was not exposed.`
+    : field.label;
 }
 
 function blockerKind(
@@ -225,7 +240,7 @@ function formBlocker(
     kind,
     unit: "submission",
     field: field.id,
-    question: field.label,
+    question: blockerQuestion(field),
     reason,
     evidence: fieldEvidence(field),
     resumeAfterHuman: true,

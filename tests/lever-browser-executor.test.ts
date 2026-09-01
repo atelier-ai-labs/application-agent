@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   LeverBrowserExecutor,
+  classifyLeverApplicationField,
   exampleCandidateProfile,
   BrowserExecutionDiagnosticError,
   safeBrowserDiagnosticMessage,
@@ -369,6 +370,34 @@ describe("LeverBrowserExecutor", () => {
     expect(result.status).toBe("needs_input");
     expect(result.blockers[0]?.kind).toBe("captcha");
     expect(result.captcha?.state).toBe(expectedState);
+  });
+
+  it("preserves an ambiguous generated yes/no radio control as an actionable human blocker", async () => {
+    const fieldId = "cards_1d794e0f-e60d-479b-9c6e-2b60b82b13aa__field0_";
+    const session = new FakeSession([new FakeField({
+      id: fieldId,
+      label: "Yes",
+      type: "radio",
+      required: true,
+      options: [{ label: "Yes", value: "yes" }, { label: "No", value: "no" }],
+    })]);
+    const result = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      now: () => capturedAt,
+    }).execute(request());
+
+    expect(classifyLeverApplicationField({ id: fieldId, label: "Yes", type: "radio" })).toBe("unknown");
+    expect(result.state).toBe("requires_human");
+    if (result.state !== "requires_human") return;
+    expect(result.blocker.kind).toBe("unknown_form_field");
+    expect(result.blocker.field).toBe(fieldId);
+    expect(result.blocker.question).toBe(`Required yes/no application question (control ${fieldId}); the question text was not exposed.`);
+    expect(result.blocker.reason).toContain("no value was guessed");
+    expect(result.blocker.evidence).toContain("field-type:radio");
+    expect(result.blocker.evidence).toContain("field-required:true");
+    expect(result.blocker.evidence).toContain("options:Yes|No");
+    expect(session.fields[0].selectCalls).toBe(0);
+    expect(session.submitClicks).toBe(0);
   });
 
   it("records a typed browser-launch diagnostic without leaking sensitive error text", async () => {
