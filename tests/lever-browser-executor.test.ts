@@ -529,6 +529,46 @@ describe("LeverBrowserExecutor", () => {
     expect(session.submitClicks).toBe(0);
   });
 
+  it("does not apply a resolved unknown-field answer after the inspected question changes", async () => {
+    const fieldId = "cards_question__field0_";
+    const blocker: CareerBlocker = {
+      ...resolvedCareerBlocker(fieldId, "yes"),
+      kind: "unknown_form_field",
+      question: 'Required application question: "Original question" — choose Yes or No.',
+      evidence: [
+        "executor:lever-browser",
+        `field-id:${fieldId}`,
+        "field-type:radio",
+        "field-required:true",
+        "classification:unknown",
+        "options:Yes|No",
+        "question-prompt:Original question",
+        "question-source:question_container",
+        "question-confidence:high",
+      ],
+    };
+    const session = new FakeSession([new FakeField({
+      id: fieldId,
+      label: "Yes",
+      type: "radio",
+      required: true,
+      options: [{ label: "Yes", value: "yes" }, { label: "No", value: "no" }],
+      questionDescriptor: {
+        promptText: "Changed question",
+        sourceStrategy: "question_container",
+        confidence: "high",
+      },
+    })]);
+    const result = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      now: () => capturedAt,
+    }).execute(request({ careerJob: careerJob({ blockers: [blocker] }) }));
+
+    expect(result.state).toBe("requires_human");
+    expect(session.fields[0].selectCalls).toBe(0);
+    expect(result.state === "requires_human" ? result.blocker.reason : "").toContain("no value was guessed");
+  });
+
   it("records a typed browser-launch diagnostic without leaking sensitive error text", async () => {
     const failure = new BrowserExecutionDiagnosticError({
       stage: "browser_launch",

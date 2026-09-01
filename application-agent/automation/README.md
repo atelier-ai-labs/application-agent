@@ -135,6 +135,12 @@ current trust, policy, provenance, and external-proof checks.
 | `ATELIER_EXECUTION_BROWSER_TIMEOUT_MS` | `15000` | Browser navigation/control timeout. |
 | `ATELIER_EXECUTION_MAX_CONCURRENT` | `1` | Small local session capacity. |
 | `ATELIER_EXECUTION_SESSION_TIMEOUT_MS` | `1800000` | In-memory session inactivity timeout. |
+| `ATELIER_SLACK_BOT_TOKEN` | unset | Server-only Slack bot token for `chat.postMessage`/`chat.update`. |
+| `ATELIER_SLACK_APP_TOKEN` | unset | Server-only Slack app-level token for Socket Mode `apps.connections.open`. |
+| `ATELIER_SLACK_CHANNEL_ID` | unset | Exact channel receiving actionable Career Agent questions. |
+| `ATELIER_SLACK_ALLOWED_USER_ID` | unset | Exact Slack user allowed to answer attention events. |
+| `ATELIER_SLACK_ALLOWED_TEAM_ID` | unset | Optional exact Slack workspace/team restriction. |
+| `ATELIER_SLACK_API_BASE_URL` | `https://slack.com/api` | HTTPS Slack API base; normally left at the default. |
 | `VITE_BROAD_DISCOVERY_ENABLED` | `false` | Browser-readable opt-in for adding the bounded broad-reference source to newly created live campaigns. |
 | `ATELIER_BRAVE_SEARCH_API_KEY` | unset | Server-only Brave Search Web API subscription token; required for live broad discovery. |
 | `ATELIER_BRAVE_SEARCH_API_BASE_URL` | `https://api.search.brave.com/res/v1/web/search` | HTTPS endpoint override for the documented Brave Web Search API. |
@@ -159,6 +165,27 @@ current trust, policy, provenance, and external-proof checks.
 Do not put private resume paths, candidate values, browser cookies, or
 credentials in Vite variables or source control. This host is a local trusted
 boundary, not an authenticated remote service.
+
+## Slack attention transport
+
+The Slack adapter is Node-only and uses Slack Socket Mode, so the local
+listener does not require a publicly reachable webhook. Create a Slack app,
+enable Socket Mode and Interactivity, grant the bot `chat:write`, create an
+app-level token with `connections:write`, invite the bot to the configured
+channel, and set the four required `ATELIER_SLACK_*` variables from the table
+above. Optionally set `ATELIER_SLACK_ALLOWED_TEAM_ID` as a workspace guard.
+
+Start the transport with:
+
+```bash
+npm run career-agent:slack
+```
+
+The transport accepts only one configured user, workspace (when configured),
+channel, open event, and valid event option. The background Career Agent
+runtime supplies the response handler and existing host-resume callback; the
+transport itself never guesses answers, changes profile facts, or submits an
+application. Missing configuration fails before any Slack request is made.
 
 ### Personal Google OAuth setup
 

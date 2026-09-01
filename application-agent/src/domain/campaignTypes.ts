@@ -18,6 +18,7 @@ import type {
   BrowserExecutionTelemetry,
   BrowserNavigationDiagnostics,
 } from "./executor";
+import type { PersistedAttentionEvent } from "./attention";
 
 export type CampaignStatus = "draft" | "active" | "paused" | "completed" | "failed";
 
@@ -198,6 +199,8 @@ export interface Campaign {
   lastRunTrace?: ExecutionRunTrace;
   /** Bounded operational history used for before/after comparisons. */
   runHistory?: readonly ExecutionRunTrace[];
+  /** Bounded durable human-attention events; internal routing IDs stay in the record. */
+  attentionEvents?: readonly PersistedAttentionEvent[];
   createdAt: string;
   updatedAt: string;
 }

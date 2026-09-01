@@ -32,9 +32,32 @@ Career Agent introduces persistent campaigns and a caller-driven `runCampaign()`
 | Preparation | Existing `ApplicationService` | Real local deterministic preparation core |
 | Executor | `SourceAwareApplicationExecutor` in the HQ browser surface; the loopback Node host injects the Node-only `LeverBrowserExecutor` backed by Playwright | Demo postings may receive visibly simulated proof; live Lever postings can be inspected/prepared by the real browser adapter, which stops before final Submit |
 | Tracker | `InMemoryJobTracker` for demo evidence; `HttpGoogleSheetsJobTracker` → the Node-only `GoogleSheetsJobTracker` for live confirmed applications | The canonical `Nate Job Search Tracker` is updated only after explicit Applied confirmation and configured server credentials |
-| Notifications | Attention flags on career events | No ChatGPT or external delivery |
+| Notifications | Durable `needs_input` attention events plus an injected server-only Slack adapter | Routine activity stays quiet; no client secrets or automatic submission |
 
 The worker’s adapters are intentionally small interfaces: `JobSource`, `ApplicationExecutor`, and `JobTracker`. A source returns `JobSourceListing` values that are normalized through the existing `JobPosting` contract. It may return non-fatal warnings so partial provider results are visible. An executor may return a structured human blocker, `ready_to_submit`, a failure, or validated `SubmissionProof`. Only that proof allows `ApplicationService.recordApplied()` and the `application.applied` event. The real Lever browser executor never returns proof in this phase. A model response alone cannot establish external state.
+
+### Slack human attention
+
+The first human-facing attention adapter is server-only Slack Socket Mode. The
+Career Agent core creates one durable `needs_input` event for an actionable
+unknown Yes/No employer question; Slack only renders the safe company, role,
+question, and buttons. A response is accepted only for an open event, the
+configured workspace/user/channel, and one of that event’s options. The core
+then records the explicit answer against that application blocker and invokes
+the existing execution-host resume port when one is supplied. It never writes
+the answer into the candidate profile and it never opens the final Submit lane.
+
+Required server environment variables are `ATELIER_SLACK_BOT_TOKEN`,
+`ATELIER_SLACK_APP_TOKEN`, `ATELIER_SLACK_CHANNEL_ID`, and
+`ATELIER_SLACK_ALLOWED_USER_ID`; `ATELIER_SLACK_ALLOWED_TEAM_ID` is an
+optional workspace restriction. The bot needs `chat:write`; the app-level
+Socket Mode token needs `connections:write`. Enable Socket Mode and
+Interactivity in the Slack app, invite the bot to the configured channel, and
+keep every value outside `VITE_` variables. Start the transport with
+`npm run career-agent:slack`. The current HQ browser UI remains the engineering
+console; a background worker must construct the adapter with its existing
+Career Agent service and host-resume callback so Slack responses share that
+worker’s persisted repository.
 
 ### Browser execution host
 

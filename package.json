@@ -9,6 +9,7 @@
     "typecheck": "tsc -b",
     "preview": "vite preview",
     "career-agent:executor": "vite-node application-agent/automation/executionHost/run.ts",
+    "career-agent:slack": "vite-node application-agent/automation/slack/run.ts",
     "career-agent:google-auth": "vite-node application-agent/automation/googleAuth.ts",
     "test": "vitest run",
     "test:watch": "vitest"

@@ -1,4 +1,5 @@
 export * from "./domain/answers";
+export * from "./domain/attention";
 export * from "./domain/campaignLifecycle";
 export * from "./domain/campaignTypes";
 export * from "./domain/concurrency";

@@ -24,6 +24,7 @@ import {
   safeBrowserDiagnosticMessage,
 } from "./executor";
 import type {
+  CareerBlocker,
   CareerBlockerDraft,
   CareerJob,
 } from "./campaignTypes";
@@ -437,6 +438,33 @@ function answerForField(
   });
 }
 
+function blockerEvidenceValue(blocker: CareerBlocker, prefix: string): string | undefined {
+  return blocker.evidence.find((item) => item.startsWith(prefix))?.slice(prefix.length).trim() || undefined;
+}
+
+/** Do not reuse an explicit answer when the freshly inspected unknown control changed. */
+function careerBlockerMatchesField(blocker: CareerBlocker, field: ApplicationFieldDescriptor): boolean {
+  if (blocker.kind !== "unknown_form_field") return true;
+  const expectedPrompt = blockerEvidenceValue(blocker, "question-prompt:");
+  const actualPrompt = field.questionDescriptor?.promptText;
+  if (!expectedPrompt || !actualPrompt || normalized(expectedPrompt) !== normalized(actualPrompt)) return false;
+
+  const expectedSection = blockerEvidenceValue(blocker, "question-section:");
+  if (expectedSection) {
+    const actualSection = field.questionDescriptor?.sectionTitle ?? field.section;
+    if (!actualSection || normalized(expectedSection) !== normalized(actualSection)) return false;
+  }
+
+  const expectedOptions = blockerEvidenceValue(blocker, "options:")
+    ?.split("|")
+    .map((option) => normalized(option))
+    .filter(Boolean);
+  const actualOptions = field.options?.map((option) => normalized(option.label)).filter(Boolean);
+  if (!expectedOptions || !actualOptions || expectedOptions.length !== actualOptions.length ||
+    expectedOptions.some((option) => !actualOptions.includes(option))) return false;
+  return true;
+}
+
 function resolvedCareerValue(
   field: ApplicationFieldDescriptor,
   request: ApplicationExecutionRequest,
@@ -445,9 +473,9 @@ function resolvedCareerValue(
     (blocker) => blocker.status === "resolved" && isAnswerValuePresent(blocker.value),
   );
   const exact = candidates.find((blocker) => blocker.field === field.id);
-  if (exact) return exact.value;
+  if (exact && careerBlockerMatchesField(exact, field)) return exact.value;
   const byQuestion = candidates.find((blocker) => normalized(blocker.question) === normalized(field.label));
-  return byQuestion?.value;
+  return byQuestion && careerBlockerMatchesField(byQuestion, field) ? byQuestion.value : undefined;
 }
 
 function usableAnswer(

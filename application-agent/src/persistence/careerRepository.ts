@@ -18,6 +18,7 @@ import type {
   SubmissionPolicy,
   TrackerSyncState,
 } from "../domain/campaignTypes";
+import type { PersistedAttentionEvent } from "../domain/attention";
 import type { AnswerValue } from "../domain/types";
 import type {
   BrowserExecutionBoundaryState,
@@ -25,6 +26,11 @@ import type {
   BrowserCaptchaDiagnostics,
   BrowserNavigationDiagnostics,
 } from "../domain/executor";
+import {
+  ATTENTION_EVENT_HISTORY_LIMIT,
+  isPersistedAttentionEvent,
+} from "../domain/attention";
+
 import {
   EXECUTION_RUN_HISTORY_LIMIT,
   isExecutionFailureReason,
@@ -71,17 +77,31 @@ function loadArray(storage: KeyValueStorage, key: string): unknown[] {
 }
 
 function boundedHistory(value: unknown): unknown {
-  if (!isRecord(value) || !Array.isArray(value.runHistory)) return value;
+  if (!isRecord(value)) return value;
+  const withHistory = Array.isArray(value.runHistory)
+    ? {
+        ...value,
+        // A malformed historical item must not hide an otherwise valid campaign.
+        runHistory: value.runHistory.filter(isExecutionRunTrace).slice(-EXECUTION_RUN_HISTORY_LIMIT),
+      }
+    : value;
+  if (!Array.isArray(value.attentionEvents)) return withHistory;
   return {
-    ...value,
-    // A malformed historical item must not hide an otherwise valid campaign.
-    runHistory: value.runHistory.filter(isExecutionRunTrace).slice(-EXECUTION_RUN_HISTORY_LIMIT),
+    ...withHistory,
+    // A malformed attention event must not hide an otherwise valid campaign.
+    attentionEvents: value.attentionEvents.filter(isPersistedAttentionEvent).slice(-ATTENTION_EVENT_HISTORY_LIMIT),
   };
 }
 
 function boundedCampaign(campaign: Campaign): Campaign {
-  return campaign.runHistory
-    ? { ...campaign, runHistory: campaign.runHistory.slice(-EXECUTION_RUN_HISTORY_LIMIT) }
+  return campaign.runHistory || campaign.attentionEvents
+    ? {
+        ...campaign,
+        ...(campaign.runHistory ? { runHistory: campaign.runHistory.slice(-EXECUTION_RUN_HISTORY_LIMIT) } : {}),
+        ...(campaign.attentionEvents
+          ? { attentionEvents: campaign.attentionEvents.slice(-ATTENTION_EVENT_HISTORY_LIMIT) as readonly PersistedAttentionEvent[] }
+          : {}),
+      }
     : campaign;
 }
 
@@ -415,6 +435,7 @@ export function isCampaign(value: unknown): value is Campaign {
     (value.lastDiscovery === undefined || isDiscoverySummary(value.lastDiscovery)) &&
     (value.lastRunTrace === undefined || isExecutionRunTrace(value.lastRunTrace)) &&
     (value.runHistory === undefined || (Array.isArray(value.runHistory) && value.runHistory.every(isExecutionRunTrace))) &&
+    (value.attentionEvents === undefined || (Array.isArray(value.attentionEvents) && value.attentionEvents.every(isPersistedAttentionEvent))) &&
     isTimestamp(value.createdAt) &&
     isTimestamp(value.updatedAt)
   );

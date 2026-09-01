@@ -10,6 +10,16 @@ import { assertCampaignTransition } from "../domain/campaignLifecycle";
 import { createApplicationService, type ApplicationService } from "./applicationService";
 import { attentionCategoryForEvent, isAttentionWorthyEvent } from "../domain/notifications";
 import {
+  attentionDescriptorSignature,
+  attentionEventForCareerBlocker,
+  isAttentionResponse,
+  publicAttentionEvent,
+  type AttentionEvent,
+  type AttentionResponse,
+  type NotificationAdapter,
+  type PersistedAttentionEvent,
+} from "../domain/attention";
+import {
   EXECUTION_RUN_HISTORY_LIMIT,
   ExecutionTraceBuilder,
   executionFailureReason,
@@ -86,6 +96,9 @@ export interface CareerAgentDependencies {
   scout?: JobScout;
   executor?: ApplicationExecutor;
   tracker?: JobTracker;
+  notificationAdapter?: NotificationAdapter;
+  /** Existing execution-host resume operation; no default submission path is added. */
+  resumeAttention?: (campaignId: string, jobId: string) => Promise<void>;
 }
 
 interface RunAccumulator {
@@ -114,6 +127,21 @@ interface PreparedExecutionOverride {
   result?: ApplicationExecutorResult;
   executionId?: string;
   hostStatus?: CareerExecutionState["status"];
+}
+
+interface CareerBlockerResolutionOptions {
+  attentionResponse?: AttentionResponse;
+}
+
+export type CareerAttentionResponseResult =
+  | { status: "resolved"; event: AttentionEvent; careerJob: CareerJob }
+  | { status: "duplicate"; event: AttentionEvent; careerJob: CareerJob };
+
+export class AttentionResponseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AttentionResponseError";
+  }
 }
 
 const DEFAULT_SEARCH_CRITERIA: SearchCriteria = {
@@ -481,6 +509,12 @@ export class CareerAgentService {
   private readonly scout: JobScout;
   private readonly executor: ApplicationExecutor;
   private readonly tracker: JobTracker;
+  private readonly notificationAdapter?: NotificationAdapter;
+  private readonly resumeAttention?: (campaignId: string, jobId: string) => Promise<void>;
+  private readonly attentionResponseInFlight = new Map<string, {
+    selectedOption: string;
+    promise: Promise<CareerAttentionResponseResult>;
+  }>();
 
   constructor(
     private readonly profile: CandidateProfile,
@@ -494,6 +528,8 @@ export class CareerAgentService {
     this.scout = dependencies.scout ?? new JobScout({});
     this.executor = dependencies.executor ?? new UnavailableApplicationExecutor();
     this.tracker = dependencies.tracker ?? new UnavailableJobTracker();
+    this.notificationAdapter = dependencies.notificationAdapter;
+    this.resumeAttention = dependencies.resumeAttention;
   }
 
   listCampaigns(): readonly Campaign[] {
@@ -528,6 +564,28 @@ export class CareerAgentService {
     return [...this.careerRepository.listEvents(campaignId)].sort(
       (left, right) => Date.parse(left.occurredAt) - Date.parse(right.occurredAt),
     );
+  }
+
+  listAttentionEvents(campaignId?: string): readonly AttentionEvent[] {
+    return this.careerRepository
+      .listCampaigns()
+      .filter((campaign) => campaignId === undefined || campaign.id === campaignId)
+      .flatMap((campaign) => (campaign.attentionEvents ?? []).map(publicAttentionEvent));
+  }
+
+  /** Re-delivers only durable open events that were not acknowledged by an adapter. */
+  async publishPendingAttentionEvents(campaignId?: string): Promise<number> {
+    if (!this.notificationAdapter) return 0;
+    const records = this.careerRepository
+      .listCampaigns()
+      .filter((campaign) => campaignId === undefined || campaign.id === campaignId)
+      .flatMap((campaign) => campaign.attentionEvents ?? [])
+      .filter((record) => record.status === "open" && !record.publishedAt);
+    let delivered = 0;
+    for (const record of records) {
+      if (await this.deliverAttentionRecord(record)) delivered += 1;
+    }
+    return delivered;
   }
 
   createCampaign(input: CreateCampaignInput): Campaign {
@@ -732,6 +790,8 @@ export class CareerAgentService {
     if (campaign.status !== "active") {
       return finish();
     }
+
+    await this.publishPendingAttentionEvents(campaignId);
 
     for (const job of this.listJobs(campaignId).filter((candidate) => candidate.status === "needs_input")) {
       let resumeAttempt = 1;
@@ -950,6 +1010,7 @@ export class CareerAgentService {
     jobId: string,
     blockerId: string,
     value: AnswerValue,
+    options: CareerBlockerResolutionOptions = {},
   ): Promise<CareerJob> {
     if (!answerIsMeaningful(value)) {
       throw new Error("A career blocker needs a non-empty answer.");
@@ -979,6 +1040,7 @@ export class CareerAgentService {
       updatedAt: this.now(),
     };
     this.careerRepository.saveJob(resolved);
+    await this.recordAttentionResolution(campaign, resolved, blocker, value, options.attentionResponse);
 
     // A real local browser owns its live session. Resolving a blocker updates
     // the persisted domain value, but the UI must explicitly resume that
@@ -991,6 +1053,94 @@ export class CareerAgentService {
       return (await this.resumeBlockedJob(campaign, resolved)).careerJob;
     }
     return resolved;
+  }
+
+  /**
+   * Applies one authenticated response to the exact persisted blocker and then
+   * invokes the already-existing host resume operation when one is injected.
+   */
+  async resolveAttentionResponse(response: AttentionResponse): Promise<CareerAttentionResponseResult> {
+    if (!isAttentionResponse(response)) {
+      throw new AttentionResponseError("The attention response is malformed.");
+    }
+
+    const inFlight = this.attentionResponseInFlight.get(response.eventId);
+    if (inFlight) {
+      if (inFlight.selectedOption !== response.selectedOption) {
+        throw new AttentionResponseError("That attention event is already being resolved with a different choice.");
+      }
+      return inFlight.promise;
+    }
+
+    const promise = this.resolveAttentionResponseOnce(response);
+    this.attentionResponseInFlight.set(response.eventId, {
+      selectedOption: response.selectedOption,
+      promise,
+    });
+    try {
+      return await promise;
+    } finally {
+      if (this.attentionResponseInFlight.get(response.eventId)?.promise === promise) {
+        this.attentionResponseInFlight.delete(response.eventId);
+      }
+    }
+  }
+
+  private async resolveAttentionResponseOnce(response: AttentionResponse): Promise<CareerAttentionResponseResult> {
+
+    const located = this.findAttentionRecord(response.eventId);
+    if (!located) throw new AttentionResponseError("That attention event is unknown.");
+    const { campaign, record } = located;
+    if (record.status === "resolved") {
+      if (record.response?.selectedOption !== response.selectedOption) {
+        throw new AttentionResponseError("That attention event was already resolved with a different choice.");
+      }
+      return {
+        status: "duplicate",
+        event: publicAttentionEvent(record),
+        careerJob: this.getJob(record.jobId),
+      };
+    }
+    if (record.status !== "open") {
+      throw new AttentionResponseError("That attention event is no longer open.");
+    }
+
+    const job = this.getJob(record.jobId);
+    if (job.campaignId !== campaign.id || job.applicationId !== record.applicationId || job.status !== "needs_input") {
+      throw new AttentionResponseError("That application is no longer eligible for this attention response.");
+    }
+    if (job.execution?.mode !== "real_local" || !job.execution.hostExecutionId) {
+      throw new AttentionResponseError("That application no longer has a resumable local browser execution.");
+    }
+    const blocker = job.blockers.find((candidate) => candidate.id === record.blockerId);
+    if (!blocker || blocker.status !== "open") {
+      throw new AttentionResponseError("That application blocker is no longer open.");
+    }
+
+    const currentSignature = attentionDescriptorSignature(blocker);
+    if (!currentSignature || currentSignature !== record.descriptorSignature) {
+      await this.replaceStaleAttentionEvent(campaign, job, record, blocker);
+      throw new AttentionResponseError("The application question changed; a new attention event was created.");
+    }
+
+    const option = record.question.options.find((candidate) => candidate.id === response.selectedOption);
+    if (!option) throw new AttentionResponseError("That choice is not valid for this attention event.");
+
+    const resolved = await this.resolveCareerBlocker(
+      campaign.id,
+      job.id,
+      blocker.id,
+      option.id,
+      { attentionResponse: response },
+    );
+    if (this.resumeAttention) await this.resumeAttention(campaign.id, job.id);
+    const updatedCampaign = this.getCampaign(campaign.id);
+    const updatedRecord = updatedCampaign.attentionEvents?.find((candidate) => candidate.id === record.id) ?? record;
+    return {
+      status: "resolved",
+      event: publicAttentionEvent(updatedRecord),
+      careerJob: resolved,
+    };
   }
 
   async resumeBlockedApplication(campaignId: string, jobId: string): Promise<CareerJob> {
@@ -1055,6 +1205,146 @@ export class CareerAgentService {
       throw new Error("Tracker retry requires persisted Applied evidence.");
     }
     return this.syncTrackerForAppliedJob(campaign, job, application, evidence, "tracker.retry_started");
+  }
+
+  private findAttentionRecord(eventId: string): { campaign: Campaign; record: PersistedAttentionEvent } | undefined {
+    for (const campaign of this.careerRepository.listCampaigns()) {
+      const record = campaign.attentionEvents?.find((candidate) => candidate.id === eventId);
+      if (record) return { campaign, record };
+    }
+    return undefined;
+  }
+
+  private markAttentionEventsForJob(
+    campaignId: string,
+    jobId: string,
+    status: "cancelled" | "expired",
+  ): void {
+    const campaign = this.getCampaign(campaignId);
+    const attentionEvents = campaign.attentionEvents ?? [];
+    const updated = attentionEvents.map((event) => event.jobId === jobId && event.status === "open"
+      ? { ...event, status, resolvedAt: this.now() }
+      : event);
+    if (updated.some((event, index) => event !== attentionEvents[index])) {
+      this.careerRepository.saveCampaign({ ...campaign, attentionEvents: updated, updatedAt: this.now() });
+    }
+  }
+
+  private async deliverAttentionRecord(record: PersistedAttentionEvent): Promise<boolean> {
+    if (!this.notificationAdapter || record.status !== "open" || record.publishedAt) return false;
+    try {
+      await this.notificationAdapter.publishAttentionEvent(publicAttentionEvent(record));
+    } catch {
+      // The durable open event remains unpublished so a later worker cycle can retry it.
+      return false;
+    }
+    const campaign = this.getCampaign(record.campaignId);
+    const events = (campaign.attentionEvents ?? []).map((candidate) => candidate.id === record.id
+      ? { ...candidate, publishedAt: this.now() }
+      : candidate);
+    this.careerRepository.saveCampaign({ ...campaign, attentionEvents: events, updatedAt: this.now() });
+    return true;
+  }
+
+  private async publishAttentionForJob(campaign: Campaign, job: CareerJob): Promise<void> {
+    for (const blocker of job.blockers.filter((candidate) => candidate.status === "open")) {
+      const generated = attentionEventForCareerBlocker({
+        campaignId: campaign.id,
+        jobId: job.id,
+        blocker,
+        createdAt: blocker.createdAt,
+        createId: this.createId,
+      });
+      if (!generated) continue;
+
+      const currentCampaign = this.getCampaign(campaign.id);
+      const existing = currentCampaign.attentionEvents?.find((candidate) =>
+        candidate.jobId === job.id && candidate.blockerId === blocker.id && candidate.status === "open",
+      );
+      if (existing) {
+        await this.deliverAttentionRecord(existing);
+        continue;
+      }
+
+      const next = {
+        ...currentCampaign,
+        attentionEvents: [...(currentCampaign.attentionEvents ?? []), generated.record],
+        updatedAt: this.now(),
+      };
+      this.careerRepository.saveCampaign(next);
+      await this.deliverAttentionRecord(generated.record);
+    }
+  }
+
+  private async recordAttentionResolution(
+    campaign: Campaign,
+    job: CareerJob,
+    blocker: CareerBlocker,
+    value: AnswerValue,
+    suppliedResponse?: AttentionResponse,
+  ): Promise<void> {
+    const currentCampaign = this.getCampaign(campaign.id);
+    const record = currentCampaign.attentionEvents?.find((candidate) =>
+      candidate.jobId === job.id && candidate.blockerId === blocker.id && candidate.status === "open",
+    );
+    if (!record) return;
+
+    const rawValue = typeof value === "string" ? value.trim() : String(value);
+    const option = record.question.options.find((candidate) =>
+      candidate.id === rawValue || candidate.label.toLowerCase() === rawValue.toLowerCase(),
+    );
+    if (!option) return;
+    const response = suppliedResponse ?? {
+      eventId: record.id,
+      selectedOption: option.id,
+      actorIdentity: { provider: "web-ui", userId: "local" },
+      respondedAt: this.now(),
+    } satisfies AttentionResponse;
+    if (!isAttentionResponse(response) || response.eventId !== record.id || response.selectedOption !== option.id) return;
+
+    const resolved: PersistedAttentionEvent = {
+      ...record,
+      status: "resolved",
+      resolvedAt: response.respondedAt,
+      response,
+    };
+    const updatedCampaign: Campaign = {
+      ...currentCampaign,
+      attentionEvents: (currentCampaign.attentionEvents ?? []).map((candidate) => candidate.id === record.id ? resolved : candidate),
+      updatedAt: this.now(),
+    };
+    this.careerRepository.saveCampaign(updatedCampaign);
+    try {
+      await this.notificationAdapter?.closeAttentionEvent?.(publicAttentionEvent(resolved));
+    } catch {
+      // Closing a notification is best effort; the persisted resolution is authoritative.
+    }
+  }
+
+  private async replaceStaleAttentionEvent(
+    campaign: Campaign,
+    job: CareerJob,
+    record: PersistedAttentionEvent,
+    blocker: CareerBlocker,
+  ): Promise<void> {
+    const currentCampaign = this.getCampaign(campaign.id);
+    const cancelled = {
+      ...record,
+      status: "cancelled" as const,
+      resolvedAt: this.now(),
+    };
+    const generated = attentionEventForCareerBlocker({
+      campaignId: campaign.id,
+      jobId: job.id,
+      blocker,
+      createdAt: blocker.createdAt,
+      createId: this.createId,
+    });
+    const attentionEvents = (currentCampaign.attentionEvents ?? [])
+      .map((candidate) => candidate.id === record.id ? cancelled : candidate);
+    if (generated) attentionEvents.push(generated.record);
+    this.careerRepository.saveCampaign({ ...currentCampaign, attentionEvents, updatedAt: this.now() });
+    if (generated) await this.deliverAttentionRecord(generated.record);
   }
 
   /**
@@ -1198,6 +1488,7 @@ export class CareerAgentService {
       },
       updatedAt: this.now(),
     });
+    this.markAttentionEventsForJob(campaign.id, updated.id, "cancelled");
     this.appendEvent(campaign.id, "application.execution_cancelled", {
       ...careerEventMetadata(updated),
       executionId,
@@ -1231,6 +1522,7 @@ export class CareerAgentService {
       },
       updatedAt: this.now(),
     });
+    this.markAttentionEventsForJob(campaign.id, updated.id, "expired");
     this.appendEvent(campaign.id, "application.execution_failed", {
       ...careerEventMetadata(updated),
       executionId,
@@ -1612,6 +1904,7 @@ export class CareerAgentService {
       if (preparationDrafts.length > 0) {
         this.appendEvent(campaign.id, "application.needs_input", careerEventMetadata(careerJob, undefined, String(preparationDrafts.length)));
         this.appendEvent(campaign.id, "campaign.review_needed", careerEventMetadata(careerJob, undefined, "application_preparation"));
+        await this.publishAttentionForJob(campaign, careerJob);
         return { blocked: true };
       }
 
@@ -1862,7 +2155,11 @@ export class CareerAgentService {
     }
 
     if (execution.state === "requires_human") {
-      const drafts = [execution.blocker, ...(execution.blockers ?? [])].filter(isCareerBlockerDraft);
+      const drafts = [...new Map(
+        [execution.blocker, ...(execution.blockers ?? [])]
+          .filter(isCareerBlockerDraft)
+          .map((draft) => [careerBlockerKey(draft), draft] as const),
+      ).values()];
       if (drafts.length === 0) {
         const reason = "The executor returned a malformed human blocker; execution was stopped.";
         const failed = this.saveJob({ ...ready, status: "failed", decisionReason: reason, updatedAt: this.now() });
@@ -1895,6 +2192,7 @@ export class CareerAgentService {
       }
       this.appendEvent(campaign.id, "application.needs_input", careerEventMetadata(blocked, undefined, drafts.map((draft) => draft.kind).join(",")));
       this.appendEvent(campaign.id, "campaign.review_needed", careerEventMetadata(blocked, undefined, drafts[0].reason));
+      await this.publishAttentionForJob(campaign, blocked);
       return { careerJob: blocked, blocked: true };
     }
 
@@ -1935,6 +2233,7 @@ export class CareerAgentService {
       }
       this.appendEvent(campaign.id, "application.needs_input", careerEventMetadata(unsupported, undefined, blocker.kind));
       this.appendEvent(campaign.id, "campaign.review_needed", careerEventMetadata(unsupported, undefined, blocker.reason));
+      await this.publishAttentionForJob(campaign, unsupported);
       return { careerJob: unsupported, blocked: true };
     }
 
