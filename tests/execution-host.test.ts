@@ -269,6 +269,11 @@ describe("trusted local execution host", () => {
     expect(blocked.telemetry?.preflightInspectionDurationMs).toBeGreaterThanOrEqual(0);
     expect(blocked.telemetry?.browserPreparationDurationMs).toBeGreaterThanOrEqual(0);
     expect(blocked.telemetry?.domInspectionCount).toBe(1);
+    expect(blocked.telemetry?.boundaries).toMatchObject({
+      hostRequestAccepted: true,
+      executorStarted: false,
+      browserClosed: false,
+    });
     expect(JSON.stringify(blocked)).not.toContain("browserSessionHandle");
     expect(JSON.stringify(blocked)).not.toContain("server-only");
 
@@ -282,6 +287,11 @@ describe("trusted local execution host", () => {
     expect(ready.telemetry?.executorInspectionDurationMs).toBe(7);
     expect(ready.telemetry?.browserPreparationDurationMs).toBeGreaterThanOrEqual(0);
     expect(ready.telemetry?.domInspectionCount).toBe(3);
+    expect(ready.telemetry?.boundaries).toMatchObject({
+      hostRequestAccepted: true,
+      executorStarted: true,
+      browserClosed: false,
+    });
     expect(executor.inspectCalls).toBe(2);
     expect(executor.executeCalls).toBe(1);
     expect(executor.closeCalls).toBe(0);
@@ -289,6 +299,8 @@ describe("trusted local execution host", () => {
     const cancelled = await registry.cancel(started.id);
     expect(cancelled.status).toBe("cancelled");
     expect(cancelled.telemetry?.cancellationCount).toBe(1);
+    expect(cancelled.telemetry?.lateCompletionCount).toBe(0);
+    expect(cancelled.telemetry?.boundaries?.browserClosed).toBe(true);
     expect(executor.closeCalls).toBe(1);
   });
 

@@ -1,11 +1,18 @@
-import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Locator, type Page, type Response } from "playwright";
 import type {
   ApplicationFieldOption,
   ApplicationFieldType,
   BrowserHumanBoundary,
+  BrowserExecutionBoundaryState,
+  BrowserExecutionDiagnostic,
+  BrowserNavigationDiagnostics,
   LeverBrowserField,
   LeverBrowserSession,
   LeverBrowserSessionFactory,
+} from "../src/domain/executor";
+import {
+  BrowserExecutionDiagnosticError,
+  safeBrowserDiagnosticMessage,
 } from "../src/domain/executor";
 
 export interface PlaywrightLeverBrowserOptions {
@@ -27,6 +34,35 @@ interface InspectedRawField {
 
 function visibleFormControl(locator: Locator): Promise<boolean> {
   return locator.isVisible().catch(() => false);
+}
+
+function hostnameOf(value: string): string | undefined {
+  try {
+    return new URL(value).hostname || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function statusCategory(status: number): BrowserNavigationDiagnostics["httpStatusCategory"] {
+  const category = Math.floor(status / 100);
+  return category >= 1 && category <= 5 ? `${category}xx` as BrowserNavigationDiagnostics["httpStatusCategory"] : undefined;
+}
+
+function redirectCount(response: Response | null): number {
+  let count = 0;
+  let request = response?.request();
+  while (request?.redirectedFrom()) {
+    count += 1;
+    request = request.redirectedFrom() ?? undefined;
+  }
+  return count;
+}
+
+function isTimeoutError(error: unknown): boolean {
+  const name = error instanceof Error ? error.name : "";
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return name.toLowerCase().includes("timeout") || message.toLowerCase().includes("timeout");
 }
 
 class PlaywrightLeverBrowserField implements LeverBrowserField {
@@ -125,24 +161,97 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
 
 export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
   private closed = false;
+  private boundaryState: BrowserExecutionBoundaryState;
+  private navigationDiagnostics: BrowserNavigationDiagnostics = { outcome: "not_started" };
+  private diagnostic?: BrowserExecutionDiagnostic;
 
   constructor(
     private readonly page: Page,
     private readonly context: BrowserContext,
     private readonly browser: Browser,
     private readonly timeoutMs: number,
+    boundaries: BrowserExecutionBoundaryState,
   ) {
     this.page.setDefaultTimeout(timeoutMs);
+    this.boundaryState = { ...boundaries };
+  }
+
+  diagnostics() {
+    return {
+      boundaries: { ...this.boundaryState },
+      navigation: { ...this.navigationDiagnostics },
+      ...(this.diagnostic ? { diagnostic: this.diagnostic } : {}),
+    };
   }
 
   async navigate(url: string): Promise<void> {
-    await this.page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: this.timeoutMs,
-    });
-    await this.page.waitForLoadState("networkidle", {
-      timeout: Math.min(this.timeoutMs, 3_000),
-    }).catch(() => undefined);
+    const targetHost = hostnameOf(url);
+    this.boundaryState = { ...this.boundaryState, navigationStarted: true };
+    this.navigationDiagnostics = {
+      targetHost,
+      outcome: "started",
+    };
+    try {
+      const response = await this.page.goto(url, {
+        waitUntil: "domcontentloaded",
+        timeout: this.timeoutMs,
+      });
+      const httpStatus = response?.status();
+      this.boundaryState = {
+        ...this.boundaryState,
+        navigationCompleted: true,
+        domReady: true,
+      };
+      this.navigationDiagnostics = {
+        targetHost,
+        finalHostname: hostnameOf(this.page.url()),
+        outcome: httpStatus !== undefined && httpStatus >= 400 ? "http_error" : "completed",
+        ...(httpStatus !== undefined ? { httpStatus, httpStatusCategory: statusCategory(httpStatus) } : {}),
+        redirectCount: redirectCount(response),
+        loadStateReached: "domcontentloaded",
+      };
+      try {
+        await this.page.waitForLoadState("networkidle", {
+          timeout: Math.min(this.timeoutMs, 3_000),
+        });
+        this.navigationDiagnostics = {
+          ...this.navigationDiagnostics,
+          loadStateReached: "networkidle",
+          finalHostname: hostnameOf(this.page.url()),
+        };
+      } catch (error) {
+        if (isTimeoutError(error)) {
+          this.navigationDiagnostics = {
+            ...this.navigationDiagnostics,
+            networkIdleTimedOut: true,
+            finalHostname: hostnameOf(this.page.url()),
+          };
+        } else {
+          this.diagnostic = {
+            stage: "page_load",
+            reasonCode: "page_load_failed",
+            message: safeBrowserDiagnosticMessage(error, "The page did not reach the requested load state."),
+            boundaries: { ...this.boundaryState },
+            navigation: { ...this.navigationDiagnostics },
+          };
+        }
+      }
+    } catch (error) {
+      this.navigationDiagnostics = {
+        ...this.navigationDiagnostics,
+        outcome: "failed",
+        finalHostname: hostnameOf(this.page.url()),
+      };
+      const diagnostic: BrowserExecutionDiagnostic = {
+        stage: "navigation",
+        reasonCode: isTimeoutError(error) ? "navigation_timeout" : "navigation_failed",
+        message: safeBrowserDiagnosticMessage(error, "The Lever application page could not be opened."),
+        boundaries: { ...this.boundaryState },
+        navigation: { ...this.navigationDiagnostics },
+      };
+      this.diagnostic = diagnostic;
+      throw new BrowserExecutionDiagnosticError(diagnostic);
+    }
   }
 
   currentUrl(): string {
@@ -296,6 +405,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
     this.closed = true;
     await this.context.close().catch(() => undefined);
     await this.browser.close().catch(() => undefined);
+    this.boundaryState = { ...this.boundaryState, browserClosed: true };
   }
 }
 
@@ -311,14 +421,54 @@ export class PlaywrightLeverBrowserSessionFactory implements LeverBrowserSession
   }
 
   async open(_applicationId: string): Promise<LeverBrowserSession> {
-    const browser = await chromium.launch({
-      headless: this.options.headless,
-      slowMo: this.options.slowMo,
+    let browser: Browser;
+    try {
+      browser = await chromium.launch({
+        headless: this.options.headless,
+        slowMo: this.options.slowMo,
+      });
+    } catch (error) {
+      throw new BrowserExecutionDiagnosticError({
+        stage: "browser_launch",
+        reasonCode: "browser_launch_failed",
+        message: safeBrowserDiagnosticMessage(error, "Chromium could not be launched."),
+        boundaries: { browserLaunched: false, contextCreated: false, pageCreated: false },
+      });
+    }
+
+    let context: BrowserContext;
+    try {
+      context = await browser.newContext({
+        acceptDownloads: false,
+      });
+    } catch (error) {
+      await browser.close().catch(() => undefined);
+      throw new BrowserExecutionDiagnosticError({
+        stage: "context_create",
+        reasonCode: "context_create_failed",
+        message: safeBrowserDiagnosticMessage(error, "The Chromium browser context could not be created."),
+        boundaries: { browserLaunched: true, contextCreated: false, pageCreated: false },
+      });
+    }
+
+    let page: Page;
+    try {
+      page = await context.newPage();
+    } catch (error) {
+      await context.close().catch(() => undefined);
+      await browser.close().catch(() => undefined);
+      throw new BrowserExecutionDiagnosticError({
+        stage: "page_create",
+        reasonCode: "page_create_failed",
+        message: safeBrowserDiagnosticMessage(error, "The Chromium page could not be created."),
+        boundaries: { browserLaunched: true, contextCreated: true, pageCreated: false },
+      });
+    }
+
+    return new PlaywrightLeverBrowserSession(page, context, browser, this.options.timeoutMs, {
+      browserLaunched: true,
+      contextCreated: true,
+      pageCreated: true,
     });
-    const context = await browser.newContext({
-      acceptDownloads: false,
-    });
-    const page = await context.newPage();
-    return new PlaywrightLeverBrowserSession(page, context, browser, this.options.timeoutMs);
   }
 }

@@ -6,12 +6,21 @@ import type {
   ApplicationFieldOption,
   ApplicationFieldType,
   BrowserHumanBoundary,
+  BrowserExecutionBoundaryState,
+  BrowserExecutionDiagnostic,
+  BrowserExecutionDiagnosticStage,
+  BrowserNavigationDiagnostics,
   ExecutionInspection,
   LeverBrowserField,
   LeverBrowserSession,
   LeverBrowserSessionFactory,
   ApplicationExecutorResult,
   ApplicationExecutorMode,
+} from "./executor";
+import {
+  BrowserExecutionDiagnosticError,
+  browserDiagnosticForError,
+  safeBrowserDiagnosticMessage,
 } from "./executor";
 import type {
   CareerBlockerDraft,
@@ -58,6 +67,27 @@ interface ObservedForm {
   inspection: ExecutionInspection;
 }
 
+type InspectionPhase = "preflight" | "executor";
+
+function initialBoundaryState(phase: InspectionPhase): BrowserExecutionBoundaryState {
+  return {
+    browserLaunched: false,
+    contextCreated: false,
+    pageCreated: false,
+    navigationStarted: false,
+    navigationCompleted: false,
+    domReady: false,
+    preflightInspectionStarted: phase === "preflight",
+    preflightInspectionCompleted: false,
+    controlsInspectionStarted: false,
+    controlsInspectionCompleted: false,
+    executorStarted: false,
+    executorInspectionStarted: phase === "executor",
+    executorInspectionCompleted: false,
+    browserClosed: false,
+  };
+}
+
 interface FieldDecision {
   value?: AnswerValue;
   explicit: boolean;
@@ -82,9 +112,7 @@ function defaultNow(): string {
 }
 
 function safeErrorMessage(error: unknown, fallback: string): string {
-  const message = error instanceof Error ? error.message : fallback;
-  const compact = message.replace(/\s+/g, " ").trim();
-  return compact.slice(0, 500) || fallback;
+  return safeBrowserDiagnosticMessage(error, fallback);
 }
 
 function nonEmpty(value: string | null | undefined): string | undefined {
@@ -216,6 +244,9 @@ function inspection(
     evidence?: readonly string[];
     durationMs?: number;
     domInspectionCount?: number;
+    boundaries?: BrowserExecutionBoundaryState;
+    navigation?: BrowserNavigationDiagnostics;
+    diagnostic?: BrowserExecutionDiagnostic;
   } = {},
 ): ExecutionInspection {
   return {
@@ -228,15 +259,24 @@ function inspection(
     evidence: values.evidence ?? [],
     ...(values.durationMs !== undefined ? { durationMs: Math.max(0, Math.round(values.durationMs)) } : {}),
     ...(values.domInspectionCount !== undefined ? { domInspectionCount: Math.max(0, Math.round(values.domInspectionCount)) } : {}),
+    ...(values.boundaries ? { boundaries: values.boundaries } : {}),
+    ...(values.navigation ? { navigation: values.navigation } : {}),
+    ...(values.diagnostic ? { diagnostic: values.diagnostic } : {}),
     startedAt,
     updatedAt,
   };
 }
 
-function inspectionTelemetry(base: ExecutionInspection | undefined): Pick<ExecutionInspection, "durationMs" | "domInspectionCount"> {
+function inspectionTelemetry(base: ExecutionInspection | undefined): Pick<
+  ExecutionInspection,
+  "durationMs" | "domInspectionCount" | "boundaries" | "navigation" | "diagnostic"
+> {
   return {
     ...(base?.durationMs !== undefined ? { durationMs: base.durationMs } : {}),
     ...(base?.domInspectionCount !== undefined ? { domInspectionCount: base.domInspectionCount } : {}),
+    ...(base?.boundaries ? { boundaries: base.boundaries } : {}),
+    ...(base?.navigation ? { navigation: base.navigation } : {}),
+    ...(base?.diagnostic ? { diagnostic: base.diagnostic } : {}),
   };
 }
 
@@ -638,13 +678,13 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
   }
 
   async inspect(request: ApplicationExecutionRequest): Promise<ExecutionInspection> {
-    const observed = await this.inspectForm(request);
+    const observed = await this.inspectForm(request, undefined, "preflight");
     return observed.inspection;
   }
 
   async execute(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult> {
     const startedAt = this.now();
-    const observed = await this.inspectForm(request, startedAt);
+    const observed = await this.inspectForm(request, startedAt, "executor");
     if (observed.inspection.status === "failed") {
       return failedResult(
         observed.inspection.evidence.find((item) => item.startsWith("error:"))?.slice("error:".length) ?? "Lever form inspection failed.",
@@ -867,7 +907,16 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
     }
     const currentUrl = await state.session.currentUrl();
     if (!sameLeverApplicationPage(currentUrl, target)) {
-      throw new Error("browser page is not the verified Lever application route");
+      const diagnostics = state.session.diagnostics?.();
+      throw new BrowserExecutionDiagnosticError({
+        stage: "navigation",
+        reasonCode: "unsupported_page",
+        message: "The browser page is not the verified Lever application route.",
+        ...(diagnostics?.boundaries ? { boundaries: diagnostics.boundaries } : {}),
+        ...(diagnostics?.navigation ? {
+          navigation: { ...diagnostics.navigation, outcome: "failed" },
+        } : {}),
+      });
     }
     return state;
   }
@@ -875,10 +924,26 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
   private async inspectForm(
     request: ApplicationExecutionRequest,
     startedAt = this.now(),
+    phase: InspectionPhase = "preflight",
   ): Promise<ObservedForm> {
     const inspectionMonotonicStartedAt = monotonicNow();
+    const inspectionStage: BrowserExecutionDiagnosticStage = phase === "preflight"
+      ? "preflight_inspection"
+      : "executor_inspection";
+    let boundaries: BrowserExecutionBoundaryState = initialBoundaryState(phase);
+    let navigation: BrowserNavigationDiagnostics | undefined;
+    let diagnostic: BrowserExecutionDiagnostic | undefined;
     const targetResult = trustedTarget(request);
     if (!targetResult.target) {
+      const completedBoundaries = phase === "preflight"
+        ? { ...boundaries, preflightInspectionCompleted: true }
+        : { ...boundaries, executorInspectionCompleted: true };
+      const unsupportedDiagnostic: BrowserExecutionDiagnostic = {
+        stage: inspectionStage,
+        reasonCode: "unsupported_page",
+        message: safeBrowserDiagnosticMessage(targetResult.reason, "The Lever posting is not supported by the browser executor."),
+        boundaries: completedBoundaries,
+      };
       return {
         target: { site: "unknown", postingId: "unknown", applicationUrl: "" },
         session: { currentUrl: () => "", navigate: async () => undefined, inspectFields: async () => [], detectHumanBoundary: async () => null, hasSubmitControl: async () => false, close: async () => undefined },
@@ -887,25 +952,56 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
           evidence: [`unsupported:${targetResult.reason ?? "untrusted Lever posting"}`],
           durationMs: monotonicNow() - inspectionMonotonicStartedAt,
           domInspectionCount: 0,
+          boundaries: completedBoundaries,
+          diagnostic: unsupportedDiagnostic,
         }),
       };
     }
 
     const target = targetResult.target;
     let domInspectionCount = 0;
-    const finish = (observed: ObservedForm): ObservedForm => ({
-      ...observed,
-      inspection: {
-        ...observed.inspection,
-        durationMs: monotonicNow() - inspectionMonotonicStartedAt,
-        domInspectionCount,
-      },
-    });
+    const mergeSessionDiagnostics = (session: LeverBrowserSession): void => {
+      const sessionDiagnostics = session.diagnostics?.();
+      if (!sessionDiagnostics) return;
+      boundaries = { ...boundaries, ...(sessionDiagnostics.boundaries ?? {}) };
+      navigation = sessionDiagnostics.navigation ?? navigation;
+      diagnostic = sessionDiagnostics.diagnostic ?? diagnostic;
+    };
+    const finish = (observed: ObservedForm): ObservedForm => {
+      mergeSessionDiagnostics(observed.session);
+      const completedBoundaries = phase === "preflight"
+        ? { ...boundaries, preflightInspectionCompleted: true }
+        : { ...boundaries, executorInspectionCompleted: true };
+      const completedDiagnostic = diagnostic
+        ? {
+            ...diagnostic,
+            boundaries: { ...completedBoundaries, ...(diagnostic.boundaries ?? {}) },
+            ...(diagnostic.navigation || !navigation ? {} : { navigation }),
+          }
+        : undefined;
+      return {
+        ...observed,
+        inspection: {
+          ...observed.inspection,
+          durationMs: monotonicNow() - inspectionMonotonicStartedAt,
+          domInspectionCount,
+          boundaries: completedBoundaries,
+          ...(navigation ? { navigation } : {}),
+          ...(completedDiagnostic ? { diagnostic: completedDiagnostic } : {}),
+        },
+      };
+    };
+    let currentStage: BrowserExecutionDiagnosticStage = inspectionStage;
     try {
       const state = await this.sessionFor(request, target);
+      mergeSessionDiagnostics(state.session);
       const boundary = await state.session.detectHumanBoundary();
+      boundaries = { ...boundaries, controlsInspectionStarted: true };
+      currentStage = "controls_inspection";
       const rawFields = await state.session.inspectFields();
+      boundaries = { ...boundaries, controlsInspectionCompleted: true };
       domInspectionCount += 1;
+      mergeSessionDiagnostics(state.session);
       const descriptors = rawFields.map(descriptor);
       const baseEvidence = [
         "executor:lever-browser",
@@ -935,6 +1031,11 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
           required: true,
           classification: "unknown",
         }, "No supported application fields were found on the verified page.", "unknown_form_field");
+        diagnostic = {
+          stage: "controls_inspection",
+          reasonCode: "unsupported_page",
+          message: "No supported application fields were found on the verified page.",
+        };
         return finish({
           target,
           session: state.session,
@@ -955,7 +1056,20 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         }),
       });
     } catch (error) {
-      const reason = safeErrorMessage(error, "Lever form inspection failed.");
+      const derivedDiagnostic = browserDiagnosticForError(
+        error,
+        currentStage,
+        "inspection_failed",
+        "Lever form inspection failed.",
+        {
+          boundaries,
+          ...(navigation ? { navigation } : {}),
+        },
+      );
+      diagnostic = derivedDiagnostic;
+      boundaries = { ...boundaries, ...(derivedDiagnostic.boundaries ?? {}) };
+      navigation = derivedDiagnostic.navigation ?? navigation;
+      const reason = derivedDiagnostic.message ?? safeErrorMessage(error, "Lever form inspection failed.");
       const key = request.application.id || request.careerJob.id;
       const failedSession = this.sessions.get(key);
       this.sessions.delete(key);
@@ -966,6 +1080,9 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         fields: [],
         inspection: inspection("failed", [], startedAt, this.now(), {
           evidence: ["executor:lever-browser", `error:${reason}`],
+          boundaries,
+          ...(navigation ? { navigation } : {}),
+          diagnostic,
         }),
       });
     }

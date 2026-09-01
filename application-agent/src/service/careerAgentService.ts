@@ -433,6 +433,27 @@ function executionStateFromHostSnapshot(
       ? { failureReasonCode: snapshot.failureReasonCode }
       : status === "ready_to_submit" ? {} : previous?.failureReasonCode ? { failureReasonCode: previous.failureReasonCode } : {}),
     ...(snapshot.telemetry ? { telemetry: snapshot.telemetry } : previous?.telemetry ? { telemetry: previous.telemetry } : {}),
+    ...(snapshot.telemetry?.boundaries
+      ? { boundaries: snapshot.telemetry.boundaries }
+      : inspection?.boundaries
+        ? { boundaries: inspection.boundaries }
+        : previous?.boundaries
+          ? { boundaries: previous.boundaries }
+          : {}),
+    ...(snapshot.telemetry?.navigation
+      ? { navigation: snapshot.telemetry.navigation }
+      : inspection?.navigation
+        ? { navigation: inspection.navigation }
+        : previous?.navigation
+          ? { navigation: previous.navigation }
+          : {}),
+    ...(snapshot.telemetry?.diagnostic
+      ? { diagnostic: snapshot.telemetry.diagnostic }
+      : inspection?.diagnostic
+        ? { diagnostic: inspection.diagnostic }
+        : previous?.diagnostic
+          ? { diagnostic: previous.diagnostic }
+          : {}),
     startedAt: previous?.startedAt ?? snapshot.startedAt,
     updatedAt: snapshot.updatedAt,
   };

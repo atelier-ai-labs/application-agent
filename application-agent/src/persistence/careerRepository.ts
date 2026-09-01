@@ -19,6 +19,11 @@ import type {
   TrackerSyncState,
 } from "../domain/campaignTypes";
 import type { AnswerValue } from "../domain/types";
+import type {
+  BrowserExecutionBoundaryState,
+  BrowserExecutionDiagnostic,
+  BrowserNavigationDiagnostics,
+} from "../domain/executor";
 import {
   EXECUTION_RUN_HISTORY_LIMIT,
   isExecutionFailureReason,
@@ -118,6 +123,66 @@ function isNonNegativeInteger(value: unknown): value is number {
   return Number.isInteger(value) && typeof value === "number" && value >= 0;
 }
 
+function isBrowserExecutionBoundaryState(value: unknown): value is BrowserExecutionBoundaryState {
+  if (!isRecord(value)) return false;
+  return [
+    "hostRequestAccepted",
+    "browserLaunched",
+    "contextCreated",
+    "pageCreated",
+    "navigationStarted",
+    "navigationCompleted",
+    "domReady",
+    "preflightInspectionStarted",
+    "preflightInspectionCompleted",
+    "controlsInspectionStarted",
+    "controlsInspectionCompleted",
+    "executorStarted",
+    "executorInspectionStarted",
+    "executorInspectionCompleted",
+    "browserClosed",
+  ].every((key) => value[key] === undefined || typeof value[key] === "boolean");
+}
+
+function isBrowserHostname(value: unknown): boolean {
+  return isNonEmptyString(value) && value.length <= 253 && !/[\s/?#]/.test(value);
+}
+
+function isBrowserNavigationDiagnostics(value: unknown): value is BrowserNavigationDiagnostics {
+  if (!isRecord(value)) return false;
+  return (value.targetHost === undefined || isBrowserHostname(value.targetHost)) &&
+    (value.finalHostname === undefined || isBrowserHostname(value.finalHostname)) &&
+    (value.outcome === undefined || value.outcome === "not_started" || value.outcome === "started" ||
+      value.outcome === "completed" || value.outcome === "http_error" || value.outcome === "failed") &&
+    (value.httpStatus === undefined || (isNonNegativeInteger(value.httpStatus) && value.httpStatus >= 100 && value.httpStatus <= 599)) &&
+    (value.httpStatusCategory === undefined || value.httpStatusCategory === "1xx" || value.httpStatusCategory === "2xx" ||
+      value.httpStatusCategory === "3xx" || value.httpStatusCategory === "4xx" || value.httpStatusCategory === "5xx") &&
+    (value.redirectCount === undefined || isNonNegativeInteger(value.redirectCount)) &&
+    (value.loadStateReached === undefined || value.loadStateReached === "domcontentloaded" || value.loadStateReached === "networkidle") &&
+    (value.networkIdleTimedOut === undefined || typeof value.networkIdleTimedOut === "boolean");
+}
+
+function isSafeBrowserDiagnosticMessage(value: unknown): boolean {
+  return typeof value === "string" && value.length <= 240 &&
+    !/https?:\/\/|\b(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|api[_-]?key|access[_-]?token|client[_-]?secret|token|secret|password)\s*[:=]/i.test(value);
+}
+
+function isBrowserExecutionDiagnostic(value: unknown): value is BrowserExecutionDiagnostic {
+  if (!isRecord(value)) return false;
+  return (value.stage === "browser_launch" || value.stage === "context_create" || value.stage === "page_create" ||
+    value.stage === "navigation" || value.stage === "page_load" || value.stage === "preflight_inspection" ||
+    value.stage === "controls_inspection" || value.stage === "executor_inspection" ||
+    value.stage === "executor_start" || value.stage === "browser_close") &&
+    (value.reasonCode === "browser_launch_failed" || value.reasonCode === "context_create_failed" ||
+      value.reasonCode === "page_create_failed" || value.reasonCode === "navigation_failed" ||
+      value.reasonCode === "navigation_timeout" || value.reasonCode === "page_load_failed" ||
+      value.reasonCode === "inspection_failed" || value.reasonCode === "unsupported_page" ||
+      value.reasonCode === "browser_closed" || value.reasonCode === "cancelled" || value.reasonCode === "unknown") &&
+    (value.message === undefined || isSafeBrowserDiagnosticMessage(value.message)) &&
+    (value.boundaries === undefined || isBrowserExecutionBoundaryState(value.boundaries)) &&
+    (value.navigation === undefined || isBrowserNavigationDiagnostics(value.navigation));
+}
+
 function isBrowserExecutionTelemetry(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return [
@@ -127,7 +192,10 @@ function isBrowserExecutionTelemetry(value: unknown): boolean {
     "domInspectionCount",
     "cancellationCount",
     "lateCompletionCount",
-  ].every((key) => value[key] === undefined || (typeof value[key] === "number" && Number.isFinite(value[key]) && value[key] >= 0));
+  ].every((key) => value[key] === undefined || (typeof value[key] === "number" && Number.isFinite(value[key]) && value[key] >= 0)) &&
+    (value.boundaries === undefined || isBrowserExecutionBoundaryState(value.boundaries)) &&
+    (value.navigation === undefined || isBrowserNavigationDiagnostics(value.navigation)) &&
+    (value.diagnostic === undefined || isBrowserExecutionDiagnostic(value.diagnostic));
 }
 
 function isSearchCriteria(value: unknown): value is SearchCriteria {
@@ -392,6 +460,9 @@ function isCareerExecutionState(value: unknown): boolean {
     (value.retryReasonCode === undefined || isExecutionFailureReason(value.retryReasonCode)) &&
     (value.failureReasonCode === undefined || isExecutionFailureReason(value.failureReasonCode)) &&
     (value.telemetry === undefined || isBrowserExecutionTelemetry(value.telemetry)) &&
+    (value.boundaries === undefined || isBrowserExecutionBoundaryState(value.boundaries)) &&
+    (value.navigation === undefined || isBrowserNavigationDiagnostics(value.navigation)) &&
+    (value.diagnostic === undefined || isBrowserExecutionDiagnostic(value.diagnostic)) &&
     isTimestamp(value.startedAt) &&
     isTimestamp(value.updatedAt)
   );

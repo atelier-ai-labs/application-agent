@@ -12,7 +12,12 @@ import type {
   ExecutionRunTrace,
   HumanAttentionCategory,
 } from "./executionTrace";
-import type { BrowserExecutionTelemetry } from "./executor";
+import type {
+  BrowserExecutionBoundaryState,
+  BrowserExecutionDiagnostic,
+  BrowserExecutionTelemetry,
+  BrowserNavigationDiagnostics,
+} from "./executor";
 
 export type CampaignStatus = "draft" | "active" | "paused" | "completed" | "failed";
 
@@ -318,6 +323,9 @@ export interface CareerExecutionState {
   retryReasonCode?: ExecutionFailureReason;
   failureReasonCode?: ExecutionFailureReason;
   telemetry?: BrowserExecutionTelemetry;
+  boundaries?: BrowserExecutionBoundaryState;
+  navigation?: BrowserNavigationDiagnostics;
+  diagnostic?: BrowserExecutionDiagnostic;
   startedAt: string;
   updatedAt: string;
 }

@@ -6,6 +6,10 @@ import type {
   BrowserExecutionTelemetry,
   ExecutionInspection,
 } from "../../src/domain/executor";
+import {
+  browserDiagnosticForError,
+  safeBrowserDiagnosticMessage,
+} from "../../src/domain/executor";
 import { executionFailureReason, monotonicNow } from "../../src/domain/executionTrace";
 import type {
   ExecutionHostRequest,
@@ -73,15 +77,9 @@ function defaultCreateId(): string {
 }
 
 function safeReason(error: unknown, fallback: string): string {
-  const message = error instanceof Error ? error.message : typeof error === "string" ? error : fallback;
-  // Keep host errors useful without echoing request bodies or long browser
-  // payloads into the API/log stream.
-  const compact = message
-    .replace(/\s+/g, " ")
-    .replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, "[redacted-email]")
-    .replace(/\+?\d[\d() .-]{7,}\d/g, "[redacted-number]")
-    .trim();
-  return (compact || fallback).slice(0, 500);
+  // Keep host errors useful without echoing request bodies, URLs, credentials,
+  // or long browser payloads into the API/log stream.
+  return safeBrowserDiagnosticMessage(error, fallback);
 }
 
 function clone<T>(value: T): T {
@@ -202,6 +200,27 @@ export class ExecutionSessionRegistry {
         startedAt,
         updatedAt: startedAt,
         attempt: 1,
+        telemetry: {
+          cancellationCount: 0,
+          lateCompletionCount: 0,
+          boundaries: {
+            hostRequestAccepted: true,
+            browserLaunched: false,
+            contextCreated: false,
+            pageCreated: false,
+            navigationStarted: false,
+            navigationCompleted: false,
+            domReady: false,
+            preflightInspectionStarted: false,
+            preflightInspectionCompleted: false,
+            controlsInspectionStarted: false,
+            controlsInspectionCompleted: false,
+            executorStarted: false,
+            executorInspectionStarted: false,
+            executorInspectionCompleted: false,
+            browserClosed: false,
+          },
+        },
       },
       running: false,
       terminal: false,
@@ -350,7 +369,17 @@ export class ExecutionSessionRegistry {
   private async closeExecutor(session: ExecutionSession): Promise<void> {
     try {
       await this.executor.close?.(session.request.application.id);
+      this.addTelemetry(session, { boundaries: { browserClosed: true } });
     } catch (error) {
+      this.addTelemetry(session, {
+        boundaries: { browserClosed: true },
+        diagnostic: browserDiagnosticForError(
+          error,
+          "browser_close",
+          "browser_closed",
+          "Browser session cleanup failed.",
+        ),
+      });
       this.log(session, "failed", safeReason(error, "Browser session cleanup failed."));
     }
   }
@@ -378,11 +407,16 @@ export class ExecutionSessionRegistry {
         } finally {
           this.addTelemetry(session, { preflightInspectionDurationMs: monotonicNow() - inspectionStartedAt });
         }
+        this.addTelemetry(session, {
+          domInspectionCount: inspection.domInspectionCount ?? 0,
+          ...(inspection.boundaries ? { boundaries: inspection.boundaries } : {}),
+          ...(inspection.navigation ? { navigation: inspection.navigation } : {}),
+          ...(inspection.diagnostic ? { diagnostic: inspection.diagnostic } : {}),
+        });
         if (session.terminal) {
           this.addTelemetry(session, { lateCompletionCount: 1 });
           return;
         }
-        this.addTelemetry(session, { domInspectionCount: inspection.domInspectionCount ?? 0 });
         session.snapshot = {
           ...session.snapshot,
           inspection: clone(inspection),
@@ -397,6 +431,7 @@ export class ExecutionSessionRegistry {
 
       if (session.terminal) return;
       this.update(session, "executing");
+      this.addTelemetry(session, { boundaries: { executorStarted: true } });
       let result: ApplicationExecutorResult;
       result = await this.executor.execute(request());
       if (session.terminal) {
@@ -406,6 +441,9 @@ export class ExecutionSessionRegistry {
       this.addTelemetry(session, {
         executorInspectionDurationMs: result.state === "submitted" ? undefined : result.inspection?.durationMs,
         domInspectionCount: result.state === "submitted" ? 0 : result.inspection?.domInspectionCount ?? 0,
+        ...(result.state === "submitted" || !result.inspection?.boundaries ? {} : { boundaries: result.inspection.boundaries }),
+        ...(result.state === "submitted" || !result.inspection?.navigation ? {} : { navigation: result.inspection.navigation }),
+        ...(result.state === "submitted" || !result.inspection?.diagnostic ? {} : { diagnostic: result.inspection.diagnostic }),
       });
       if (result.state === "submitted") {
         // This is a defense-in-depth check. The production Lever executor is
@@ -419,6 +457,21 @@ export class ExecutionSessionRegistry {
       }
       await this.finish(session, result);
     } catch (error) {
+      const diagnostic = browserDiagnosticForError(
+        error,
+        session.snapshot.telemetry?.boundaries?.executorStarted ? "executor_start" : "preflight_inspection",
+        "unknown",
+        "The local browser executor failed.",
+        {
+          ...(session.snapshot.telemetry?.boundaries ? { boundaries: session.snapshot.telemetry.boundaries } : {}),
+          ...(session.snapshot.telemetry?.navigation ? { navigation: session.snapshot.telemetry.navigation } : {}),
+        },
+      );
+      this.addTelemetry(session, {
+        diagnostic,
+        ...(diagnostic.boundaries ? { boundaries: diagnostic.boundaries } : {}),
+        ...(diagnostic.navigation ? { navigation: diagnostic.navigation } : {}),
+      });
       if (!session.terminal) {
         await this.finish(session, {
           state: "failed",
@@ -477,6 +530,13 @@ export class ExecutionSessionRegistry {
           ? { domInspectionCount: sum(current?.domInspectionCount, next.domInspectionCount) } : {}),
         ...(sum(current?.cancellationCount, next.cancellationCount) !== undefined
           ? { cancellationCount: sum(current?.cancellationCount, next.cancellationCount) } : {}),
+        ...(sum(current?.lateCompletionCount, next.lateCompletionCount) !== undefined
+          ? { lateCompletionCount: sum(current?.lateCompletionCount, next.lateCompletionCount) } : {}),
+        ...((current?.boundaries || next.boundaries) ? {
+          boundaries: { ...(current?.boundaries ?? {}), ...(next.boundaries ?? {}) },
+        } : {}),
+        ...(next.navigation || current?.navigation ? { navigation: next.navigation ?? current?.navigation } : {}),
+        ...(next.diagnostic || current?.diagnostic ? { diagnostic: next.diagnostic ?? current?.diagnostic } : {}),
       },
     };
   }

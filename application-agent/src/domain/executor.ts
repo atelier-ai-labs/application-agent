@@ -75,6 +75,122 @@ export interface BrowserHumanBoundary {
   evidence: readonly string[];
 }
 
+/** Stable browser-boundary stages used for safe local diagnostics. */
+export type BrowserExecutionDiagnosticStage =
+  | "browser_launch"
+  | "context_create"
+  | "page_create"
+  | "navigation"
+  | "page_load"
+  | "preflight_inspection"
+  | "controls_inspection"
+  | "executor_inspection"
+  | "executor_start"
+  | "browser_close";
+
+/** Stable, non-sensitive reasons for a browser preparation diagnostic. */
+export type BrowserExecutionDiagnosticReasonCode =
+  | "browser_launch_failed"
+  | "context_create_failed"
+  | "page_create_failed"
+  | "navigation_failed"
+  | "navigation_timeout"
+  | "page_load_failed"
+  | "inspection_failed"
+  | "unsupported_page"
+  | "browser_closed"
+  | "cancelled"
+  | "unknown";
+
+export type BrowserNavigationOutcome = "not_started" | "started" | "completed" | "http_error" | "failed";
+export type BrowserLoadState = "domcontentloaded" | "networkidle";
+
+/** Monotonic stage markers; values are presence/absence evidence, not timing. */
+export interface BrowserExecutionBoundaryState {
+  hostRequestAccepted?: boolean;
+  browserLaunched?: boolean;
+  contextCreated?: boolean;
+  pageCreated?: boolean;
+  navigationStarted?: boolean;
+  navigationCompleted?: boolean;
+  domReady?: boolean;
+  preflightInspectionStarted?: boolean;
+  preflightInspectionCompleted?: boolean;
+  controlsInspectionStarted?: boolean;
+  controlsInspectionCompleted?: boolean;
+  executorStarted?: boolean;
+  executorInspectionStarted?: boolean;
+  executorInspectionCompleted?: boolean;
+  browserClosed?: boolean;
+}
+
+/** Safe navigation facts; full URLs, headers, and response bodies are excluded. */
+export interface BrowserNavigationDiagnostics {
+  targetHost?: string;
+  finalHostname?: string;
+  outcome?: BrowserNavigationOutcome;
+  httpStatus?: number;
+  httpStatusCategory?: "1xx" | "2xx" | "3xx" | "4xx" | "5xx";
+  redirectCount?: number;
+  loadStateReached?: BrowserLoadState;
+  networkIdleTimedOut?: boolean;
+}
+
+export interface BrowserExecutionDiagnostic {
+  stage: BrowserExecutionDiagnosticStage;
+  reasonCode: BrowserExecutionDiagnosticReasonCode;
+  /** Bounded, redacted developer context. Never a stack trace or page body. */
+  message?: string;
+  boundaries?: BrowserExecutionBoundaryState;
+  navigation?: BrowserNavigationDiagnostics;
+}
+
+/** Error transport between the Playwright adapter and the browser-neutral executor. */
+export class BrowserExecutionDiagnosticError extends Error {
+  constructor(public readonly diagnostic: BrowserExecutionDiagnostic) {
+    super(diagnostic.message ?? diagnostic.reasonCode);
+    this.name = "BrowserExecutionDiagnosticError";
+  }
+}
+
+/** Redacts common secret-bearing values before a short diagnostic is persisted. */
+export function safeBrowserDiagnosticMessage(error: unknown, fallback: string): string {
+  const source = error instanceof Error ? error.message : typeof error === "string" ? error : fallback;
+  const redacted = source
+    .replace(/https?:\/\/[^\s"'<>]+/gi, "[redacted-url]")
+    .replace(/\b(?:authorization|proxy-authorization)\s*[:=]\s*bearer\s+[^\s,;]+/gi, "[redacted-secret]")
+    .replace(/\b(?:cookie|set-cookie)\s*[:=]\s*[^\n]+/gi, "[redacted-secret]")
+    .replace(/\b(?:authorization|proxy-authorization|x-api-key|api[_-]?key|access[_-]?token|client[_-]?secret|token|secret|password)\s*[:=]\s*[^\s,;]+/gi, "[redacted-secret]")
+    .replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, "[redacted-email]")
+    .replace(/\+?\d[\d() .-]{7,}\d/g, "[redacted-number]")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (redacted || fallback).slice(0, 240);
+}
+
+export function browserDiagnosticForError(
+  error: unknown,
+  stage: BrowserExecutionDiagnosticStage,
+  reasonCode: BrowserExecutionDiagnosticReasonCode,
+  fallback: string,
+  context: Pick<BrowserExecutionDiagnostic, "boundaries" | "navigation"> = {},
+): BrowserExecutionDiagnostic {
+  if (error instanceof BrowserExecutionDiagnosticError) {
+    return {
+      ...error.diagnostic,
+      ...(error.diagnostic.message
+        ? { message: safeBrowserDiagnosticMessage(error.diagnostic.message, error.diagnostic.reasonCode) }
+        : {}),
+    };
+  }
+  return {
+    stage,
+    reasonCode,
+    message: safeBrowserDiagnosticMessage(error, fallback),
+    ...context,
+  };
+}
+
 /** The small browser capability surface used by the Lever domain executor and its tests. */
 export interface LeverBrowserField extends ApplicationFieldDescriptor {
   fill(value: string): Promise<void>;
@@ -90,6 +206,11 @@ export interface LeverBrowserSession {
   inspectFields(): Promise<readonly LeverBrowserField[]>;
   detectHumanBoundary(): Promise<BrowserHumanBoundary | null>;
   hasSubmitControl(): Promise<boolean>;
+  diagnostics?(): {
+    boundaries?: BrowserExecutionBoundaryState;
+    navigation?: BrowserNavigationDiagnostics;
+    diagnostic?: BrowserExecutionDiagnostic;
+  };
   close(): Promise<void>;
 }
 
@@ -107,6 +228,9 @@ export interface BrowserExecutionTelemetry {
   domInspectionCount?: number;
   cancellationCount?: number;
   lateCompletionCount?: number;
+  boundaries?: BrowserExecutionBoundaryState;
+  navigation?: BrowserNavigationDiagnostics;
+  diagnostic?: BrowserExecutionDiagnostic;
 }
 
 export interface ExecutionInspection {
@@ -120,6 +244,9 @@ export interface ExecutionInspection {
   /** Active inspection duration, excluding any human wait between attempts. */
   durationMs?: number;
   domInspectionCount?: number;
+  boundaries?: BrowserExecutionBoundaryState;
+  navigation?: BrowserNavigationDiagnostics;
+  diagnostic?: BrowserExecutionDiagnostic;
   startedAt: string;
   updatedAt: string;
 }

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   LeverBrowserExecutor,
   exampleCandidateProfile,
+  BrowserExecutionDiagnosticError,
+  safeBrowserDiagnosticMessage,
   type Application,
   type ApplicationAnswer,
   type ApplicationExecutionRequest,
@@ -117,6 +119,14 @@ class FakeSessionFactory implements LeverBrowserSessionFactory {
   async open(): Promise<LeverBrowserSession> {
     this.opens += 1;
     return this.session;
+  }
+}
+
+class ThrowingSessionFactory implements LeverBrowserSessionFactory {
+  constructor(private readonly failure: unknown) {}
+
+  async open(): Promise<LeverBrowserSession> {
+    throw this.failure;
   }
 }
 
@@ -257,6 +267,91 @@ function resolvedCareerBlocker(field: string, value: string | boolean | number):
 }
 
 describe("LeverBrowserExecutor", () => {
+  it("records a typed browser-launch diagnostic without leaking sensitive error text", async () => {
+    const failure = new BrowserExecutionDiagnosticError({
+      stage: "browser_launch",
+      reasonCode: "browser_launch_failed",
+      message: "Executable failed for https://jobs.lever.co/h1/post-1/apply?token=secret candidate@example.test Authorization: Bearer top-secret Cookie: session=private",
+      boundaries: { browserLaunched: false, contextCreated: false, pageCreated: false },
+    });
+    const result = await new LeverBrowserExecutor({
+      sessionFactory: new ThrowingSessionFactory(failure),
+      now: () => capturedAt,
+    }).inspect(request());
+
+    expect(result.status).toBe("failed");
+    expect(result.diagnostic).toMatchObject({
+      stage: "browser_launch",
+      reasonCode: "browser_launch_failed",
+    });
+    expect(result.diagnostic?.message).not.toContain("candidate@example.test");
+    expect(result.diagnostic?.message).not.toContain("token=secret");
+    expect(result.diagnostic?.message).not.toContain("top-secret");
+    expect(result.diagnostic?.message).not.toContain("session=private");
+    expect(result.boundaries).toMatchObject({
+      browserLaunched: false,
+      contextCreated: false,
+      pageCreated: false,
+      preflightInspectionStarted: true,
+      preflightInspectionCompleted: true,
+      controlsInspectionStarted: false,
+      controlsInspectionCompleted: false,
+    });
+  });
+
+  it("preserves navigation diagnostics and identifies control-inspection failures", async () => {
+    const navigationSession = new FakeSession([]);
+    navigationSession.navigate = async () => {
+      throw new BrowserExecutionDiagnosticError({
+        stage: "navigation",
+        reasonCode: "navigation_timeout",
+        message: "The Lever application page timed out.",
+        boundaries: {
+          browserLaunched: true,
+          contextCreated: true,
+          pageCreated: true,
+          navigationStarted: true,
+          navigationCompleted: false,
+          domReady: false,
+        },
+        navigation: {
+          targetHost: "jobs.lever.co",
+          outcome: "failed",
+        },
+      });
+    };
+    const navigationResult = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(navigationSession),
+      now: () => capturedAt,
+    }).inspect(request());
+    expect(navigationResult.diagnostic).toMatchObject({ stage: "navigation", reasonCode: "navigation_timeout" });
+    expect(navigationResult.navigation).toMatchObject({ targetHost: "jobs.lever.co", outcome: "failed" });
+    expect(navigationResult.boundaries).toMatchObject({
+      browserLaunched: true,
+      navigationStarted: true,
+      navigationCompleted: false,
+      domReady: false,
+      preflightInspectionCompleted: true,
+    });
+
+    const controlsSession = new FakeSession([]);
+    controlsSession.inspectFields = async () => {
+      throw new Error("DOM inspection failed for https://jobs.lever.co/h1/post-1/apply?token=secret");
+    };
+    const controlsResult = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(controlsSession),
+      now: () => capturedAt,
+    }).inspect(request());
+    expect(controlsResult.diagnostic).toMatchObject({ stage: "controls_inspection", reasonCode: "inspection_failed" });
+    expect(controlsResult.diagnostic?.message).not.toContain("token=secret");
+    expect(controlsResult.boundaries).toMatchObject({
+      preflightInspectionStarted: true,
+      preflightInspectionCompleted: true,
+      controlsInspectionStarted: true,
+      controlsInspectionCompleted: false,
+    });
+  });
+
   it("rejects non-actionable or untrusted postings before opening a browser", async () => {
     const factory = new FakeSessionFactory(new FakeSession([]));
     const executor = new LeverBrowserExecutor({ sessionFactory: factory, now: () => capturedAt });
@@ -323,6 +418,12 @@ describe("LeverBrowserExecutor", () => {
     expect(result.inspection.domInspectionCount).toBe(1);
     expect(result.inspection.evidence).toContain("submit:not-clicked");
     expect(result.inspection.evidence).toContain("submission:manual-only");
+    expect(result.inspection.boundaries).toMatchObject({
+      executorInspectionStarted: true,
+      executorInspectionCompleted: true,
+      controlsInspectionStarted: true,
+      controlsInspectionCompleted: true,
+    });
   });
 
   it("stops on an unresolved ASK field and resumes the same session without refilling completed fields", async () => {
