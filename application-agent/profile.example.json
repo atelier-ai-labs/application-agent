@@ -1,0 +1,68 @@
+{
+  "schemaVersion": "0.1",
+  "id": "private-candidate-profile",
+  "profileKind": "private",
+  "identity": {
+    "fullName": "Your full name",
+    "email": "you@example.com",
+    "phone": null,
+    "location": "City, Country"
+  },
+  "location": "City, Country",
+  "employmentHistory": [],
+  "education": [],
+  "skills": [],
+  "projects": [],
+  "certifications": [],
+  "workPreferences": {
+    "remote": null,
+    "relocation": null,
+    "travel": null
+  },
+  "workAuthorization": {
+    "status": null,
+    "countries": [],
+    "sponsorshipRequired": null
+  },
+  "resumeFamilies": [
+    {
+      "id": "cloud-platform",
+      "label": "Cloud / Platform",
+      "summary": "Replace with an approved summary grounded in your profile.",
+      "focusKeywords": ["cloud", "platform"],
+      "experienceIds": [],
+      "projectIds": []
+    },
+    {
+      "id": "frontend-software",
+      "label": "Frontend / Software",
+      "summary": "Replace with an approved summary grounded in your profile.",
+      "focusKeywords": ["frontend", "software"],
+      "experienceIds": [],
+      "projectIds": []
+    },
+    {
+      "id": "ai-platform-agentic",
+      "label": "AI Platform / Agentic",
+      "summary": "Replace with an approved summary grounded in your profile.",
+      "focusKeywords": ["ai", "agentic"],
+      "experienceIds": [],
+      "projectIds": []
+    }
+  ],
+  "answerPolicies": {
+    "name": "auto",
+    "email": "auto",
+    "employment_history": "auto",
+    "verified_skills": "auto",
+    "why_company": "draft_review",
+    "cover_letter": "draft_review",
+    "salary_expectations": "ask",
+    "relocation": "ask",
+    "travel": "ask",
+    "sponsorship": "ask",
+    "demographic_disclosure": "never_auto",
+    "legal_attestations": "never_auto"
+  },
+  "approvedReusableAnswers": {}
+}

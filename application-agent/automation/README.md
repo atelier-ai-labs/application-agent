@@ -1,0 +1,221 @@
+# Lever browser execution boundary
+
+This directory contains the Node-only browser host for the existing
+`ApplicationExecutor` seam. It is intentionally outside the Vite client
+source tree so Playwright, browser sessions, and local resume paths cannot be
+bundled into the public HQ application.
+
+## What is implemented
+
+- `PlaywrightLeverBrowserSessionFactory` launches an ephemeral Chromium context.
+- `PlaywrightLeverBrowserSession` navigates to the already-verified Lever
+  `/apply` URL, inspects visible simple form controls, and exposes deterministic
+  fill/select/check/upload operations.
+- `createPlaywrightLeverBrowserExecutor()` wires that session to the
+  browser-neutral `LeverBrowserExecutor`.
+
+The domain executor validates live Lever provenance again immediately before
+navigation. It maps only verified profile facts, explicitly resolved answers,
+approved grounded drafts, and an injected local resume artifact. It can pause
+for login/MFA/CAPTCHA, unknown fields, policy-sensitive questions, or missing
+artifacts. It keeps the session in process memory so the host can call
+`execute()` again after a blocker is resolved; a restart loses the session and
+replays only deterministic known values.
+
+The final Submit control is inspection-only. The executor never calls `click`,
+`form.submit`, or an ATS submission API and never returns `submitted` or emits
+`application.applied`.
+
+## Local execution host
+
+The root application does not run Playwright from the browser. The dedicated
+loopback Node host in `executionHost/` injects the existing executor and exposes
+only these domain-specific routes:
+
+```text
+GET  /health
+POST /career-agent/executions
+GET  /career-agent/executions/:id
+POST /career-agent/executions/:id/resume
+POST /career-agent/executions/:id/cancel
+POST /career-agent/tracker-sync
+```
+
+Start it separately from the Vite process:
+
+```bash
+npm run career-agent:executor
+```
+
+The default URL is `http://127.0.0.1:8787`. The default is headed Chromium so
+the user can complete CAPTCHA/login/MFA directly in the real browser window.
+Use `ATELIER_EXECUTION_HEADLESS=true` for an inspection-only or CI run. The
+host binds to loopback and accepts only exact configured Vite origins; it does
+not expose arbitrary navigation, selectors, JavaScript, or typing endpoints.
+
+The client sends the current validated campaign, career job, application
+packet, and profile. The host revalidates all of them, requires a private/local
+profile, requires live actionable Lever provenance, and navigates only to the
+verified Lever `/apply` path. A frontend cannot provide a filesystem path. If a
+resume upload is needed, configure an existing local artifact with
+`ATELIER_RESUME_ROOT` and one of the family-specific path variables in
+`.env.local` for the Node process. The configured path must remain inside the
+root and is checked again when upload is attempted.
+
+The same host exposes the narrow `POST /career-agent/tracker-sync` route for
+the configured Google Sheets tracker. It accepts only an already-applied,
+live, non-simulated application context and never accepts browser commands or
+candidate credentials. The browser client calls this route only after the user
+explicitly confirms a successful manual submission.
+
+Install the package and browser once from the repository root:
+
+```bash
+npm install
+npx playwright install chromium
+```
+
+The managed verification environment required an isolated copy of
+`libasound.so.2` because system dependency installation requires administrator
+authentication. With that library path supplied, a read-only inspection
+successfully opened a current public Lever application and detected its live
+form. The page presented a CAPTCHA, so the executor stopped with a `captcha`
+blocker without filling or submitting anything. That live run remains an
+acceptance check, not a fallback to simulated browser success; deterministic
+fake-session tests remain the CI path.
+
+## Session lifecycle and human handoff
+
+The host registry keeps the prepared request and browser executor session in
+process memory under an opaque execution ID. It supports one active browser by
+default (configurable to a small positive limit), generous inactivity timeout,
+same-session resume, cancellation, and graceful shutdown cleanup.
+
+When CAPTCHA, login, MFA, or external verification is detected, the result is
+`waiting_for_human` with a structured blocker. The browser remains open where
+possible. The user acts directly in that browser, then selects **Resume browser**
+in HQ; the host invokes the existing executor for the same application ID, so
+the executor can reuse its existing page/session and does not regenerate the
+preparation packet. If the host process restarts, its in-memory browser handle
+is gone. The persisted HQ record is marked interrupted on the next UI load and
+the user can start a fresh preparation.
+
+## Session and privacy limits
+
+Contexts are ephemeral and are not saved to disk. The executor does not request
+or persist passwords, cookies, MFA codes, CAPTCHA tokens, or arbitrary page
+HTML. A host may keep a live session for human handoff, but it closes the
+executor on cancel, timeout, failure, and shutdown. The serializable career
+execution record contains field identifiers, labels, blocker reasons, safe
+evidence, an opaque execution ID, and the selected resume family—not browser
+credentials, cookies, filesystem handles, or field values. Host logs contain
+execution/application/job IDs, statuses, timing, and high-level reasons; they
+do not log the request body.
+
+Final application submission remains a manual user action. The host does not
+click Submit, trigger a keyboard submit shortcut, call an ATS submission API,
+or emit `application.submitted`/`application.applied`. It also cannot write an
+Applied tracker record before the user confirms the submission in HQ. After
+that confirmation, HQ records `application.applied` first and the separate
+server-side tracker route may update the canonical sheet; a tracker failure
+leaves the application applied and exposes retry state. A future executor may
+add a separate explicit approval/submission lane, but it must not weaken the
+current trust, policy, provenance, and external-proof checks.
+
+## Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `VITE_EXECUTION_HOST_BASE_URL` | `http://127.0.0.1:8787` | Browser client URL for the loopback host. |
+| `ATELIER_EXECUTION_HOST` | `127.0.0.1` | Host bind address; non-loopback is rejected by default. |
+| `ATELIER_EXECUTION_PORT` | `8787` | Host port. |
+| `ATELIER_EXECUTION_ALLOWED_ORIGINS` | local Vite/preview origins | Comma-separated exact origins; wildcard is not accepted. |
+| `ATELIER_EXECUTION_ALLOW_NON_LOOPBACK` | `false` | Explicitly opt into a non-loopback bind; this remains unauthenticated local infrastructure and is not recommended. |
+| `ATELIER_EXECUTION_HEADLESS` | `false` | Whether Chromium is headless. |
+| `ATELIER_EXECUTION_BROWSER_TIMEOUT_MS` | `15000` | Browser navigation/control timeout. |
+| `ATELIER_EXECUTION_MAX_CONCURRENT` | `1` | Small local session capacity. |
+| `ATELIER_EXECUTION_SESSION_TIMEOUT_MS` | `1800000` | In-memory session inactivity timeout. |
+| `VITE_BROAD_DISCOVERY_ENABLED` | `false` | Browser-readable opt-in for adding the bounded broad-reference source to newly created live campaigns. |
+| `ATELIER_BRAVE_SEARCH_API_KEY` | unset | Server-only Brave Search Web API subscription token; required for live broad discovery. |
+| `ATELIER_BRAVE_SEARCH_API_BASE_URL` | `https://api.search.brave.com/res/v1/web/search` | HTTPS endpoint override for the documented Brave Web Search API. |
+| `ATELIER_BRAVE_SEARCH_MAX_QUERIES` | `3` | Maximum deterministic queries per cycle, bounded to `1..10`. |
+| `ATELIER_BRAVE_SEARCH_MAX_RESULTS_PER_QUERY` | `10` | Maximum results requested per query, bounded to `1..20`. |
+| `ATELIER_BRAVE_SEARCH_MAX_TOTAL_REFERENCES` | `30` | Maximum retained URL references per cycle, bounded to `1..200`. |
+| `ATELIER_BRAVE_SEARCH_CACHE_TTL_MS` | `300000` | In-memory reuse window for successful/empty/partial responses; `0` disables it. |
+| `ATELIER_BRAVE_SEARCH_TIMEOUT_MS` | `8000` | Per-query broad-discovery timeout. |
+| `ATELIER_BRAVE_SEARCH_COUNTRY` / `ATELIER_BRAVE_SEARCH_LANGUAGE` | `US` / `en` | Optional search locale controls. |
+| `ATELIER_RESUME_ROOT` | unset | Allowed local root for existing resume artifacts. |
+| `ATELIER_RESUME_*_PATH` | unset | Existing family artifact paths under that root. |
+| `ATELIER_GOOGLE_SHEET_ID` | unset | Canonical Google spreadsheet ID; required for real tracker writes. |
+| `ATELIER_GOOGLE_SHEET_NAME` | `Nate Job Search Tracker` | Exact spreadsheet title guard. |
+| `ATELIER_GOOGLE_SHEET_TAB` | `Job Tracker` | Exact tab containing the existing tracker headers. |
+| `ATELIER_GOOGLE_AUTH_MODE` | unset | `oauth` (preferred), `service_account`, or `access_token`; required when multiple lanes are present. |
+| `ATELIER_GOOGLE_OAUTH_CLIENT_FILE` | `.local/google-oauth-client.json` | Server-only Google Desktop OAuth client JSON. |
+| `ATELIER_GOOGLE_TOKEN_FILE` | `.local/google-sheets-token.json` | Server-only refreshable OAuth token file. |
+| `ATELIER_GOOGLE_APPLICATION_CREDENTIALS` | unset | Retained server-only service-account JSON path, shared with the sheet. |
+| `ATELIER_GOOGLE_ACCESS_TOKEN` | unset | Retained server-only short-lived OAuth access-token alternative. |
+| `ATELIER_GOOGLE_SHEETS_TIMEOUT_MS` | `10000` | Google Sheets/OAuth request timeout. |
+
+Do not put private resume paths, candidate values, browser cookies, or
+credentials in Vite variables or source control. This host is a local trusted
+boundary, not an authenticated remote service.
+
+### Personal Google OAuth setup
+
+1. In Google Cloud, create a Desktop OAuth client for the Google account that
+   owns or can edit the existing tracker. Download its JSON to a private path
+   such as `.local/google-oauth-client.json`; the file is ignored by this repo.
+2. Set `ATELIER_GOOGLE_SHEET_ID` to the verified existing spreadsheet ID,
+   `ATELIER_GOOGLE_AUTH_MODE=oauth`, and optionally
+   `ATELIER_GOOGLE_OAUTH_CLIENT_FILE` / `ATELIER_GOOGLE_TOKEN_FILE` in the
+   server process environment or `.env.local`.
+3. Run:
+
+   ```bash
+   npm run career-agent:google-auth
+   ```
+
+   Google authorization opens in the browser. Atelier HQ starts a temporary
+   loopback callback on `127.0.0.1`, validates state, uses PKCE, exchanges the
+   code, and stores only the refreshable token in the private token file. The
+   requested scope is exactly `https://www.googleapis.com/auth/spreadsheets`;
+   no general Drive scope is requested.
+4. Start the host with `npm run career-agent:executor`. The host loads and
+   refreshes the token server-side when the user confirms an application as
+   Applied. The browser UI receives only a success/failure result, never an
+   OAuth credential.
+
+The auth command does not send credentials through the Career Agent UI. If a
+stored grant is revoked or refresh fails, the tracker remains failed/pending
+and the UI exposes retry. Remove the local token file and revoke Atelier HQ in
+the Google account before re-running authorization when re-consent is needed.
+
+## Google Sheets tracker
+
+`googleAuth.ts` is the local CLI entrypoint and `googleOAuth.ts` is the
+Node-only OAuth/refresh/storage boundary. `GoogleSheetsJobTracker` is a
+Node-only adapter for the existing `Job Tracker`
+tab in `Nate Job Search Tracker`. It maps columns by their existing header
+names, verifies the spreadsheet title and tab before writing, and performs a
+small `values:batchUpdate` only after an application has been explicitly
+confirmed Applied. It never creates a spreadsheet, tab, header, XLSX, CSV, or
+submission request.
+
+The adapter owns the application fields it can authoritatively derive:
+Company, Role, Job Link, Location / Remote, known Salary Min/Max, Fit, Priority,
+Status, Date Found, Date Applied, Resume Version, and Next Step. Follow-Up Date,
+Contact / Referral, and Notes remain user-owned and are never overwritten. Row
+identity checks canonical application/job URLs first, then provider job ID, then
+normalized company + role + location. A retry matches the same row before any
+write, so a failed sync does not cause a duplicate Applied row.
+
+The default UI/demo path uses the in-memory tracker. A live posting uses the
+configured server adapter; missing credentials, unavailable Sheets access,
+header mismatch, timeout, permission failure, and malformed acknowledgements
+produce a failed sync rather than simulated success. The current repository has
+no local OAuth client/token configured, so real writes are not claimed until
+those variables are provided and a safe live row update is verified. The
+connected Sheets workflow has separately verified one temporary live
+upsert/readback/repeat/cleanup against the canonical tab; that does not stand
+in for configuring the local Node OAuth client. A tracker write is never
+submission proof, and the executor's final Submit boundary remains closed.

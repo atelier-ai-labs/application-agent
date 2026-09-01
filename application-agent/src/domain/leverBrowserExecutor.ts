@@ -1,0 +1,958 @@
+import type {
+  ApplicationExecutionRequest,
+  ApplicationExecutor,
+  ApplicationFieldClassification,
+  ApplicationFieldDescriptor,
+  ApplicationFieldOption,
+  ApplicationFieldType,
+  BrowserHumanBoundary,
+  ExecutionInspection,
+  LeverBrowserField,
+  LeverBrowserSession,
+  LeverBrowserSessionFactory,
+  ApplicationExecutorResult,
+  ApplicationExecutorMode,
+} from "./executor";
+import type {
+  CareerBlockerDraft,
+  CareerJob,
+} from "./campaignTypes";
+import type {
+  AnswerValue,
+  ApplicationAnswer,
+  CandidateProfile,
+  JobPosting,
+  ResumeFamilyId,
+} from "./types";
+import {
+  isVerifiedLeverApplicationUrl,
+  isVerifiedLeverHostedUrl,
+  leverSourceId,
+} from "./leverJobSource";
+
+export interface LeverBrowserExecutorOptions {
+  sessionFactory: LeverBrowserSessionFactory;
+  /** Local/private resume artifacts keyed by the selected family. Never persisted by the domain. */
+  resumePaths?: Partial<Record<ResumeFamilyId, string>>;
+  /** The concrete host may check a path before the browser attempts upload. */
+  resumeFileExists?: (path: string) => boolean | Promise<boolean>;
+  now?: () => string;
+}
+
+interface SessionState {
+  session: LeverBrowserSession;
+  navigated: boolean;
+}
+
+interface TrustedTarget {
+  site: string;
+  postingId: string;
+  applicationUrl: string;
+}
+
+interface ObservedForm {
+  target: TrustedTarget;
+  session: LeverBrowserSession;
+  fields: readonly LeverBrowserField[];
+  inspection: ExecutionInspection;
+}
+
+interface FieldDecision {
+  value?: AnswerValue;
+  explicit: boolean;
+  /** Optional fields may remain untouched. Required fields become blockers. */
+  leaveUntouched?: boolean;
+  blocker?: CareerBlockerDraft;
+}
+
+const SUPPORTED_FIELD_TYPES: ReadonlySet<ApplicationFieldType> = new Set([
+  "text",
+  "email",
+  "tel",
+  "textarea",
+  "select",
+  "radio",
+  "checkbox",
+  "file",
+]);
+
+function defaultNow(): string {
+  return new Date().toISOString();
+}
+
+function safeErrorMessage(error: unknown, fallback: string): string {
+  const message = error instanceof Error ? error.message : fallback;
+  const compact = message.replace(/\s+/g, " ").trim();
+  return compact.slice(0, 500) || fallback;
+}
+
+function nonEmpty(value: string | null | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function normalized(value: string | undefined): string {
+  return (value ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function normalizedTokens(value: string): readonly string[] {
+  return normalized(value)
+    .split(/[^a-z0-9+#/.]+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 1);
+}
+
+function fieldText(field: Pick<LeverBrowserField, "id" | "label" | "section">): string {
+  return normalized([field.id, field.label, field.section].filter(Boolean).join(" "));
+}
+
+function hasPhrase(text: string, pattern: RegExp): boolean {
+  return pattern.test(text);
+}
+
+export function classifyLeverApplicationField(
+  field: Pick<LeverBrowserField, "id" | "label" | "section" | "type">,
+): ApplicationFieldClassification {
+  const text = fieldText(field);
+  if (field.type === "file" || hasPhrase(text, /resume|cv|curriculum vitae/)) return "resume_upload";
+  if (hasPhrase(text, /demographic|gender identity|race|ethnicity|veteran|disability|voluntary self/)) return "demographic";
+  if (hasPhrase(text, /legal|attest|certif(?:y|ication)|agree to|authorize|terms|accurate and complete/)) return "legal_attestation";
+  if (hasPhrase(text, /work authorization|authorized to work|legally authorized|right to work|eligible to work/)) return "work_authorization";
+  if (hasPhrase(text, /sponsor|visa|immigration status/)) return "sponsorship";
+  if (hasPhrase(text, /salary|compensation|pay expectation|desired pay/)) return "salary";
+  if (hasPhrase(text, /relocat/)) return "relocation";
+  if (hasPhrase(text, /travel/)) return "travel";
+  if (hasPhrase(text, /education|degree|university|college|school|major|study/)) return "education";
+  if (hasPhrase(text, /why|interest|motivat|cover letter|tell us|anything else|additional information/)) return "free_text";
+  if (hasPhrase(text, /employ|employer|company|work history|job history|position held|job title|occupation|start date|end date/)) return "employment_history";
+  if (hasPhrase(text, /location|city|state|country|address|postal|zip/)) return "location";
+  if (hasPhrase(text, /first name|given name|last name|family name|surname|full name|email|e-mail|phone|telephone|mobile|linkedin|portfolio|website/)) return "contact";
+  if (field.type === "textarea") return "free_text";
+  return "unknown";
+}
+
+function descriptor(field: LeverBrowserField): ApplicationFieldDescriptor {
+  const id = nonEmpty(field.id) ?? nonEmpty(field.label) ?? "unknown-field";
+  const label = nonEmpty(field.label) ?? id;
+  return {
+    id,
+    label,
+    type: field.type,
+    required: field.required,
+    ...(field.options && field.options.length > 0 ? { options: field.options.map((option) => ({ ...option })) } : {}),
+    ...(field.section ? { section: field.section } : {}),
+    ...(field.sourceSelector ? { sourceSelector: field.sourceSelector } : {}),
+    classification: classifyLeverApplicationField({ ...field, id, label }),
+  };
+}
+
+function fieldEvidence(field: ApplicationFieldDescriptor): string[] {
+  return [
+    "executor:lever-browser",
+    `field-id:${field.id}`,
+    `field-type:${field.type}`,
+    `classification:${field.classification}`,
+    ...(field.options && field.options.length > 0
+      ? [`options:${field.options.map((option) => option.label).join("|")}`]
+      : []),
+  ];
+}
+
+function blockerKind(
+  classification: ApplicationFieldClassification,
+): CareerBlockerDraft["kind"] {
+  switch (classification) {
+    case "salary": return "salary";
+    case "sponsorship": return "sponsorship";
+    case "relocation": return "relocation";
+    case "travel": return "travel";
+    case "demographic": return "demographic_disclosure";
+    case "legal_attestation": return "legal_attestation";
+    case "free_text": return "subjective_answer";
+    case "resume_upload": return "resume_missing";
+    case "unknown": return "unknown_form_field";
+    default: return "unknown_fact";
+  }
+}
+
+function formBlocker(
+  field: ApplicationFieldDescriptor,
+  reason: string,
+  kind = blockerKind(field.classification),
+): CareerBlockerDraft {
+  return {
+    kind,
+    unit: "submission",
+    field: field.id,
+    question: field.label,
+    reason,
+    evidence: fieldEvidence(field),
+    resumeAfterHuman: true,
+  };
+}
+
+function boundaryBlocker(boundary: BrowserHumanBoundary): CareerBlockerDraft {
+  return {
+    kind: boundary.kind,
+    unit: "external",
+    question: boundary.question,
+    reason: boundary.reason,
+    evidence: ["executor:lever-browser", ...boundary.evidence],
+    resumeAfterHuman: true,
+  };
+}
+
+function inspection(
+  status: ExecutionInspection["status"],
+  fields: readonly ApplicationFieldDescriptor[],
+  startedAt: string,
+  updatedAt: string,
+  values: {
+    fieldsFilled?: readonly string[];
+    unresolvedFields?: readonly string[];
+    blockers?: readonly CareerBlockerDraft[];
+    resumeUsed?: string;
+    evidence?: readonly string[];
+  } = {},
+): ExecutionInspection {
+  return {
+    status,
+    fields,
+    fieldsFilled: values.fieldsFilled ?? [],
+    unresolvedFields: values.unresolvedFields ?? [],
+    blockers: values.blockers ?? [],
+    ...(values.resumeUsed ? { resumeUsed: values.resumeUsed } : {}),
+    evidence: values.evidence ?? [],
+    startedAt,
+    updatedAt,
+  };
+}
+
+function unsupportedResult(
+  reason: string,
+  startedAt: string,
+  now: string,
+  blocker?: CareerBlockerDraft,
+): Extract<ApplicationExecutorResult, { state: "unsupported" }> {
+  const inspectionResult = inspection(
+    "unsupported",
+    [],
+    startedAt,
+    now,
+    {
+      ...(blocker ? { blockers: [blocker], unresolvedFields: blocker.field ? [blocker.field] : [] } : {}),
+      evidence: ["executor:lever-browser", `unsupported:${reason}`],
+    },
+  );
+  return { state: "unsupported", reason, ...(blocker ? { blocker } : {}), inspection: inspectionResult };
+}
+
+function failedResult(
+  reason: string,
+  startedAt: string,
+  now: string,
+  observed?: ExecutionInspection,
+): Extract<ApplicationExecutorResult, { state: "failed" }> {
+  return {
+    state: "failed",
+    reason,
+    retryable: true,
+    ...(observed ? { inspection: { ...observed, status: "failed", updatedAt: now } } : {
+      inspection: inspection("failed", [], startedAt, now, {
+        evidence: ["executor:lever-browser", "execution-failed"],
+      }),
+    }),
+  };
+}
+
+function isAnswerValuePresent(value: AnswerValue | undefined): value is AnswerValue {
+  return value !== undefined && (typeof value !== "string" || value.trim().length > 0);
+}
+
+function valueAsString(value: AnswerValue | undefined): string | undefined {
+  if (!isAnswerValuePresent(value)) return undefined;
+  return typeof value === "string" ? value.trim() : String(value);
+}
+
+function splitFullName(value: string | undefined): { first?: string; last?: string; full?: string } {
+  const full = nonEmpty(value);
+  if (!full) return {};
+  const parts = full.split(/\s+/);
+  return {
+    full,
+    first: parts[0],
+    ...(parts.length > 1 ? { last: parts.slice(1).join(" ") } : {}),
+  };
+}
+
+function employmentForField(field: ApplicationFieldDescriptor, profile: CandidateProfile | undefined) {
+  if (!profile) return undefined;
+  const text = fieldText(field);
+  if (hasPhrase(text, /current (?:company|employer)|present (?:company|employer)/)) {
+    return profile.employmentHistory.find((employment) => employment.endDate === null);
+  }
+  return profile.employmentHistory.length === 1 ? profile.employmentHistory[0] : undefined;
+}
+
+function firstEducation(profile: CandidateProfile | undefined) {
+  return profile?.education[0];
+}
+
+function answerAliases(classification: ApplicationFieldClassification, text: string): readonly string[] {
+  switch (classification) {
+    case "salary": return ["salary_expectations"];
+    case "sponsorship": return ["sponsorship"];
+    case "relocation": return ["relocation"];
+    case "travel": return ["travel"];
+    case "free_text":
+      return hasPhrase(text, /cover letter/) ? ["cover_letter"] : ["why_company", "cover_letter"];
+    case "contact":
+      if (hasPhrase(text, /email|e-mail/)) return ["email"];
+      if (hasPhrase(text, /phone|telephone|mobile/)) return ["phone"];
+      if (hasPhrase(text, /location|city|state|country/)) return ["location"];
+      return ["name"];
+    case "employment_history": return ["employment_history"];
+    case "location": return ["location"];
+    default: return [];
+  }
+}
+
+function answerForField(
+  field: ApplicationFieldDescriptor,
+  answers: readonly ApplicationAnswer[],
+): ApplicationAnswer | undefined {
+  const text = normalized(`${field.id} ${field.label}`);
+  const aliases = new Set(answerAliases(field.classification, text));
+  const direct = answers.find((answer) => aliases.has(answer.field));
+  if (direct) return direct;
+
+  const tokens = normalizedTokens(text);
+  return answers.find((answer) => {
+    const answerText = normalized(`${answer.field} ${answer.question ?? ""}`);
+    return tokens.length > 0 && tokens.some((token) => answerText.includes(token));
+  });
+}
+
+function resolvedCareerValue(
+  field: ApplicationFieldDescriptor,
+  request: ApplicationExecutionRequest,
+): AnswerValue | undefined {
+  const candidates = request.careerJob.blockers.filter(
+    (blocker) => blocker.status === "resolved" && isAnswerValuePresent(blocker.value),
+  );
+  const exact = candidates.find((blocker) => blocker.field === field.id);
+  if (exact) return exact.value;
+  const byQuestion = candidates.find((blocker) => normalized(blocker.question) === normalized(field.label));
+  return byQuestion?.value;
+}
+
+function usableAnswer(
+  answer: ApplicationAnswer | undefined,
+  request: ApplicationExecutionRequest,
+): { value?: AnswerValue; explicit: boolean } {
+  if (!answer || !isAnswerValuePresent(answer.value)) return { explicit: false };
+  if (answer.status === "resolved") return { value: answer.value, explicit: true };
+  if (
+    answer.status === "drafted" &&
+    request.campaign.applicationPolicy.allowGroundedDrafts &&
+    (answer.provenance?.length ?? 0) > 0 &&
+    answer.policy !== "never_auto"
+  ) {
+    return { value: answer.value, explicit: false };
+  }
+  return { explicit: false };
+}
+
+function explicitValueForField(
+  field: ApplicationFieldDescriptor,
+  request: ApplicationExecutionRequest,
+): { value?: AnswerValue; explicit: boolean } {
+  const fromBlocker = resolvedCareerValue(field, request);
+  if (isAnswerValuePresent(fromBlocker)) return { value: fromBlocker, explicit: true };
+  return usableAnswer(answerForField(field, request.application.answers), request);
+}
+
+function profileValueForField(
+  field: ApplicationFieldDescriptor,
+  profile: CandidateProfile | undefined,
+): AnswerValue | undefined {
+  if (!profile) return undefined;
+  const text = fieldText(field);
+  const name = splitFullName(profile.identity.fullName ?? undefined);
+  if (field.classification === "contact") {
+    if (hasPhrase(text, /email|e-mail/)) return profile.identity.email ?? undefined;
+    if (hasPhrase(text, /phone|telephone|mobile/)) return profile.identity.phone ?? undefined;
+    if (hasPhrase(text, /last name|family name|surname/)) return name.last;
+    if (hasPhrase(text, /first name|given name/)) return name.first;
+    return name.full;
+  }
+  if (field.classification === "location") return profile.identity.location ?? profile.location ?? undefined;
+  if (field.classification === "employment_history") {
+    const employment = employmentForField(field, profile);
+    if (!employment) return undefined;
+    if (hasPhrase(text, /employer|company/)) return employment.employer;
+    if (hasPhrase(text, /job title|position|role|occupation/)) return employment.title;
+    if (hasPhrase(text, /start date|started|from/)) return employment.startDate;
+    if (hasPhrase(text, /end date|ended|to date/)) return employment.endDate ?? undefined;
+    return undefined;
+  }
+  if (field.classification === "education") {
+    const education = firstEducation(profile);
+    if (!education) return undefined;
+    if (hasPhrase(text, /university|college|school|institution/)) return education.institution;
+    if (hasPhrase(text, /degree/)) return education.degree;
+    if (hasPhrase(text, /major|field|study/)) return education.field ?? undefined;
+    if (hasPhrase(text, /completion|graduat/)) return education.completionDate ?? undefined;
+    return undefined;
+  }
+  if (field.classification === "sponsorship") {
+    if (profile.workAuthorization.sponsorshipRequired === null) return undefined;
+    return profile.workAuthorization.sponsorshipRequired;
+  }
+  if (field.classification === "work_authorization") return profile.workAuthorization.status ?? undefined;
+  if (field.classification === "relocation") return profile.workPreferences.relocation ?? undefined;
+  if (field.classification === "travel") return profile.workPreferences.travel ?? undefined;
+  return undefined;
+}
+
+function optionValue(
+  field: ApplicationFieldDescriptor,
+  value: AnswerValue,
+): string | undefined {
+  if (!field.options || field.options.length === 0) return valueAsString(value);
+  const desired = normalized(valueAsString(value));
+  const booleanAliases = typeof value === "boolean"
+    ? value ? ["yes", "true"] : ["no", "false"]
+    : [];
+  const option = field.options.find((candidate) => {
+    const labels = [normalized(candidate.value), normalized(candidate.label)];
+    return labels.includes(desired) || booleanAliases.some((alias) => labels.includes(alias));
+  });
+  return option?.value;
+}
+
+function checkboxValue(value: AnswerValue | undefined): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  const text = normalized(valueAsString(value));
+  if (text === "yes" || text === "true") return true;
+  if (text === "no" || text === "false") return false;
+  return undefined;
+}
+
+function missingFieldDecision(
+  field: ApplicationFieldDescriptor,
+  reason: string,
+  kind?: CareerBlockerDraft["kind"],
+): FieldDecision {
+  if (!field.required) return { explicit: false, leaveUntouched: true };
+  return { explicit: false, blocker: formBlocker(field, reason, kind) };
+}
+
+function decisionForField(
+  field: ApplicationFieldDescriptor,
+  request: ApplicationExecutionRequest,
+  resumePath: string | undefined,
+): FieldDecision {
+  const explicit = explicitValueForField(field, request);
+  const profileValue = profileValueForField(field, request.profile);
+  const supplied = explicit.value !== undefined ? explicit : { value: profileValue, explicit: false };
+  const text = fieldText(field);
+
+  if (!SUPPORTED_FIELD_TYPES.has(field.type)) {
+    return field.required
+      ? { explicit: false, blocker: formBlocker(field, "This required field uses a widget the executor does not safely support.", "unsupported_widget") }
+      : { explicit: false, leaveUntouched: true };
+  }
+
+  if (field.classification === "demographic") {
+    if (!explicit.explicit) {
+      return field.required
+        ? { explicit: false, blocker: formBlocker(field, "Demographic disclosures are never selected automatically; provide an explicit response.", "demographic_disclosure") }
+        : { explicit: false, leaveUntouched: true };
+    }
+  }
+
+  if (field.classification === "legal_attestation") {
+    if (!explicit.explicit) {
+      return field.required
+        ? { explicit: false, blocker: formBlocker(field, "A legal or certification commitment requires human review before it can be accepted.", "legal_attestation") }
+        : { explicit: false, leaveUntouched: true };
+    }
+  }
+
+  if (field.classification === "resume_upload") {
+    if (!resumePath) {
+      return missingFieldDecision(field, "The selected resume family has no local resume artifact configured.", "resume_missing");
+    }
+    return { value: resumePath, explicit: true };
+  }
+
+  if (supplied.value === undefined) {
+    const kind = field.classification === "free_text"
+      ? "subjective_answer"
+      : field.classification === "unknown"
+        ? "unknown_form_field"
+        : undefined;
+    return missingFieldDecision(
+      field,
+      field.classification === "free_text"
+        ? "No grounded prepared answer is available for this subjective question."
+        : field.classification === "unknown"
+          ? "The field could not be classified safely; no value was guessed."
+          : "No verified profile fact or explicitly resolved answer is available.",
+      kind,
+    );
+  }
+
+  if (field.type === "checkbox") {
+    const checked = checkboxValue(supplied.value);
+    if (checked === undefined) {
+      return field.required
+        ? { explicit: false, blocker: formBlocker(field, "The checkbox value is not an explicit boolean answer.", "unknown_form_field") }
+        : { explicit: false, leaveUntouched: true };
+    }
+    return { value: checked, explicit: supplied.explicit };
+  }
+
+  if (field.type === "select" || field.type === "radio") {
+    const selected = optionValue(field, supplied.value);
+    if (!selected) {
+      return field.required
+        ? {
+            explicit: false,
+            blocker: formBlocker(field, "The verified answer does not exactly match one of the provider's available options.", "unknown_form_field"),
+          }
+        : { explicit: false, leaveUntouched: true };
+    }
+    return { value: selected, explicit: supplied.explicit };
+  }
+
+  if (field.classification === "unknown" && !field.required) {
+    return { explicit: false, leaveUntouched: true };
+  }
+
+  const stringValue = valueAsString(supplied.value);
+  if (!stringValue) {
+    return missingFieldDecision(field, "The verified value was empty; no replacement was invented.");
+  }
+  return { value: stringValue, explicit: supplied.explicit };
+}
+
+function meaningfulCurrentValue(value: string | boolean | null | undefined): boolean {
+  return typeof value === "boolean"
+    ? value
+    : value !== null && value !== undefined && value.trim().length > 0;
+}
+
+function sameLeverApplicationPage(value: string, target: TrustedTarget): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && isVerifiedLeverApplicationUrl(url.toString(), target.site, target.postingId);
+  } catch {
+    return false;
+  }
+}
+
+function trustedTarget(request: ApplicationExecutionRequest): { target?: TrustedTarget; reason?: string } {
+  const job = request.careerJob;
+  const posting = job.job;
+  if (job.sourceMode !== "live") return { reason: "The executor requires explicit live source provenance." };
+  if (job.actionability !== "actionable") return { reason: "The posting is discovery-only and has no verified application endpoint." };
+  if (typeof job.sourceId !== "string" || !job.sourceId.startsWith("lever:")) return { reason: "Only verified Lever postings are supported by this executor." };
+  if (!job.sourceRecordId) return { reason: "The Lever provider posting ID is missing." };
+  if (!posting.applicationUrl || !posting.sourceUrl) return { reason: "The posting is missing a verified hosted or application URL." };
+  const rawSite = job.sourceId.slice("lever:".length).trim();
+  if (!rawSite) return { reason: "The Lever SITE identifier is missing from source provenance." };
+  let site: string;
+  try {
+    site = leverSourceId(rawSite).slice("lever:".length);
+  } catch {
+    return { reason: "The Lever SITE identifier is invalid." };
+  }
+  if (request.application.job.applicationUrl !== posting.applicationUrl || request.application.job.sourceUrl !== posting.sourceUrl) {
+    return { reason: "The application packet provenance does not match the career posting." };
+  }
+  try {
+    const applicationUrl = new URL(posting.applicationUrl);
+    if (applicationUrl.protocol !== "https:") return { reason: "The application URL is not HTTPS." };
+  } catch {
+    return { reason: "The application URL is not syntactically valid." };
+  }
+  if (!isVerifiedLeverHostedUrl(posting.sourceUrl, site, job.sourceRecordId)) {
+    return { reason: "The posting URL is not the verified Lever hosted page for this provider ID." };
+  }
+  if (!isVerifiedLeverApplicationUrl(posting.applicationUrl, site, job.sourceRecordId)) {
+    return { reason: "The application URL is not the verified Lever /apply path for this provider ID." };
+  }
+  return {
+    target: {
+      site,
+      postingId: job.sourceRecordId,
+      applicationUrl: posting.applicationUrl,
+    },
+  };
+}
+
+/**
+ * Browser-neutral Lever execution policy. The concrete browser implementation
+ * only supplies a small session/field surface; this class owns trust checks,
+ * grounded mapping, blockers, and the closed Submit lane.
+ */
+export class LeverBrowserExecutor implements ApplicationExecutor {
+  public readonly id = "lever-browser-executor";
+  private readonly sessions = new Map<string, SessionState>();
+  private readonly now: () => string;
+
+  constructor(private readonly options: LeverBrowserExecutorOptions) {
+    this.now = options.now ?? defaultNow;
+  }
+
+  executionMode(_request: ApplicationExecutionRequest): ApplicationExecutorMode {
+    return "preparation_only";
+  }
+
+  supports(request: ApplicationExecutionRequest | CareerJob | JobPosting): boolean {
+    if ("careerJob" in request) return trustedTarget(request).target !== undefined;
+    if ("job" in request) return trustedTarget({
+      campaign: {} as ApplicationExecutionRequest["campaign"],
+      careerJob: request,
+      application: { job: request.job } as ApplicationExecutionRequest["application"],
+      now: this.now(),
+    }).target !== undefined;
+    return false;
+  }
+
+  async inspect(request: ApplicationExecutionRequest): Promise<ExecutionInspection> {
+    const observed = await this.inspectForm(request);
+    return observed.inspection;
+  }
+
+  async execute(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult> {
+    const startedAt = this.now();
+    const observed = await this.inspectForm(request, startedAt);
+    if (observed.inspection.status === "failed") {
+      return failedResult(
+        observed.inspection.evidence.find((item) => item.startsWith("error:"))?.slice("error:".length) ?? "Lever form inspection failed.",
+        startedAt,
+        this.now(),
+        observed.inspection,
+      );
+    }
+    if (observed.inspection.status === "unsupported") {
+      return unsupportedResult(
+        observed.inspection.evidence.find((item) => item.startsWith("unsupported:"))?.slice("unsupported:".length) ?? "Lever form is unsupported.",
+        startedAt,
+        this.now(),
+        observed.inspection.blockers[0],
+      );
+    }
+    if (observed.inspection.blockers.length > 0) {
+      return {
+        state: "requires_human",
+        blocker: observed.inspection.blockers[0],
+        blockers: observed.inspection.blockers,
+        inspection: observed.inspection,
+      };
+    }
+
+    const fieldsFilled = new Set(observed.inspection.fieldsFilled);
+    const unresolvedFields = new Set(observed.inspection.unresolvedFields);
+    const blockers: CareerBlockerDraft[] = [];
+    const evidence = [...observed.inspection.evidence];
+    const resumePath = request.application.resume?.familyId
+      ? this.options.resumePaths?.[request.application.resume.familyId]
+      : undefined;
+    let resumeUsed: string | undefined;
+
+    for (const field of observed.fields) {
+      const fieldDescriptor = descriptor(field);
+      let current: string | boolean | null | undefined;
+      try {
+        current = field.readValue ? await field.readValue() : undefined;
+      } catch {
+        current = undefined;
+      }
+      if (meaningfulCurrentValue(current)) {
+        fieldsFilled.add(fieldDescriptor.id);
+        if (fieldDescriptor.classification === "resume_upload") {
+          resumeUsed = request.application.resume?.familyId;
+        }
+        continue;
+      }
+
+      const decision = decisionForField(fieldDescriptor, request, resumePath);
+      if (decision.blocker) {
+        blockers.push(decision.blocker);
+        unresolvedFields.add(fieldDescriptor.label);
+        continue;
+      }
+      if (decision.leaveUntouched || decision.value === undefined) {
+        unresolvedFields.add(fieldDescriptor.label);
+        continue;
+      }
+
+      try {
+        if (fieldDescriptor.type === "file") {
+          const path = valueAsString(decision.value);
+          if (!path || (this.options.resumeFileExists && !(await this.options.resumeFileExists(path)))) {
+            const blocker = formBlocker(fieldDescriptor, "The configured resume artifact is not available at execution time.", "required_file_missing");
+            if (fieldDescriptor.required) blockers.push(blocker);
+            unresolvedFields.add(fieldDescriptor.label);
+            continue;
+          }
+          await field.uploadFile(path);
+          resumeUsed = request.application.resume?.familyId;
+        } else if (fieldDescriptor.type === "checkbox") {
+          const checked = checkboxValue(decision.value);
+          if (checked === undefined) throw new Error("Checkbox value was not boolean.");
+          await field.setChecked(checked);
+        } else if (fieldDescriptor.type === "select" || fieldDescriptor.type === "radio") {
+          const selected = valueAsString(decision.value);
+          if (!selected) throw new Error("Selected option was empty.");
+          await field.select(selected);
+        } else {
+          const value = valueAsString(decision.value);
+          if (!value) throw new Error("Text value was empty.");
+          await field.fill(value);
+        }
+        fieldsFilled.add(fieldDescriptor.id);
+        evidence.push(`filled:${fieldDescriptor.id}`);
+      } catch (error) {
+        const reason = safeErrorMessage(error, "The field could not be filled.");
+        return failedResult(`Could not fill ${fieldDescriptor.label}: ${reason}`, startedAt, this.now(), inspection(
+          "failed",
+          observed.inspection.fields,
+          observed.inspection.startedAt,
+          this.now(),
+          {
+            fieldsFilled: [...fieldsFilled],
+            unresolvedFields: [...unresolvedFields],
+            blockers,
+            ...(resumeUsed ? { resumeUsed } : {}),
+            evidence: [...evidence, `error:${reason}`],
+          },
+        ));
+      }
+    }
+
+    const dedupedBlockers = dedupeBlockers(blockers);
+    if (dedupedBlockers.length > 0) {
+      const blockedInspection = inspection(
+        "needs_input",
+        observed.inspection.fields,
+        observed.inspection.startedAt,
+        this.now(),
+        {
+          fieldsFilled: [...fieldsFilled],
+          unresolvedFields: [...unresolvedFields],
+          blockers: dedupedBlockers,
+          ...(resumeUsed ? { resumeUsed } : {}),
+          evidence: [...evidence, "submit:not-clicked"],
+        },
+      );
+      return {
+        state: "requires_human",
+        blocker: dedupedBlockers[0],
+        blockers: dedupedBlockers,
+        inspection: blockedInspection,
+      };
+    }
+
+    for (const field of observed.fields) {
+      if (!field.required || !field.readValue) continue;
+      let value: string | boolean | null = null;
+      try {
+        value = await field.readValue();
+      } catch {
+        value = null;
+      }
+      if (!meaningfulCurrentValue(value)) {
+        const fieldDescriptor = descriptor(field);
+        unresolvedFields.add(fieldDescriptor.label);
+        const missing = formBlocker(fieldDescriptor, "A required field is still empty after the safe fill pass.", blockerKind(fieldDescriptor.classification));
+        dedupedBlockers.push(missing);
+      }
+    }
+    if (dedupedBlockers.length > 0) {
+      const blockedInspection = inspection("needs_input", observed.inspection.fields, observed.inspection.startedAt, this.now(), {
+        fieldsFilled: [...fieldsFilled],
+        unresolvedFields: [...unresolvedFields],
+        blockers: dedupeBlockers(dedupedBlockers),
+        ...(resumeUsed ? { resumeUsed } : {}),
+        evidence: [...evidence, "submit:not-clicked"],
+      });
+      return {
+        state: "requires_human",
+        blocker: blockedInspection.blockers[0],
+        blockers: blockedInspection.blockers,
+        inspection: blockedInspection,
+      };
+    }
+
+    if (!(await observed.session.hasSubmitControl())) {
+      const blocker = formBlocker({
+        id: "submit-control",
+        label: "Final Submit control",
+        type: "unknown",
+        required: true,
+        classification: "unknown",
+      }, "The expected final Submit control was not found; the page may not be a complete Lever application form.", "unsupported_widget");
+      return unsupportedResult("final Submit control was not detected", startedAt, this.now(), blocker);
+    }
+
+    const currentUrl = await observed.session.currentUrl();
+    if (!sameLeverApplicationPage(currentUrl, observed.target)) {
+      const blocker = boundaryBlocker({
+        kind: "external_verification",
+        question: "Verify the application page before review",
+        reason: "The browser page changed away from the verified Lever application route; no further action was taken.",
+        evidence: ["navigation:unexpected-page", "submit:not-clicked"],
+      });
+      return unsupportedResult("browser page no longer matches the verified Lever application route", startedAt, this.now(), blocker);
+    }
+
+    const readyInspection = inspection("inspected", observed.inspection.fields, observed.inspection.startedAt, this.now(), {
+      fieldsFilled: [...fieldsFilled],
+      unresolvedFields: [...unresolvedFields],
+      ...(resumeUsed ? { resumeUsed } : {}),
+      evidence: [...evidence, "navigation:verified", "submit-control:detected", "submit:not-clicked", "submission:manual-only"],
+    });
+    return {
+      state: "ready_to_submit",
+      inspection: { ...readyInspection, status: "inspected" },
+      note: "Lever form prepared. Final submission remains manual; the executor never activates Submit.",
+    };
+  }
+
+  async close(applicationId: string): Promise<void> {
+    const state = this.sessions.get(applicationId);
+    this.sessions.delete(applicationId);
+    if (state) await state.session.close();
+  }
+
+  private async sessionFor(
+    request: ApplicationExecutionRequest,
+    target: TrustedTarget,
+  ): Promise<SessionState> {
+    const key = request.application.id || request.careerJob.id;
+    let state = this.sessions.get(key);
+    if (!state) {
+      const session = await this.options.sessionFactory.open(key);
+      state = { session, navigated: false };
+      this.sessions.set(key, state);
+    }
+    if (!state.navigated) {
+      await state.session.navigate(target.applicationUrl);
+      state.navigated = true;
+    }
+    const currentUrl = await state.session.currentUrl();
+    if (!sameLeverApplicationPage(currentUrl, target)) {
+      throw new Error("browser page is not the verified Lever application route");
+    }
+    return state;
+  }
+
+  private async inspectForm(
+    request: ApplicationExecutionRequest,
+    startedAt = this.now(),
+  ): Promise<ObservedForm> {
+    const targetResult = trustedTarget(request);
+    if (!targetResult.target) {
+      return {
+        target: { site: "unknown", postingId: "unknown", applicationUrl: "" },
+        session: { currentUrl: () => "", navigate: async () => undefined, inspectFields: async () => [], detectHumanBoundary: async () => null, hasSubmitControl: async () => false, close: async () => undefined },
+        fields: [],
+        inspection: inspection("unsupported", [], startedAt, this.now(), {
+          evidence: [`unsupported:${targetResult.reason ?? "untrusted Lever posting"}`],
+        }),
+      };
+    }
+
+    const target = targetResult.target;
+    try {
+      const state = await this.sessionFor(request, target);
+      const boundary = await state.session.detectHumanBoundary();
+      const rawFields = await state.session.inspectFields();
+      const descriptors = rawFields.map(descriptor);
+      const baseEvidence = [
+        "executor:lever-browser",
+        "source:live/lever",
+        `lever-site:${target.site}`,
+        `provider-job-id:${target.postingId}`,
+        "navigation:verified",
+      ];
+      if (boundary) {
+        const blocker = boundaryBlocker(boundary);
+        return {
+          target,
+          session: state.session,
+          fields: rawFields,
+          inspection: inspection("needs_input", descriptors, startedAt, this.now(), {
+            unresolvedFields: [boundary.question],
+            blockers: [blocker],
+            evidence: [...baseEvidence, ...boundary.evidence, "submit:not-clicked"],
+          }),
+        };
+      }
+      if (descriptors.length === 0) {
+        const blocker = formBlocker({
+          id: "application-form",
+          label: "Lever application form",
+          type: "unknown",
+          required: true,
+          classification: "unknown",
+        }, "No supported application fields were found on the verified page.", "unknown_form_field");
+        return {
+          target,
+          session: state.session,
+          fields: rawFields,
+          inspection: inspection("unsupported", descriptors, startedAt, this.now(), {
+            unresolvedFields: ["Lever application form"],
+            blockers: [blocker],
+            evidence: [...baseEvidence, "unsupported:form-fields-not-found"],
+          }),
+        };
+      }
+      return {
+        target,
+        session: state.session,
+        fields: rawFields,
+        inspection: inspection("inspected", descriptors, startedAt, this.now(), {
+          evidence: [...baseEvidence, `fields-detected:${descriptors.length}`],
+        }),
+      };
+    } catch (error) {
+      const reason = safeErrorMessage(error, "Lever form inspection failed.");
+      const key = request.application.id || request.careerJob.id;
+      const failedSession = this.sessions.get(key);
+      this.sessions.delete(key);
+      await failedSession?.session.close().catch(() => undefined);
+      return {
+        target,
+        session: { currentUrl: () => "", navigate: async () => undefined, inspectFields: async () => [], detectHumanBoundary: async () => null, hasSubmitControl: async () => false, close: async () => undefined },
+        fields: [],
+        inspection: inspection("failed", [], startedAt, this.now(), {
+          evidence: ["executor:lever-browser", `error:${reason}`],
+        }),
+      };
+    }
+  }
+}
+
+function dedupeBlockers(blockers: readonly CareerBlockerDraft[]): CareerBlockerDraft[] {
+  const values = new Map<string, CareerBlockerDraft>();
+  for (const blocker of blockers) {
+    const key = `${blocker.kind}|${blocker.unit}|${blocker.field ?? blocker.question}`;
+    if (!values.has(key)) values.set(key, blocker);
+  }
+  return [...values.values()];
+}
+
+/** Small factory used by hosts/tests to make an explicit Lever source identity. */
+export function isLeverExecutorSourceId(sourceId: string): boolean {
+  try {
+    return sourceId.startsWith("lever:") && sourceId === leverSourceId(sourceId.slice("lever:".length));
+  } catch {
+    return false;
+  }
+}
