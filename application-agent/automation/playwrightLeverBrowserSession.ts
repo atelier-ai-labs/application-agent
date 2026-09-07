@@ -754,6 +754,17 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
   }
 
   async inspectFields(): Promise<readonly LeverBrowserField[]> {
+    // Rippling (and similar Next.js ATS hosts) hydrate the form client-side; the
+    // static document often has zero inputs until React mounts.
+    const controlSelector = "input:not([type=\"hidden\"]):not([type=\"submit\"]):not([type=\"button\"]):not([type=\"reset\"]), textarea, select";
+    try {
+      await this.page.waitForSelector(controlSelector, {
+        state: "attached",
+        timeout: Math.min(this.timeoutMs, 12_000),
+      });
+    } catch {
+      // Fall through; the empty-field path already becomes an unsupported/human gate.
+    }
     const controls = this.page.locator("input, textarea, select");
     const raw = await controls.evaluateAll((elements) => elements.flatMap((element, index): InspectedRawField[] => {
       const control = element as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
@@ -787,10 +798,12 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
         .map((element) => element?.textContent ?? "")
         .join(" "));
       const ariaLabel = descriptorText(control.getAttribute("aria-label"));
-      const questionContainer = control.closest(".application-question");
+      const questionContainer = control.closest(
+        ".application-question, [data-testid*=\"question\" i], [class*=\"Question\" i], form section, form [role=\"group\"]",
+      );
       const promptElements = questionContainer
         ? Array.from(questionContainer.querySelectorAll(
-            '.application-label .text, [data-qa="question"], [data-qa="question-text"], .question-prompt',
+            '.application-label .text, [data-qa="question"], [data-qa="question-text"], .question-prompt, label, legend, [data-testid*=\"label\" i], p, span',
           ))
         : [];
       const fallbackPromptElements = questionContainer && promptElements.length === 0

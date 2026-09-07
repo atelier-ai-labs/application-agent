@@ -36,6 +36,14 @@ describe("deterministic job URL classifier", () => {
     );
     expect(isVerifiedRipplingApplicationUrl("https://ats.rippling.com/fullthrottle1/jobs/posting-123/apply")).toBe(true);
     expect(classifyJobUrl("https://ats.rippling.com/fullthrottle1/jobs/posting-123/apply").postingIdentifier).toBe("posting-123");
+    expect(classifyJobUrl("https://ats.rippling.com/en-US/fullthrottle1/jobs/posting-123/apply")).toMatchObject({
+      kind: "rippling",
+      siteIdentifier: "fullthrottle1",
+      postingIdentifier: "posting-123",
+    });
+    expect(ripplingApplicationUrl("https://ats.rippling.com/de-DE/fullthrottle1/jobs/posting-123")).toBe(
+      "https://ats.rippling.com/de-DE/fullthrottle1/jobs/posting-123/apply",
+    );
   });
 
   it("recognizes Ashby and Workday without treating page text as evidence", () => {

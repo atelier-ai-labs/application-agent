@@ -33,6 +33,14 @@ function pathSegments(url: URL): string[] | undefined {
   return segments;
 }
 
+/** Rippling (and some other hosts) may prefix paths with a locale like en-US or es-419. */
+const LOCALE_PATH_PREFIX = /^[a-z]{2}(?:-[A-Za-z0-9]{2,8})?$/;
+
+function stripLocalePrefix(segments: string[]): string[] {
+  if (segments.length === 0) return segments;
+  return LOCALE_PATH_PREFIX.test(segments[0]) ? segments.slice(1) : segments;
+}
+
 function normalizedHost(url: URL): string {
   return url.hostname.toLowerCase().replace(/\.$/, "");
 }
@@ -85,17 +93,23 @@ export function classifyJobUrl(value: string): JobUrlClassification {
     };
   }
 
+  const ripplingSegments = stripLocalePrefix(segments);
   if (RIPPLING_HOSTS.has(host) &&
-    (segments.length === 3 || (segments.length === 4 && segments[3].toLowerCase() === "apply")) &&
-    segments[0].length > 0 &&
-    segments[1].toLowerCase() === "jobs" &&
-    segments[2].length > 0) {
+    (ripplingSegments.length === 3 || (ripplingSegments.length === 4 && ripplingSegments[3].toLowerCase() === "apply")) &&
+    ripplingSegments[0].length > 0 &&
+    ripplingSegments[1].toLowerCase() === "jobs" &&
+    ripplingSegments[2].length > 0) {
+    const localeStripped = ripplingSegments.length !== segments.length;
     return {
       kind: "rippling",
       canonicalUrl,
-      siteIdentifier: segments[0],
-      postingIdentifier: segments[2],
-      evidence: [`hostname:${host}`, "path:<organization>/jobs/<posting-id>[/apply]"],
+      siteIdentifier: ripplingSegments[0],
+      postingIdentifier: ripplingSegments[2],
+      evidence: [
+        `hostname:${host}`,
+        "path:<organization>/jobs/<posting-id>[/apply]",
+        ...(localeStripped ? ["locale-prefix-stripped"] : []),
+      ],
     };
   }
 
