@@ -3,7 +3,7 @@ import type {
   JobSourceConfig,
   SearchCriteria,
 } from "./campaignTypes";
-import { jobSourceConfigId } from "./campaignTypes";
+import { HIMALAYAS_SOURCE_ID, jobSourceConfigId } from "./campaignTypes";
 import { BRAVE_SEARCH_DISCOVERY_ID } from "./jobDiscovery";
 import {
   greenhouseConfigsForBoards,
@@ -18,6 +18,11 @@ import type {
   JobSourceBatch,
   JobSourceListing,
 } from "./scout";
+import {
+  normalizeJobSearchIntent,
+  searchCriteriaFromJobSearchIntent,
+  type JobSearchIntent,
+} from "./searchIntent";
 
 export const LEVER_SOURCE_PREFIX = "lever:";
 export const DEFAULT_LEVER_POSTINGS_BASE_URL = "https://api.lever.co/v0/postings";
@@ -434,7 +439,14 @@ export function parseLeverResponse(
 
   const queries = searchQueries(criteria);
   const warnings: string[] = [];
-  const candidates: Array<{ record: LeverPosting; job: JobPosting; rawText: string; sourcePublishedAt?: string; warning?: string }> = [];
+  const candidates: Array<{
+    record: LeverPosting;
+    job: JobPosting;
+    rawText: string;
+    sourcePublishedAt?: string;
+    warning?: string;
+    searchQueries: readonly string[];
+  }> = [];
   for (const [index, value] of payload.entries()) {
     const result = recordFrom(value, site);
     if (!result.record) {
@@ -445,8 +457,9 @@ export function parseLeverResponse(
       const normalized = normalizeLeverJob(result.record, site, capturedAt);
       if (result.warning) warnings.push(`Lever posting ${result.record.id}: ${result.warning}`);
       const searchText = normalizedSearchText(result.record, normalized.job.description, site);
-      if (queries.length > 0 && !queries.some((query) => searchQueryMatches(query, searchText))) continue;
-      candidates.push({ record: result.record, ...normalized });
+      const matchedQueries = queries.filter((query) => searchQueryMatches(query, searchText));
+      if (queries.length > 0 && matchedQueries.length === 0) continue;
+      candidates.push({ record: result.record, ...normalized, searchQueries: matchedQueries });
     } catch (error) {
       warnings.push(`Skipped Lever posting ${result.record.id}: ${error instanceof Error ? error.message : "normalization failed."}`);
     }
@@ -459,7 +472,7 @@ export function parseLeverResponse(
   });
 
   return {
-    listings: candidates.slice(0, maxResults).map(({ record, rawText, sourcePublishedAt }) => ({
+    listings: candidates.slice(0, maxResults).map(({ record, rawText, sourcePublishedAt, searchQueries: matchedQueries }) => ({
       input: {
         rawText,
         sourceUrl: record.hostedUrl,
@@ -469,6 +482,7 @@ export function parseLeverResponse(
         isExample: false,
       },
       sourceRecordId: record.id,
+      ...(matchedQueries.length > 0 ? { searchQueries: matchedQueries } : {}),
       ...(sourcePublishedAt ? { sourcePublishedAt } : {}),
       discoveredAt: capturedAt,
       sourceMode: "live",
@@ -593,30 +607,41 @@ export function createLiveCampaignInput(
   leverSites: readonly string[] = parseLeverSites(),
   greenhouseBoards: readonly (string | GreenhouseBoardConfig)[] = parseGreenhouseBoards(),
   broadDiscoveryEnabled = parseBroadDiscoveryEnabled(),
+  searchIntent?: JobSearchIntent,
+  includeHimalayas = false,
 ): CreateCampaignInput {
   const configuredLeverSites = parseLeverSites(leverSites.join(","));
   const configuredGreenhouseBoards = greenhouseConfigsForBoards(greenhouseBoards);
+  const normalizedSearchIntent = searchIntent ? normalizeJobSearchIntent(searchIntent) : undefined;
   const configs: JobSourceConfig[] = [
     { type: "remotive", id: "remotive-live" },
+    ...(includeHimalayas ? [{ type: "himalayas", id: HIMALAYAS_SOURCE_ID } satisfies JobSourceConfig] : []),
     ...configuredLeverSites.map((site): JobSourceConfig => ({ type: "lever", site, id: leverSourceId(site) })),
     ...configuredGreenhouseBoards,
     ...(broadDiscoveryEnabled ? [{ type: "brave_search", id: `references:${BRAVE_SEARCH_DISCOVERY_ID}` } satisfies JobSourceConfig] : []),
   ];
   return {
-    name: broadDiscoveryEnabled
+    name: normalizedSearchIntent
+      ? `Live ${normalizedSearchIntent.primaryLanes[0] ?? "job"} search`
+      : broadDiscoveryEnabled
       ? "Live broad + targeted ATS search"
       : configuredLeverSites.length > 0 || configuredGreenhouseBoards.length > 0
         ? "Live remote + targeted ATS search"
         : "Live remote engineering search",
-    goal: "Discover current remote engineering roles across broad and targeted employer feeds.",
+    goal: normalizedSearchIntent
+      ? "Discover current roles matching your configured search criteria."
+      : "Discover current remote engineering roles across broad and targeted employer feeds.",
     searchSources: configs.map(jobSourceConfigId),
     sourceConfigs: configs,
-    searchCriteria: {
-      roleLanes: ["engineer", "developer", "architect"],
-      searchQueries: REMOTE_ENGINEERING_SEARCH_QUERIES,
-      remoteOnly: true,
-      employmentTypes: ["full time"],
-    },
+    ...(normalizedSearchIntent ? { searchIntent: normalizedSearchIntent } : {}),
+    searchCriteria: normalizedSearchIntent
+      ? searchCriteriaFromJobSearchIntent(normalizedSearchIntent)
+      : {
+        roleLanes: ["engineer", "developer", "architect"],
+        searchQueries: REMOTE_ENGINEERING_SEARCH_QUERIES,
+        remoteOnly: true,
+        employmentTypes: ["full time"],
+      },
     applicationPolicy: {
       autoPrepare: true,
       allowGroundedDrafts: true,
@@ -638,8 +663,10 @@ export function createLeverCampaignInput(
   leverSites: readonly string[] = parseLeverSites(),
   greenhouseBoards: readonly (string | GreenhouseBoardConfig)[] = parseGreenhouseBoards(),
   broadDiscoveryEnabled = parseBroadDiscoveryEnabled(),
+  searchIntent?: JobSearchIntent,
+  includeHimalayas = false,
 ): CreateCampaignInput {
-  return createLiveCampaignInput(leverSites, greenhouseBoards, broadDiscoveryEnabled);
+  return createLiveCampaignInput(leverSites, greenhouseBoards, broadDiscoveryEnabled, searchIntent, includeHimalayas);
 }
 
 export const leverCampaignInput: CreateCampaignInput = createLeverCampaignInput();

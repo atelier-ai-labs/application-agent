@@ -57,14 +57,39 @@ function containsKeyword(text: string, keyword: string): boolean {
   return new RegExp(`(?:^|[^a-z0-9])${expression}(?:$|[^a-z0-9])`, "i").test(text);
 }
 
+function compoundSkillVariants(value: string): readonly string[] {
+  const variants = new Set<string>();
+  const add = (candidate: string): void => {
+    const cleaned = candidate.trim().replace(/\s+/g, " ");
+    if (cleaned) variants.add(cleaned);
+  };
+  const split = (candidate: string): void => {
+    for (const part of candidate.split(/\s*(?:\/|,|\||;)\s*/)) add(part);
+  };
+
+  add(value);
+  split(value);
+  for (const match of value.matchAll(/\(([^()]*)\)/g)) {
+    add(match[1]);
+    split(match[1]);
+  }
+  const withoutParenthetical = value.replace(/\s*\([^()]*\)/g, " ");
+  add(withoutParenthetical);
+  split(withoutParenthetical);
+  return [...variants];
+}
+
 function profileSkillKeys(profile: CandidateProfile): Set<string> {
   const keys = new Set<string>();
-  for (const skill of profile.skills) keys.add(normalizedSkill(skill));
+  const addSkill = (skill: string): void => {
+    for (const variant of compoundSkillVariants(skill)) keys.add(normalizedSkill(variant));
+  };
+  for (const skill of profile.skills) addSkill(skill);
   for (const employment of profile.employmentHistory) {
-    for (const skill of employment.verifiedSkills) keys.add(normalizedSkill(skill));
+    for (const skill of employment.verifiedSkills) addSkill(skill);
   }
   for (const project of profile.projects) {
-    for (const skill of project.verifiedSkills) keys.add(normalizedSkill(skill));
+    for (const skill of project.verifiedSkills) addSkill(skill);
   }
   return keys;
 }

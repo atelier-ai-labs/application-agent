@@ -38,6 +38,7 @@ import {
 } from "../application-agent/src";
 import { applyHardFilters, verifyPreparedApplication } from "../application-agent/src/domain/policies";
 import { CareerAgentService } from "../application-agent/src/service/careerAgentService";
+import { LocalStorageApplicationRepository } from "../application-agent/src/persistence/applicationRepository";
 import { CAMPAIGNS_STORAGE_KEY, LocalStorageCareerRepository } from "../application-agent/src/persistence/careerRepository";
 
 const capturedAt = "2026-08-30T12:00:00.000Z";
@@ -227,6 +228,30 @@ class OneHumanThenSuccessExecutor implements ApplicationExecutor {
   }
 }
 
+class UnconfirmedSubmissionExecutor implements ApplicationExecutor {
+  readonly id = "unconfirmed-submission-test-executor";
+
+  executionMode(): "submission_capable" {
+    return "submission_capable";
+  }
+
+  async execute(): Promise<ApplicationExecutorResult> {
+    return {
+      state: "requires_human",
+      blocker: {
+        kind: "external_verification",
+        unit: "submission",
+        questionProvenance: "POLICY",
+        field: "submission-confirmation",
+        question: "Verify whether the application was submitted",
+        reason: "The Submit control was activated but deterministic confirmation was unavailable.",
+        evidence: ["submit:clicked", "submit:confirmation-missing"],
+        resumeAfterHuman: false,
+      },
+    };
+  }
+}
+
 describe("Autonomous Career Agent domain seams", () => {
   it("creates, activates, pauses, completes, and persists campaigns", async () => {
     const { service, careerRepository } = makeService();
@@ -332,6 +357,18 @@ describe("Autonomous Career Agent domain seams", () => {
     await expect(applicationService.submitApplication(application.id, { approved: true, approvedAt: capturedAt })).rejects.toThrow("submission is disabled");
   });
 
+  it("persists explicit automatic-submission authorization without changing search or fit policy", () => {
+    const { service } = makeService({ profile: fullyAuthorizedTestProfile() });
+    const campaign = service.createCampaign(campaignInput({
+      submissionPolicy: { authority: "never", requireExplicitApproval: false },
+    }));
+    const authorized = service.authorizeAutomaticSubmission(campaign.id);
+
+    expect(authorized.submissionPolicy).toEqual({ authority: "automatic", requireExplicitApproval: false });
+    expect(authorized.searchCriteria).toEqual(campaign.searchCriteria);
+    expect(authorized.fitPolicy).toEqual(campaign.fitPolicy);
+  });
+
   it("handles application caps and keeps rejected or held jobs out of preparation", async () => {
     const { service, applicationRepository } = makeService({
       listings: [
@@ -343,6 +380,7 @@ describe("Autonomous Career Agent domain seams", () => {
     service.activateCampaign(campaign.id);
     const result = await service.runCampaign(campaign.id);
     expect(result.applied).toBe(1);
+    expect(result.pursued).toBe(1);
     expect(result.held).toBe(1);
     expect(applicationRepository.listApplications()).toHaveLength(1);
     expect(service.listJobs(campaign.id).some((job) => job.status === "held" && job.decisionReason?.includes("cap"))).toBe(true);
@@ -391,12 +429,87 @@ describe("Autonomous Career Agent domain seams", () => {
     const { service } = makeService({ executor: new UnavailableApplicationExecutor() });
     const campaign = service.createCampaign(campaignInput());
     service.activateCampaign(campaign.id);
-    await service.runCampaign(campaign.id);
+    const result = await service.runCampaign(campaign.id);
     const job = service.listJobs(campaign.id)[0];
+    expect(result.pursued).toBe(1);
     expect(job.status).toBe("needs_input");
     expect(job.blockers[0].kind).toBe("external_verification");
     expect(job.blockers[0].reason).toContain("No real ATS or browser executor");
     expect(job.submissionProof).toBeUndefined();
+  });
+
+  it("retries an explicitly unconfirmed submission with the same application packet", async () => {
+    const { service, applicationRepository, careerRepository } = makeService({ executor: new UnconfirmedSubmissionExecutor() });
+    const campaign = service.createCampaign(campaignInput({
+      submissionPolicy: { authority: "automatic", requireExplicitApproval: false },
+    }));
+    service.activateCampaign(campaign.id);
+    await service.runCampaign(campaign.id);
+
+    const original = service.listJobs(campaign.id)[0];
+    const applicationId = original.applicationId;
+    const attention = service.listAttentionEvents(campaign.id)[0];
+    expect(original.status).toBe("needs_input");
+    expect(attention.blockerType).toBe("external_verification");
+    expect(applicationId).toBeDefined();
+
+    const retried = await service.retryUnconfirmedAutomaticSubmission(campaign.id, original.id);
+    expect(retried.id).toBe(original.id);
+    expect(retried.applicationId).toBe(applicationId);
+    expect(retried.status).toBe("preparing");
+    expect(retried.blockers[0]).toMatchObject({ status: "resolved", field: "submission-confirmation" });
+    expect(service.listAttentionEvents(campaign.id)[0].status).toBe("cancelled");
+    expect(applicationRepository.listApplications()).toHaveLength(1);
+    expect(careerRepository.listEvents(campaign.id).some((event) =>
+      event.type === "application.execution_resumed" && event.metadata?.recovery === "explicit_unconfirmed_submission_retry",
+    )).toBe(true);
+  });
+
+  it("derives pursuit once from application-created lifecycle events across service reload", async () => {
+    class MapStorage implements KeyValueStorage {
+      private readonly values = new Map<string, string>();
+      getItem(key: string): string | null { return this.values.get(key) ?? null; }
+      setItem(key: string, value: string): void { this.values.set(key, value); }
+      removeItem(key: string): void { this.values.delete(key); }
+    }
+
+    const storage = new MapStorage();
+    const careerRepository = new LocalStorageCareerRepository(storage);
+    const applicationRepository = new LocalStorageApplicationRepository(storage);
+    const candidate = fullyAuthorizedTestProfile();
+    const source = new StaticJobSource("reload-source", [
+      listing("Example Cloud Systems", "Cloud Platform Engineer", ["AWS"], "reload-1"),
+    ]);
+    const firstClock = runtime();
+    const first = new CareerAgentService(candidate, {
+      applicationService: new ApplicationService(applicationRepository, candidate, new DeterministicModelClient(), firstClock),
+      careerRepository,
+      scout: new JobScout({ [source.id]: source }, firstClock.now),
+      executor: new UnavailableApplicationExecutor(),
+      tracker: new InMemoryJobTracker(),
+    }, firstClock);
+    const campaign = first.createCampaign(campaignInput({
+      searchSources: [source.id],
+      submissionPolicy: { authority: "never", requireExplicitApproval: false },
+    }));
+    first.activateCampaign(campaign.id);
+    const firstRun = await first.runCampaign(campaign.id);
+    expect(firstRun.pursued).toBe(1);
+    expect(firstRun.applied).toBe(0);
+
+    const secondClock = runtime();
+    const second = new CareerAgentService(candidate, {
+      applicationService: new ApplicationService(applicationRepository, candidate, new DeterministicModelClient(), secondClock),
+      careerRepository,
+      scout: new JobScout({ [source.id]: source }, secondClock.now),
+      executor: new UnavailableApplicationExecutor(),
+      tracker: new InMemoryJobTracker(),
+    }, secondClock);
+    const secondRun = await second.runCampaign(campaign.id);
+    expect(secondRun.pursued).toBe(0);
+    expect(secondRun.alreadySeen).toBe(1);
+    expect(second.listEvents(campaign.id).filter((event) => event.type === "application.created")).toHaveLength(1);
+    expect(second.listJobs(campaign.id)).toHaveLength(1);
   });
 
   it("keeps an applied result while surfacing tracker failure for intervention", async () => {
@@ -568,6 +681,7 @@ describe("Autonomous Career Agent deterministic acceptance workflow", () => {
 
     const firstRun = await service.runCampaign(campaign.id);
     expect(firstRun.discovered).toBe(3);
+    expect(firstRun.pursued).toBe(2);
     expect(firstRun.rejected).toBe(1);
     expect(firstRun.prepared).toBe(2);
     expect(firstRun.applied).toBe(1);
@@ -587,6 +701,7 @@ describe("Autonomous Career Agent deterministic acceptance workflow", () => {
 
     const secondRun = await service.runCampaign(campaign.id);
     expect(secondRun.discovered).toBe(0);
+    expect(secondRun.pursued).toBe(0);
     expect(secondRun.alreadyApplied).toBe(2);
     expect(secondRun.alreadySeen).toBe(1);
     expect(secondRun.trace?.retryCount).toBe(0);

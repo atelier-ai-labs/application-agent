@@ -119,6 +119,7 @@ function isSearchCriteria(value: unknown): value is SearchCriteria {
     isStringArray(value.employmentTypes) &&
     (value.minimumSalary === undefined || (typeof value.minimumSalary === "number" && Number.isFinite(value.minimumSalary) && value.minimumSalary >= 0)) &&
     isStringArray(value.excludedSeniorities) &&
+    (value.excludedTitleTerms === undefined || isStringArray(value.excludedTitleTerms)) &&
     isStringArray(value.excludedCompanies);
 }
 

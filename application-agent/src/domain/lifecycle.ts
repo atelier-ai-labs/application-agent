@@ -7,7 +7,7 @@ const ALLOWED_TRANSITIONS: Readonly<Record<ApplicationStatus, readonly Applicati
   needs_input: ["needs_input", "ready_for_review", "failed"],
   ready_for_review: ["applied", "failed"],
   applied: [],
-  failed: ["discovered"],
+  failed: ["discovered", "ready_for_review"],
 };
 
 export function canTransition(

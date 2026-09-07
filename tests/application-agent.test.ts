@@ -11,6 +11,7 @@ import {
   createApplicationEvent,
   exampleCandidateProfile,
   isApplication,
+  isCandidateProfile,
   isJobPosting,
   normalizeJobPosting,
   pastedJobPostingIngestor,
@@ -57,6 +58,34 @@ Preferred qualifications
 function cloneExampleProfile(): CandidateProfile {
   return JSON.parse(JSON.stringify(exampleCandidateProfile)) as CandidateProfile;
 }
+
+describe("candidate profile optional application facts", () => {
+  it("keeps older profiles valid when optional facts are absent and validates explicit URLs", () => {
+    const olderProfile = cloneExampleProfile() as CandidateProfile & {
+      identity: CandidateProfile["identity"] & Record<string, unknown>;
+      workPreferences: CandidateProfile["workPreferences"] & Record<string, unknown>;
+    };
+    delete olderProfile.identity.linkedinUrl;
+    delete olderProfile.identity.websiteUrl;
+    delete olderProfile.workPreferences.preferredWorkLocation;
+    delete olderProfile.workPreferences.availabilityStartDate;
+
+    expect(isCandidateProfile(olderProfile)).toBe(true);
+    expect(isCandidateProfile({
+      ...olderProfile,
+      identity: { ...olderProfile.identity, linkedinUrl: "candidate.example/linkedin" },
+    })).toBe(false);
+    expect(isCandidateProfile({
+      ...olderProfile,
+      identity: { ...olderProfile.identity, linkedinUrl: "https://www.linkedin.com/in/example-candidate" },
+      workPreferences: {
+        ...olderProfile.workPreferences,
+        preferredWorkLocation: "Remote",
+        availabilityStartDate: "2026-10-01",
+      },
+    })).toBe(true);
+  });
+});
 
 function canonicalPosting(overrides: Partial<JobPosting> = {}): JobPosting {
   return {
@@ -141,6 +170,51 @@ describe("Application Agent job intake and grounding", () => {
     expect(fit.recommendedResumeFamily).toBe("cloud-platform");
     expect(fit.applicationRecommendation).toBe("proceed_with_review");
     expect(fit).not.toHaveProperty("score");
+  });
+
+  it("matches explicit technologies inside bounded compound skill labels", () => {
+    const profile = cloneExampleProfile();
+    profile.skills = [
+      "Python (Django)",
+      "React / TypeScript / JavaScript",
+      "Node.js (Express)",
+      "SQL (PostgreSQL)",
+    ];
+    profile.employmentHistory = [];
+    profile.projects = [];
+
+    const fit = assessFit(canonicalPosting({
+      requiredSkills: ["Python", "React", "TypeScript", "JavaScript", "Node.js", "SQL", "PostgreSQL"],
+      preferredSkills: [],
+    }), profile);
+
+    expect(fit.classification).toBe("strong");
+    expect(fit.strongMatches).toEqual([
+      "Python",
+      "React",
+      "TypeScript",
+      "JavaScript",
+      "Node.js",
+      "SQL",
+      "PostgreSQL",
+    ]);
+    expect(fit.unsupportedRequiredQualifications).toEqual([]);
+  });
+
+  it("does not tokenize narrative profile text as a skill", () => {
+    const profile = cloneExampleProfile();
+    profile.skills = ["Built Python systems"];
+    profile.employmentHistory = [];
+    profile.projects = [];
+
+    const fit = assessFit(canonicalPosting({
+      requiredSkills: ["Python"],
+      preferredSkills: [],
+    }), profile);
+
+    expect(fit.classification).toBe("weak");
+    expect(fit.strongMatches).toEqual([]);
+    expect(fit.unsupportedRequiredQualifications).toEqual(["Python"]);
   });
 
   it("tailors only verified material and keeps section provenance", () => {

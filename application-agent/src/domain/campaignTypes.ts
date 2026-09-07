@@ -19,6 +19,7 @@ import type {
   BrowserNavigationDiagnostics,
 } from "./executor";
 import type { PersistedAttentionEvent } from "./attention";
+import type { JobSearchIntent } from "./searchIntent";
 
 export type CampaignStatus = "draft" | "active" | "paused" | "completed" | "failed";
 
@@ -34,8 +35,38 @@ export type JobSourceMode = "live" | "demo";
 
 export type JobActionability = "discoverable_only" | "actionable";
 
+/** Outcome of the bounded attempt to find an official application destination. */
+export type DestinationResolutionStatus = "resolved" | "unresolved" | "ambiguous";
+
+/** Bounded provenance categories for an independently verified destination. */
+export type DestinationResolutionProvenance =
+  | "existing_external_application_url"
+  | "official_employer_evidence"
+  | "recognized_ats_evidence"
+  | "bounded_public_lookup";
+
+export interface DestinationResolution {
+  status: DestinationResolutionStatus;
+  attemptedAt: string;
+  /** Canonical URL retained only after destination verification succeeds. */
+  destinationUrl?: string;
+  /** Known ATS classification, when deterministic URL evidence identifies one. */
+  ats?: "Lever" | "Greenhouse" | "Rippling" | "Ashby" | "Workday" | "Custom";
+  actionable?: boolean;
+  provenance?: DestinationResolutionProvenance;
+  /** Safe, bounded evidence labels; no page bodies or candidate data. */
+  evidence: readonly string[];
+  reason?: string;
+}
+
+/** Stable provider key shared by persistence, background runtime, and UI labels. */
+export const HIMALAYAS_SOURCE_ID = "himalayas-live";
+/** Stable source key for a user-selected public posting; it is not a provider. */
+export const CURATED_JOB_SOURCE_ID = "curated-live";
+
 export type JobSourceConfig =
   | { type: "remotive"; id?: string }
+  | { type: "himalayas"; id?: string }
   | { type: "lever"; site: string; id?: string }
   | { type: "greenhouse"; board: string; company?: string; id?: string }
   | { type: "brave_search"; id?: string }
@@ -50,6 +81,7 @@ export function jobSourceConfigId(config: JobSourceConfig): string {
   if (config.type === "lever") return `lever:${config.site.trim().toLowerCase()}`;
   if (config.type === "greenhouse") return `greenhouse:${config.board.trim().toLowerCase()}`;
   if (config.type === "remotive") return "remotive-live";
+  if (config.type === "himalayas") return "himalayas-live";
   if (config.type === "brave_search") return config.id?.trim() || "references:brave-search";
   return "demo-local";
 }
@@ -75,6 +107,8 @@ export interface SearchCriteria {
   employmentTypes: readonly string[];
   minimumSalary?: number;
   excludedSeniorities: readonly string[];
+  /** Optional whole-word title exclusions materialized from search intent. */
+  excludedTitleTerms?: readonly string[];
   excludedCompanies: readonly string[];
 }
 
@@ -182,6 +216,8 @@ export interface Campaign {
   name: string;
   goal: string;
   status: CampaignStatus;
+  /** Optional user-authored discovery intent; absent on legacy campaigns. */
+  searchIntent?: JobSearchIntent;
   searchCriteria: SearchCriteria;
   searchSources: readonly string[];
   /** Optional declarative source metadata; searchSources remains the lookup key for compatibility. */
@@ -213,6 +249,7 @@ export interface CreateCampaignInput {
   ownerId?: string;
   name: string;
   goal: string;
+  searchIntent?: JobSearchIntent;
   searchCriteria?: Partial<SearchCriteria>;
   searchSources: readonly string[];
   sourceConfigs?: readonly JobSourceConfig[];
@@ -258,6 +295,8 @@ export type CareerBlockerKind =
 
 export type CareerBlockerUnit = "application_preparation" | "submission" | "external";
 export type CareerBlockerStatus = "open" | "resolved";
+/** Semantic origin of a question presented for human attention. */
+export type QuestionProvenance = "ATS_FORM" | "APPLICATION_PREPARATION" | "POLICY" | "CONFIGURATION" | "UNKNOWN";
 
 export interface CareerBlockerContext {
   jobId: string;
@@ -271,6 +310,8 @@ export interface CareerBlockerContext {
 export interface CareerBlockerDraft {
   kind: CareerBlockerKind;
   unit: CareerBlockerUnit;
+  /** Distinguishes an inspected employer field from internal preparation/policy work. */
+  questionProvenance?: QuestionProvenance;
   field?: string;
   question: string;
   reason: string;
@@ -283,6 +324,8 @@ export interface CareerBlocker {
   id: string;
   kind: CareerBlockerKind;
   unit: CareerBlockerUnit;
+  /** Distinguishes an inspected employer field from internal preparation/policy work. */
+  questionProvenance?: QuestionProvenance;
   field?: string;
   question: string;
   context: CareerBlockerContext;
@@ -305,6 +348,7 @@ export type CareerExecutionStatus =
   | "waiting_for_human"
   | "resuming"
   | "ready_to_submit"
+  | "submitted"
   | "failed"
   | "cancelled"
   | "closed";
@@ -359,8 +403,11 @@ export interface CareerJob {
   sourceId: string;
   sourceRecordId?: string;
   sourcePublishedAt?: string;
+  sourceExpiresAt?: string;
   dedupeKeys?: readonly string[];
   sourceObservations?: readonly JobSourceObservation[];
+  /** Destination resolution is independent of fit/pursuit and provider provenance. */
+  destinationResolution?: DestinationResolution;
   job: JobPosting;
   discoveredAt: string;
   fit: FitAssessment | null;
@@ -388,6 +435,10 @@ export interface JobSourceObservation {
   sourceRecordId?: string;
   sourceUrl?: string;
   applicationUrl?: string;
+  sourcePublishedAt?: string;
+  sourceExpiresAt?: string;
+  /** Bounded provider-neutral search terms that produced this observation. */
+  searchQueries?: readonly string[];
   observedAt: string;
 }
 

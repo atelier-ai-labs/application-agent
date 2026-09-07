@@ -65,6 +65,12 @@ export interface ManualSubmissionConfirmation {
 
 export interface CandidateIdentity {
   fullName: string | null;
+  /** Optional explicit, verified preferred name; never derived from fullName. */
+  preferredName?: string | null;
+  /** Optional explicit profile fact; never inferred from fullName or another URL. */
+  linkedinUrl?: string | null;
+  /** Optional explicit profile fact; never inferred from fullName or another URL. */
+  websiteUrl?: string | null;
   email: string | null;
   phone: string | null;
   location: string | null;
@@ -113,6 +119,10 @@ export interface WorkPreferences {
   remote: string | null;
   relocation: string | null;
   travel: string | null;
+  /** Optional explicit authority for desired/preferred work-location questions. */
+  preferredWorkLocation?: string | null;
+  /** Optional explicit authority for application availability/start-date questions. */
+  availabilityStartDate?: string | null;
 }
 
 export interface WorkAuthorization {
@@ -161,6 +171,7 @@ export interface JobCompensation {
   minimum?: number;
   maximum?: number;
   currency?: string;
+  period?: string;
 }
 
 export interface JobPosting {

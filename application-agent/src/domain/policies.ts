@@ -48,6 +48,20 @@ function matchingAny(value: string | undefined, choices: readonly string[]): boo
   return choices.some((choice) => matchesPhrase(value, choice));
 }
 
+function matchingSeniority(value: string | undefined, choice: string): boolean {
+  return (value ?? "")
+    .split(/\s*(?:,|\/|\||;)\s*/)
+    .some((candidate) => normalized(candidate) === normalized(choice));
+}
+
+function matchesWholeTitleTerm(value: string | undefined, term: string): boolean {
+  const haystack = normalized(value);
+  const needle = normalized(term);
+  if (!haystack || !needle) return false;
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+  return new RegExp(`(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])`, "i").test(haystack);
+}
+
 export function applyHardFilters(job: JobPosting, criteria: SearchCriteria): HardFilterResult {
   const company = normalized(job.company);
   const excludedCompany = criteria.excludedCompanies.find((candidate) => company === normalized(candidate));
@@ -60,12 +74,21 @@ export function applyHardFilters(job: JobPosting, criteria: SearchCriteria): Har
   }
 
   const seniority = normalized(job.seniority);
-  const excludedSeniority = criteria.excludedSeniorities.find((candidate) => seniority === normalized(candidate));
+  const excludedSeniority = criteria.excludedSeniorities.find((candidate) => matchingSeniority(seniority, candidate));
   if (excludedSeniority) {
     return {
       decision: "reject",
       reason: `Seniority is excluded by campaign policy: ${excludedSeniority}.`,
       evidence: [`seniority:${job.seniority}`, `excluded-seniority:${excludedSeniority}`],
+    };
+  }
+
+  const excludedTitleTerm = (criteria.excludedTitleTerms ?? []).find((candidate) => matchesWholeTitleTerm(job.title, candidate));
+  if (excludedTitleTerm) {
+    return {
+      decision: "reject",
+      reason: `Title contains a term excluded by campaign search intent: ${excludedTitleTerm}.`,
+      evidence: [`title:${job.title}`, `excluded-title-term:${excludedTitleTerm}`],
     };
   }
 
@@ -175,6 +198,7 @@ function blocker(
   return {
     kind,
     unit: "submission",
+    questionProvenance: "POLICY",
     ...(field ? { field } : {}),
     question,
     reason,
@@ -202,6 +226,7 @@ export function careerBlockerDraftsForApplication(application: Application): Car
       return {
         kind,
         unit: "application_preparation",
+        questionProvenance: "APPLICATION_PREPARATION",
         field: candidate.field,
         question: candidate.label,
         reason: candidate.reason,

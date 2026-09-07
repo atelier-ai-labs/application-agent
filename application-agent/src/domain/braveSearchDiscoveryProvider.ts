@@ -11,6 +11,7 @@ import {
   type JobDiscoveryProvider,
 } from "./jobDiscovery";
 import { canonicalJobUrl, type DiscoveryContext } from "./scout";
+import type { JobSearchIntent, SearchIntentQuery } from "./searchIntent";
 
 export { BRAVE_SEARCH_DISCOVERY_ID } from "./jobDiscovery";
 export const DEFAULT_BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
@@ -109,32 +110,70 @@ function searchLaneBucket(value: string): SearchLaneBucket {
  * of truth; this function only adds enough context for a web search result to
  * be job-oriented. Local hard filters still run downstream.
  */
-export function buildBraveSearchQueries(criteria: SearchCriteria, maxQueries = 3): readonly string[] {
+export function buildBraveSearchQueries(
+  criteria: SearchCriteria,
+  maxQueries = 3,
+  searchPlan?: readonly SearchIntentQuery[],
+  searchIntent?: JobSearchIntent,
+): readonly string[] {
   const explicit = (criteria.searchQueries ?? []).map(normalizedTerm).filter(Boolean);
   const laneTerms = (criteria.roleLanes ?? []).map(normalizedTerm).filter(Boolean);
-  const bases = explicit.length > 0 ? explicit : laneTerms;
+  const planned = (searchPlan ?? []).map((query) => normalizedTerm(query.term)).filter(Boolean);
+  const bases = planned.length > 0 ? planned : explicit.length > 0 ? explicit : laneTerms;
   const fallback = bases.length > 0 ? bases : ["software engineering"];
   const buckets: Record<SearchLaneBucket, string[]> = { primary: [], secondary: [], adjacent: [], other: [] };
   for (const base of fallback) buckets[searchLaneBucket(base)].push(base);
   const orderedBases: string[] = [];
-  while (orderedBases.length < fallback.length) {
-    let added = false;
-    for (const bucket of ["primary", "secondary", "adjacent", "other"] as const) {
-      const next = buckets[bucket].shift();
-      if (next) {
+  if (planned.length > 0) {
+    // A persisted plan is already bounded and carries lane provenance. Round
+    // robin those lanes so a small provider cap still samples the requested
+    // primary, adjacent, and secondary intent instead of spending every
+    // query on the first lane.
+    const plannedByLane: Record<SearchIntentQuery["lane"], string[]> = {
+      primary: [],
+      adjacent: [],
+      secondary: [],
+      broad: [],
+    };
+    for (const query of searchPlan ?? []) {
+      const term = normalizedTerm(query.term);
+      if (term) plannedByLane[query.lane].push(term);
+    }
+    const seenPlanned = new Set<string>();
+    const laneOrder = ["primary", "adjacent", "secondary", "broad"] as const;
+    while (orderedBases.length < planned.length) {
+      let added = false;
+      for (const lane of laneOrder) {
+        const next = plannedByLane[lane].find((term) => !seenPlanned.has(term.toLowerCase()));
+        if (!next) continue;
+        seenPlanned.add(next.toLowerCase());
         orderedBases.push(next);
         added = true;
       }
+      if (!added) break;
     }
-    if (!added) break;
+  } else {
+    while (orderedBases.length < fallback.length) {
+      let added = false;
+      for (const bucket of ["primary", "secondary", "adjacent", "other"] as const) {
+        const next = buckets[bucket].shift();
+        if (next) {
+          orderedBases.push(next);
+          added = true;
+        }
+      }
+      if (!added) break;
+    }
   }
-  const location = criteria.locations.map(normalizedTerm).find(Boolean);
+  const remoteRequested = criteria.remoteOnly || searchIntent?.remotePreference === "remote_only" || searchIntent?.remotePreference === "remote_preferred";
+  const configuredLocations = searchIntent?.locations ?? criteria.locations;
+  const location = configuredLocations.map(normalizedTerm).find(Boolean);
   const seen = new Set<string>();
   const queries: string[] = [];
 
   for (const base of orderedBases) {
     const parts = [base];
-    if (criteria.remoteOnly && !/\bremote\b/i.test(base)) parts.push("remote");
+    if (remoteRequested && !/\bremote\b/i.test(base)) parts.push("remote");
     if (location && !base.toLowerCase().includes(location.toLowerCase())) parts.push(location);
     if (!hasJobWord(base)) parts.push("jobs");
     const query = normalizedTerm(parts.join(" "));
@@ -254,7 +293,12 @@ function zeroMetrics(): JobDiscoveryMetrics {
   };
 }
 
-function cacheKey(criteria: SearchCriteria, maxTotalReferences: number): string {
+function cacheKey(
+  criteria: SearchCriteria,
+  maxTotalReferences: number,
+  searchPlan?: readonly SearchIntentQuery[],
+  searchIntent?: JobSearchIntent,
+): string {
   return JSON.stringify({
     roleLanes: [...(criteria.roleLanes ?? [])],
     searchQueries: [...(criteria.searchQueries ?? [])],
@@ -263,7 +307,10 @@ function cacheKey(criteria: SearchCriteria, maxTotalReferences: number): string 
     employmentTypes: [...criteria.employmentTypes],
     minimumSalary: criteria.minimumSalary,
     excludedSeniorities: [...criteria.excludedSeniorities],
+    excludedTitleTerms: [...(criteria.excludedTitleTerms ?? [])],
     excludedCompanies: [...criteria.excludedCompanies],
+    searchPlan: searchPlan?.map((query) => ({ lane: query.lane, term: query.term })),
+    searchIntent,
     maxTotalReferences,
   });
 }
@@ -381,7 +428,7 @@ export class BraveSearchDiscoveryProvider implements JobDiscoveryProvider {
 
     const discoveredAt = context?.now ?? this.now();
     const cycleCap = Math.min(this.maxTotalReferences, context?.maxResults ?? this.maxTotalReferences);
-    const key = cacheKey(criteria, cycleCap);
+    const key = cacheKey(criteria, cycleCap, context?.searchPlan, context?.searchIntent);
     const currentTime = Date.parse(discoveredAt);
     const nowMs = Number.isNaN(currentTime) ? Date.now() : currentTime;
     const cached = this.cache.get(key);
@@ -394,7 +441,7 @@ export class BraveSearchDiscoveryProvider implements JobDiscoveryProvider {
       };
     }
     if (cached) this.cache.delete(key);
-    const queries = buildBraveSearchQueries(criteria, this.maxQueries);
+    const queries = buildBraveSearchQueries(criteria, this.maxQueries, context?.searchPlan, context?.searchIntent);
     const references: DiscoveredJobReference[] = [];
     const seenUrls = new Set<string>();
     const queryMetrics: DiscoveryQueryMetrics[] = [];

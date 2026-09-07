@@ -50,6 +50,10 @@ function isOptionalHttpUrl(value: unknown): boolean {
   return value === undefined || isHttpUrl(value);
 }
 
+function isOptionalHttpUrlOrNull(value: unknown): boolean {
+  return value === undefined || value === null || isHttpUrl(value);
+}
+
 function isNumberOrNull(value: unknown): value is number | null {
   return value === null || (typeof value === "number" && Number.isFinite(value));
 }
@@ -62,7 +66,8 @@ function isCompensation(value: unknown): boolean {
   return (
     (value.minimum === undefined || (typeof value.minimum === "number" && Number.isFinite(value.minimum))) &&
     (value.maximum === undefined || (typeof value.maximum === "number" && Number.isFinite(value.maximum))) &&
-    (value.currency === undefined || isNonEmptyString(value.currency))
+    (value.currency === undefined || isNonEmptyString(value.currency)) &&
+    (value.period === undefined || isNonEmptyString(value.period))
   );
 }
 
@@ -226,6 +231,9 @@ export function isCandidateProfile(value: unknown): value is CandidateProfile {
     (value.profileKind === "example" || value.profileKind === "private") &&
     isRecord(identity) &&
     isStringOrNull(identity.fullName) &&
+    (identity.preferredName === undefined || isStringOrNull(identity.preferredName)) &&
+    isOptionalHttpUrlOrNull(identity.linkedinUrl) &&
+    isOptionalHttpUrlOrNull(identity.websiteUrl) &&
     isStringOrNull(identity.email) &&
     isStringOrNull(identity.phone) &&
     isStringOrNull(identity.location) &&
@@ -243,6 +251,8 @@ export function isCandidateProfile(value: unknown): value is CandidateProfile {
     isStringOrNull(preferences.remote) &&
     isStringOrNull(preferences.relocation) &&
     isStringOrNull(preferences.travel) &&
+    (preferences.preferredWorkLocation === undefined || isStringOrNull(preferences.preferredWorkLocation)) &&
+    (preferences.availabilityStartDate === undefined || isStringOrNull(preferences.availabilityStartDate)) &&
     isRecord(authorization) &&
     isStringOrNull(authorization.status) &&
     isStringArray(authorization.countries) &&

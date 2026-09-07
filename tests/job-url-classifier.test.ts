@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { classifyJobUrl } from "../application-agent/src";
+import {
+  classifyJobUrl,
+  isVerifiedRipplingApplicationUrl,
+  ripplingApplicationUrl,
+} from "../application-agent/src";
 
 describe("deterministic job URL classifier", () => {
   it("recognizes Lever hosted and apply paths", () => {
@@ -18,6 +22,20 @@ describe("deterministic job URL classifier", () => {
       postingIdentifier: "123456",
     });
     expect(classifyJobUrl("https://job-boards.greenhouse.io/acme/jobs/123456").kind).toBe("greenhouse");
+  });
+
+  it("recognizes Rippling public postings and derives their adjacent application route", () => {
+    expect(classifyJobUrl("https://ats.rippling.com/fullthrottle1/jobs/posting-123?source=daily-hunt")).toMatchObject({
+      kind: "rippling",
+      siteIdentifier: "fullthrottle1",
+      postingIdentifier: "posting-123",
+      canonicalUrl: "https://ats.rippling.com/fullthrottle1/jobs/posting-123",
+    });
+    expect(ripplingApplicationUrl("https://ats.rippling.com/fullthrottle1/jobs/posting-123")).toBe(
+      "https://ats.rippling.com/fullthrottle1/jobs/posting-123/apply",
+    );
+    expect(isVerifiedRipplingApplicationUrl("https://ats.rippling.com/fullthrottle1/jobs/posting-123/apply")).toBe(true);
+    expect(classifyJobUrl("https://ats.rippling.com/fullthrottle1/jobs/posting-123/apply").postingIdentifier).toBe("posting-123");
   });
 
   it("recognizes Ashby and Workday without treating page text as evidence", () => {

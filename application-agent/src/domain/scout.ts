@@ -8,6 +8,11 @@ import type {
   ScoutReferenceMetrics,
   SearchCriteria,
 } from "./campaignTypes";
+import {
+  planSearchIntentQueries,
+  type JobSearchIntent,
+  type SearchIntentQuery,
+} from "./searchIntent";
 import type { JobIntakeInput, JobPosting } from "./types";
 import { mapWithConcurrencyLimit } from "./concurrency";
 import {
@@ -22,6 +27,9 @@ export interface DiscoveryContext {
   now: string;
   /** Hard upper bound for listings passed into the normalization pipeline. */
   maxResults: number;
+  /** Optional user intent and its bounded plan; providers translate what they support. */
+  searchIntent?: JobSearchIntent;
+  searchPlan?: readonly SearchIntentQuery[];
 }
 
 export interface JobSourceListing {
@@ -31,8 +39,12 @@ export interface JobSourceListing {
   /** A resolver may carry source-owned classification into the shared Scout. */
   actionability?: JobActionability;
   sourceRecordId?: string;
+  /** Bounded query provenance supplied by a provider or resolver. */
+  searchQueries?: readonly string[];
   /** Provider publication time, when the source supplies a valid timestamp. */
   sourcePublishedAt?: string;
+  /** Provider expiry time, when the source supplies a valid timestamp. */
+  sourceExpiresAt?: string;
   discoveredAt?: string;
   sourceMode?: JobSourceMode;
 }
@@ -94,6 +106,7 @@ export interface ScoutedJob {
   actionability: JobActionability;
   sourceRecordId?: string;
   sourcePublishedAt?: string;
+  sourceExpiresAt?: string;
   isExample: boolean;
   job: JobPosting;
   discoveredAt: string;
@@ -277,10 +290,24 @@ function mergeScoutedJobs(current: ScoutedJob, incoming: ScoutedJob): ScoutedJob
     : current;
   const observations = new Map<string, JobSourceObservation>();
   for (const observation of [...current.sourceObservations, ...incoming.sourceObservations]) {
-    observations.set(observationKey(observation), observation);
+    const key = observationKey(observation);
+    const previous = observations.get(key);
+    if (!previous) {
+      observations.set(key, observation);
+      continue;
+    }
+    const searchQueries = [...new Set([...(previous.searchQueries ?? []), ...(observation.searchQueries ?? [])])];
+    observations.set(key, {
+      ...previous,
+      ...(searchQueries.length > 0 ? { searchQueries } : {}),
+      ...(previous.sourcePublishedAt || !observation.sourcePublishedAt ? {} : { sourcePublishedAt: observation.sourcePublishedAt }),
+      ...(previous.sourceExpiresAt || !observation.sourceExpiresAt ? {} : { sourceExpiresAt: observation.sourceExpiresAt }),
+    });
   }
   return {
     ...preferred,
+    ...(current.sourcePublishedAt || !incoming.sourcePublishedAt ? {} : { sourcePublishedAt: incoming.sourcePublishedAt }),
+    ...(current.sourceExpiresAt || !incoming.sourceExpiresAt ? {} : { sourceExpiresAt: incoming.sourceExpiresAt }),
     dedupeKeys: [...new Set([...current.dedupeKeys, ...incoming.dedupeKeys])],
     sourceObservations: [...observations.values()],
   };
@@ -453,6 +480,9 @@ export class JobScout {
     let normalizedCount = 0;
     let duplicateCount = 0;
     let referenceMetrics: ScoutReferenceMetrics | undefined;
+    const searchPlan = campaign.searchIntent
+      ? planSearchIntentQueries(campaign.searchIntent)
+      : undefined;
 
     if (campaign.searchSources.length === 0) {
       return {
@@ -525,6 +555,8 @@ export class JobScout {
             source.discover(campaign.searchCriteria, {
               now: startedAt,
               maxResults: this.maxResultsPerSource,
+              ...(campaign.searchIntent ? { searchIntent: campaign.searchIntent } : {}),
+              ...(searchPlan ? { searchPlan } : {}),
             }),
             this.timeoutMs,
             `Job source ${sourceId} timed out after ${this.timeoutMs}ms.`,
@@ -658,6 +690,7 @@ export class JobScout {
             actionability,
             ...(listing.sourceRecordId ? { sourceRecordId: listing.sourceRecordId } : {}),
             ...(listing.sourcePublishedAt ? { sourcePublishedAt: listing.sourcePublishedAt } : {}),
+            ...(listing.sourceExpiresAt ? { sourceExpiresAt: listing.sourceExpiresAt } : {}),
             isExample: listing.input.isExample === true,
             job,
             discoveredAt,
@@ -668,8 +701,13 @@ export class JobScout {
               mode: sourceMode,
               actionability,
               ...(listing.sourceRecordId ? { sourceRecordId: listing.sourceRecordId } : {}),
+              ...(listing.sourcePublishedAt ? { sourcePublishedAt: listing.sourcePublishedAt } : {}),
+              ...(listing.sourceExpiresAt ? { sourceExpiresAt: listing.sourceExpiresAt } : {}),
               ...(job.sourceUrl ? { sourceUrl: job.sourceUrl } : {}),
               ...(job.applicationUrl ? { applicationUrl: job.applicationUrl } : {}),
+              ...(listing.searchQueries && listing.searchQueries.length > 0
+                ? { searchQueries: [...new Set(listing.searchQueries.map((query) => query.trim()).filter(Boolean))] }
+                : {}),
               observedAt: discoveredAt,
             }],
           };

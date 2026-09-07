@@ -310,6 +310,8 @@ export class JobReferenceSource implements JobSource {
     const resolutions = await this.resolver.resolveMany(uniqueReferences, criteria, {
       now,
       maxResults,
+      ...(context?.searchIntent ? { searchIntent: context.searchIntent } : {}),
+      ...(context?.searchPlan ? { searchPlan: context.searchPlan } : {}),
     });
     const resolutionNode = createExecutionNodeTrace({
       nodeId: `scout.reference-resolution.${this.id}`,
@@ -356,6 +358,9 @@ export class JobReferenceSource implements JobSource {
         ...resolution.listing,
         sourceId: resolution.sourceId,
         sourceMode: this.mode,
+        ...(reference.query
+          ? { searchQueries: [...new Set([...(resolution.listing.searchQueries ?? []), reference.query])] }
+          : {}),
       };
       if (resolution.source?.classifyActionability) {
         try {

@@ -1,9 +1,11 @@
 import type {
   ApplicationPolicy,
   CareerBlocker,
+  QuestionProvenance,
   CareerEvent,
   CareerJob,
   Campaign,
+  DestinationResolution,
   DiscoverySourceSummary,
   DiscoverySummary,
   FitPolicy,
@@ -37,6 +39,7 @@ import {
   isHumanAttentionCategory,
   isExecutionRunTrace,
 } from "../domain/executionTrace";
+import { isJobSearchIntent } from "../domain/searchIntent";
 import {
   isFitAssessment,
   isJobPosting,
@@ -212,7 +215,7 @@ function isBrowserCaptchaDiagnostics(value: unknown): value is BrowserCaptchaDia
     isNonNegativeInteger(value.visibleMarkerCount) &&
     isNonNegativeInteger(value.challengeIframeCount) &&
     isNonNegativeInteger(value.visibleChallengeIframeCount) &&
-    (value.evidenceCategory === "no_markers" || value.evidenceCategory === "hidden_infrastructure" ||
+    (value.evidenceCategory === "no_markers" || value.evidenceCategory === "hidden_infrastructure" || value.evidenceCategory === "passive_infrastructure" ||
       value.evidenceCategory === "visible_challenge_iframe" || value.evidenceCategory === "visible_challenge_control" ||
       value.evidenceCategory === "explicit_challenge_text" || value.evidenceCategory === "visible_marker_ambiguous");
 }
@@ -243,6 +246,7 @@ function isSearchCriteria(value: unknown): value is SearchCriteria {
     isStringArray(value.employmentTypes) &&
     (value.minimumSalary === undefined || (typeof value.minimumSalary === "number" && Number.isFinite(value.minimumSalary) && value.minimumSalary >= 0)) &&
     isStringArray(value.excludedSeniorities) &&
+    (value.excludedTitleTerms === undefined || isStringArray(value.excludedTitleTerms)) &&
     isStringArray(value.excludedCompanies)
   );
 }
@@ -264,7 +268,7 @@ function isJobSourceConfig(value: unknown): value is JobSourceConfig {
     return isNonEmptyString(value.board) && isOptionalNonEmptyString(value.company) && isOptionalNonEmptyString(value.id);
   }
   if (value.type === "brave_search") return isOptionalNonEmptyString(value.id);
-  return (value.type === "remotive" || value.type === "demo") && isOptionalNonEmptyString(value.id);
+  return (value.type === "remotive" || value.type === "himalayas" || value.type === "demo") && isOptionalNonEmptyString(value.id);
 }
 
 function isDiscoveryStatus(value: unknown): boolean {
@@ -322,6 +326,9 @@ function isJobSourceObservation(value: unknown): value is JobSourceObservation {
     isOptionalNonEmptyString(value.sourceRecordId) &&
     isOptionalHttpUrl(value.sourceUrl) &&
     isOptionalHttpUrl(value.applicationUrl) &&
+    (value.sourcePublishedAt === undefined || isTimestamp(value.sourcePublishedAt)) &&
+    (value.sourceExpiresAt === undefined || isTimestamp(value.sourceExpiresAt)) &&
+    (value.searchQueries === undefined || isStringArray(value.searchQueries)) &&
     isTimestamp(value.observedAt)
   );
 }
@@ -421,6 +428,7 @@ export function isCampaign(value: unknown): value is Campaign {
     isNonEmptyString(value.name) &&
     isNonEmptyString(value.goal) &&
     (value.status === "draft" || value.status === "active" || value.status === "paused" || value.status === "completed" || value.status === "failed") &&
+    (value.searchIntent === undefined || isJobSearchIntent(value.searchIntent)) &&
     isSearchCriteria(value.searchCriteria) &&
     isStringArray(value.searchSources) &&
     (value.sourceConfigs === undefined || (Array.isArray(value.sourceConfigs) && value.sourceConfigs.every(isJobSourceConfig))) &&
@@ -449,6 +457,11 @@ function isCareerBlockerUnit(value: unknown): boolean {
   return value === "application_preparation" || value === "submission" || value === "external";
 }
 
+function isQuestionProvenance(value: unknown): value is QuestionProvenance {
+  return value === "ATS_FORM" || value === "APPLICATION_PREPARATION" || value === "POLICY" ||
+    value === "CONFIGURATION" || value === "UNKNOWN";
+}
+
 function isCareerBlocker(value: unknown): value is CareerBlocker {
   if (!isRecord(value)) return false;
   const context = value.context;
@@ -457,6 +470,7 @@ function isCareerBlocker(value: unknown): value is CareerBlocker {
     isNonEmptyString(value.id) &&
     isCareerBlockerKind(value.kind) &&
     isCareerBlockerUnit(value.unit) &&
+    (value.questionProvenance === undefined || isQuestionProvenance(value.questionProvenance)) &&
     isOptionalNonEmptyString(value.field) &&
     isNonEmptyString(value.question) &&
     isNonEmptyString(context.jobId) &&
@@ -478,7 +492,7 @@ function isCareerBlocker(value: unknown): value is CareerBlocker {
 function isCareerExecutionStatus(value: unknown): boolean {
   return value === "not_started" || value === "starting" || value === "inspecting" || value === "executing" ||
     value === "needs_input" || value === "waiting_for_human" || value === "resuming" ||
-    value === "ready_to_submit" || value === "failed" || value === "cancelled" || value === "closed";
+    value === "ready_to_submit" || value === "submitted" || value === "failed" || value === "cancelled" || value === "closed";
 }
 
 function isCareerExecutionState(value: unknown): boolean {
@@ -522,6 +536,22 @@ function isTrackerSyncState(value: unknown): value is TrackerSyncState {
   );
 }
 
+function isDestinationResolution(value: unknown): value is DestinationResolution {
+  if (!isRecord(value)) return false;
+  const status = value.status;
+  const provenance = value.provenance;
+  const resolved = status === "resolved";
+  const unresolved = status === "unresolved" || status === "ambiguous";
+  return (resolved || unresolved) &&
+    isTimestamp(value.attemptedAt) &&
+    (resolved ? isNonEmptyString(value.destinationUrl) && isOptionalHttpUrl(value.destinationUrl) && value.actionable === true :
+      value.destinationUrl === undefined && value.actionable !== true) &&
+    (value.ats === undefined || value.ats === "Lever" || value.ats === "Greenhouse" || value.ats === "Rippling" || value.ats === "Ashby" || value.ats === "Workday" || value.ats === "Custom") &&
+    (provenance === undefined || provenance === "existing_external_application_url" || provenance === "official_employer_evidence" || provenance === "recognized_ats_evidence" || provenance === "bounded_public_lookup") &&
+    isStringArray(value.evidence) && value.evidence.length <= 12 &&
+    (value.reason === undefined || isNonEmptyString(value.reason));
+}
+
 export function isCareerJob(value: unknown): value is CareerJob {
   if (!isRecord(value)) return false;
   return (
@@ -534,8 +564,10 @@ export function isCareerJob(value: unknown): value is CareerJob {
     isNonEmptyString(value.sourceId) &&
     isOptionalNonEmptyString(value.sourceRecordId) &&
     (value.sourcePublishedAt === undefined || isTimestamp(value.sourcePublishedAt)) &&
+    (value.sourceExpiresAt === undefined || isTimestamp(value.sourceExpiresAt)) &&
     (value.dedupeKeys === undefined || isStringArray(value.dedupeKeys)) &&
     (value.sourceObservations === undefined || (Array.isArray(value.sourceObservations) && value.sourceObservations.every(isJobSourceObservation))) &&
+    (value.destinationResolution === undefined || isDestinationResolution(value.destinationResolution)) &&
     isJobPosting(value.job) &&
     isTimestamp(value.discoveredAt) &&
     (value.fit === null || isFitAssessment(value.fit)) &&

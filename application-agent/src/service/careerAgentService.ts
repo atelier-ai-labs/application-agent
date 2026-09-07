@@ -10,10 +10,16 @@ import { assertCampaignTransition } from "../domain/campaignLifecycle";
 import { createApplicationService, type ApplicationService } from "./applicationService";
 import { attentionCategoryForEvent, isAttentionWorthyEvent } from "../domain/notifications";
 import {
+  type ApplicationDestinationResolver,
+  type DestinationResolutionRunResult,
+} from "../domain/applicationDestinationResolver";
+import {
   attentionDescriptorSignature,
+  attentionEventForConfiguration,
   attentionEventForCareerBlocker,
   isAttentionResponse,
   publicAttentionEvent,
+  type AttentionClosureReason,
   type AttentionEvent,
   type AttentionResponse,
   type NotificationAdapter,
@@ -31,6 +37,9 @@ import type {
   Application,
   CandidateProfile,
   FitAssessment,
+  JobIntakeInput,
+  JobPosting,
+  ResumeFamilyId,
 } from "../domain/types";
 import type {
   ExecutionHostSnapshot,
@@ -47,6 +56,7 @@ import type {
   Campaign,
   CampaignCounts,
   CampaignRunResult,
+  DestinationResolution,
   CampaignSnapshot,
   CreateCampaignInput,
   DiscoverySourceSummary,
@@ -61,7 +71,7 @@ import type {
   SubmissionAuthority,
   SubmissionPolicy,
 } from "../domain/campaignTypes";
-import { jobSourceConfigId } from "../domain/campaignTypes";
+import { CURATED_JOB_SOURCE_ID, jobSourceConfigId } from "../domain/campaignTypes";
 import {
   getDefaultCareerRepository,
   type CareerRepository,
@@ -74,6 +84,10 @@ import {
 } from "../domain/executor";
 import { JobScout, jobDedupeKeys, jobKeysMatch, type ScoutedJob } from "../domain/scout";
 import {
+  normalizeJobSearchIntent,
+  searchCriteriaFromJobSearchIntent,
+} from "../domain/searchIntent";
+import {
   UnavailableJobTracker,
   isJobTrackerResult,
   trackerSyncContextForJob,
@@ -82,6 +96,8 @@ import {
   type JobTracker,
 } from "../domain/tracker";
 import { isAppliedEvidence, isSubmissionProof } from "../domain/validation";
+import { normalizeJobPosting } from "../domain/job";
+import { classifyJobUrl } from "../domain/jobUrlClassifier";
 
 let fallbackId = 0;
 
@@ -97,15 +113,27 @@ export interface CareerAgentDependencies {
   executor?: ApplicationExecutor;
   tracker?: JobTracker;
   notificationAdapter?: NotificationAdapter;
+  /** Server-only availability check for the selected family's local artifact. */
+  resumeArtifactAvailable?: (familyId: ResumeFamilyId) => boolean;
   /** Existing execution-host resume operation; no default submission path is added. */
   resumeAttention?: (campaignId: string, jobId: string) => Promise<void>;
+  /** Server-side bounded destination enrichment; absent lookups remain unresolved. */
+  destinationResolver?: ApplicationDestinationResolver;
+}
+
+export interface LegacyAttentionRepairResult {
+  inspected: number;
+  eligible: number;
+  replaced: number;
+  skipped: number;
+  newRootsPublished: number;
+  deliveryMetadataPersisted: number;
 }
 
 interface RunAccumulator {
   discovered: number;
   alreadySeen: number;
   alreadyApplied: number;
-  pursued: number;
   rejected: number;
   held: number;
   prepared: number;
@@ -186,6 +214,45 @@ const DEFAULT_STOP_CONDITIONS: StopConditions = {
 
 const APPLICATION_CAP_HOLD_REASON = "The campaign application cap has been reached for this period.";
 
+export type CareerReadinessFailureReason = "missing_resume_family" | "missing_resume_artifact";
+
+export type CareerReadinessResult =
+  | { ok: true }
+  | {
+    ok: false;
+    reasonCode: CareerReadinessFailureReason;
+    failureReason: "provider_configuration";
+    attentionCategory: "provider_configuration";
+  };
+
+/**
+ * Checks only prerequisites already enforced by downstream Career Agent code.
+ * The result is typed so a blocked campaign does not become an opaque fit
+ * failure for every discovered job.
+ */
+export function validateCareerAgentReadiness(
+  profile: Pick<CandidateProfile, "resumeFamilies">,
+  resumeArtifactAvailable?: (familyId: ResumeFamilyId) => boolean,
+): CareerReadinessResult {
+  if (profile.resumeFamilies.length === 0) {
+    return {
+      ok: false,
+      reasonCode: "missing_resume_family",
+      failureReason: "provider_configuration",
+      attentionCategory: "provider_configuration",
+    };
+  }
+  if (resumeArtifactAvailable && !profile.resumeFamilies.some((family) => resumeArtifactAvailable(family.id))) {
+    return {
+      ok: false,
+      reasonCode: "missing_resume_artifact",
+      failureReason: "provider_configuration",
+      attentionCategory: "provider_configuration",
+    };
+  }
+  return { ok: true };
+}
+
 function defaultNow(): string {
   return new Date().toISOString();
 }
@@ -245,7 +312,7 @@ function normalizeSourceConfigs(value: readonly JobSourceConfig[] | undefined): 
       const id = config.id?.trim();
       return { type: "greenhouse", board, ...(company ? { company } : {}), ...(id ? { id } : {}) };
     }
-    if (config.type !== "remotive" && config.type !== "brave_search" && config.type !== "demo") {
+    if (config.type !== "remotive" && config.type !== "himalayas" && config.type !== "brave_search" && config.type !== "demo") {
       throw new Error("Job source configuration type is invalid.");
     }
     if (config.id !== undefined && typeof config.id !== "string") {
@@ -299,7 +366,6 @@ function emptyAccumulator(): RunAccumulator {
     discovered: 0,
     alreadySeen: 0,
     alreadyApplied: 0,
-    pursued: 0,
     rejected: 0,
     held: 0,
     prepared: 0,
@@ -355,6 +421,9 @@ function isCareerBlockerDraft(value: unknown): value is CareerBlockerDraft {
   return kinds.has(candidate.kind as string) &&
     units.has(candidate.unit as string) &&
     (candidate.field === undefined || (typeof candidate.field === "string" && candidate.field.trim().length > 0)) &&
+    (candidate.questionProvenance === undefined || candidate.questionProvenance === "ATS_FORM" ||
+      candidate.questionProvenance === "APPLICATION_PREPARATION" || candidate.questionProvenance === "POLICY" ||
+      candidate.questionProvenance === "CONFIGURATION" || candidate.questionProvenance === "UNKNOWN") &&
     typeof candidate.question === "string" && candidate.question.trim().length > 0 &&
     typeof candidate.reason === "string" && candidate.reason.trim().length > 0 &&
     Array.isArray(candidate.evidence) && candidate.evidence.every((item) => typeof item === "string") &&
@@ -425,6 +494,7 @@ function careerJobStatusForHostStatus(
 ): CareerJobStatus {
   if (status === "needs_input" || status === "waiting_for_human") return "needs_input";
   if (status === "ready_to_submit") return "ready_to_submit";
+  if (status === "submitted") return "submitted";
   if (status === "failed" || status === "cancelled" || status === "closed") return "failed";
   if (status === "starting" || status === "inspecting" || status === "executing" || status === "resuming") {
     return current === "applied" || current === "submitted" ? current : "preparing";
@@ -443,8 +513,7 @@ function executionStateFromHostSnapshot(
     ...(inspection?.evidence ?? []),
     "executor:lever-browser-executor",
     "execution-host:real_local",
-    "submit:not-clicked",
-    "submission:manual-only",
+    ...(status === "submitted" ? ["submit:confirmed", "submission:automatic"] : ["submit:not-clicked", "submission:manual-only"]),
   ];
   return {
     status,
@@ -459,7 +528,7 @@ function executionStateFromHostSnapshot(
     ...(snapshot.retryReasonCode ? { retryReasonCode: snapshot.retryReasonCode } : previous?.retryReasonCode ? { retryReasonCode: previous.retryReasonCode } : {}),
     ...(snapshot.failureReasonCode
       ? { failureReasonCode: snapshot.failureReasonCode }
-      : status === "ready_to_submit" ? {} : previous?.failureReasonCode ? { failureReasonCode: previous.failureReasonCode } : {}),
+      : status === "ready_to_submit" || status === "submitted" ? {} : previous?.failureReasonCode ? { failureReasonCode: previous.failureReasonCode } : {}),
     ...(snapshot.telemetry ? { telemetry: snapshot.telemetry } : previous?.telemetry ? { telemetry: previous.telemetry } : {}),
     ...(snapshot.telemetry?.boundaries
       ? { boundaries: snapshot.telemetry.boundaries }
@@ -510,7 +579,9 @@ export class CareerAgentService {
   private readonly executor: ApplicationExecutor;
   private readonly tracker: JobTracker;
   private readonly notificationAdapter?: NotificationAdapter;
+  private readonly resumeArtifactAvailable?: (familyId: ResumeFamilyId) => boolean;
   private readonly resumeAttention?: (campaignId: string, jobId: string) => Promise<void>;
+  private readonly destinationResolver?: ApplicationDestinationResolver;
   private readonly attentionResponseInFlight = new Map<string, {
     selectedOption: string;
     promise: Promise<CareerAttentionResponseResult>;
@@ -529,7 +600,9 @@ export class CareerAgentService {
     this.executor = dependencies.executor ?? new UnavailableApplicationExecutor();
     this.tracker = dependencies.tracker ?? new UnavailableJobTracker();
     this.notificationAdapter = dependencies.notificationAdapter;
+    this.resumeArtifactAvailable = dependencies.resumeArtifactAvailable;
     this.resumeAttention = dependencies.resumeAttention;
+    this.destinationResolver = dependencies.destinationResolver;
   }
 
   listCampaigns(): readonly Campaign[] {
@@ -560,6 +633,120 @@ export class CareerAgentService {
     return this.applicationService.getApplication(applicationId);
   }
 
+  /**
+   * Attempts destination enrichment only for policy-pursued strong/good jobs
+   * that are not already actionable. It never changes fit or pursuit state.
+   */
+  async resolveDestinations(campaignId: string, jobIds?: readonly string[]): Promise<DestinationResolutionRunResult> {
+    this.getCampaign(campaignId);
+    if (!this.destinationResolver) {
+      return { inspected: 0, resolved: 0, unresolved: 0, ambiguous: 0, skipped: 0, jobs: [] };
+    }
+    const selectedJobIds = jobIds ? new Set(jobIds) : undefined;
+    const eligible = this.listJobs(campaignId).filter((job) =>
+      (!selectedJobIds || selectedJobIds.has(job.id)) &&
+      Boolean(job.fit && (job.fit.classification === "strong" || job.fit.classification === "good")) &&
+      ["pursuing", "preparing", "needs_input", "ready_to_submit"].includes(job.status) &&
+      job.actionability !== "actionable" &&
+      job.destinationResolution?.status !== "resolved",
+    );
+    const results: Array<DestinationResolutionRunResult["jobs"][number]> = [];
+    let resolved = 0;
+    let unresolved = 0;
+    let ambiguous = 0;
+    let skipped = 0;
+    for (const job of eligible) {
+      try {
+        const updated = await this.resolveDestinationForJob(job);
+        const resolution = updated.destinationResolution;
+        if (!resolution) {
+          skipped += 1;
+          continue;
+        }
+        if (resolution.status === "resolved") resolved += 1;
+        else if (resolution.status === "ambiguous") ambiguous += 1;
+        else unresolved += 1;
+        results.push({ jobId: job.id, company: job.job.company, role: job.job.title, resolution });
+      } catch {
+        skipped += 1;
+      }
+    }
+    return { inspected: eligible.length, resolved, unresolved, ambiguous, skipped, jobs: results };
+  }
+
+  /**
+   * Process one user-selected public posting through the same campaign path as
+   * discovered work. This is intentionally bounded to a verified Rippling
+   * posting so a daily-hunt link can be evaluated without adding a crawler or
+   * mutating the campaign's search intent.
+   */
+  async processCuratedJob(campaignId: string, input: JobIntakeInput): Promise<CareerJob> {
+    const campaign = this.getCampaign(campaignId);
+    if (campaign.status !== "active") throw new Error("Start the campaign before evaluating a selected posting.");
+
+    const normalizedPosting = normalizeJobPosting(input, this.now());
+    if (!normalizedPosting.sourceUrl || !normalizedPosting.applicationUrl) {
+      throw new Error("A selected posting needs both its public source URL and application URL.");
+    }
+    const classification = classifyJobUrl(normalizedPosting.applicationUrl);
+    if (classification.kind !== "rippling" || !classification.siteIdentifier || !classification.postingIdentifier || !classification.canonicalUrl) {
+      throw new Error("This first curated path supports a verified Rippling application URL only.");
+    }
+
+    const job: JobPosting = {
+      ...normalizedPosting,
+      applicationUrl: classification.canonicalUrl,
+      ats: "Rippling",
+    };
+    const sourceRecordId = `${classification.siteIdentifier}:${classification.postingIdentifier}`;
+    const discoveredAt = this.now();
+    const sourceId = CURATED_JOB_SOURCE_ID;
+    const sourceMode = "live" as const;
+    const actionability = "actionable" as const;
+    const scouted: ScoutedJob = {
+      sourceId,
+      sourceMode,
+      actionability,
+      sourceRecordId,
+      isExample: false,
+      job,
+      discoveredAt,
+      fingerprint: `source:${sourceId}:id:${sourceRecordId}`,
+      dedupeKeys: jobDedupeKeys(job, sourceRecordId, sourceId),
+      sourceObservations: [{
+        sourceId,
+        mode: sourceMode,
+        actionability,
+        sourceRecordId,
+        ...(job.sourceUrl ? { sourceUrl: job.sourceUrl } : {}),
+        ...(job.applicationUrl ? { applicationUrl: job.applicationUrl } : {}),
+        observedAt: discoveredAt,
+      }],
+    };
+    const destinationResolution: DestinationResolution = {
+      status: "resolved",
+      attemptedAt: discoveredAt,
+      destinationUrl: job.applicationUrl,
+      ats: "Rippling",
+      actionable: true,
+      provenance: "recognized_ats_evidence",
+      evidence: ["curated:explicit-public-posting", ...classification.evidence],
+    };
+    const existing = this.findExistingJob(scouted);
+    if (existing) {
+      const merged = this.mergeScoutedRecord(existing, scouted);
+      return this.saveJob({ ...merged, destinationResolution, updatedAt: this.now() });
+    }
+
+    await this.processScoutedJob(campaign, scouted);
+    const created = this.listJobs(campaignId).find((candidate) =>
+      candidate.sourceId === sourceId && candidate.sourceRecordId === sourceRecordId,
+    );
+    if (!created) throw new Error("The selected posting was not persisted by the campaign service.");
+
+    return this.saveJob({ ...created, destinationResolution, updatedAt: this.now() });
+  }
+
   listEvents(campaignId: string): readonly CareerEvent[] {
     return [...this.careerRepository.listEvents(campaignId)].sort(
       (left, right) => Date.parse(left.occurredAt) - Date.parse(right.occurredAt),
@@ -588,11 +775,235 @@ export class CareerAgentService {
     return delivered;
   }
 
+  /**
+   * Replaces attention records written by older runtimes that claimed delivery
+   * without retaining a provider correlation, including Slack roots that were
+   * published without an application-thread correlation. Only the canonical
+   * current application blocker may be carried forward; the old record remains
+   * in campaign history for auditability.
+   */
+  async repairLegacyAttentionEvents(campaignId?: string): Promise<LegacyAttentionRepairResult> {
+    const candidates = this.careerRepository
+      .listCampaigns()
+      .filter((campaign) => campaignId === undefined || campaign.id === campaignId)
+      .flatMap((campaign) => (campaign.attentionEvents ?? [])
+        .filter((event) => {
+          const hasCanonicalThread = (campaign.attentionEvents ?? []).some((candidate) =>
+            candidate.id !== event.id &&
+            candidate.applicationId === event.applicationId &&
+            candidate.providerDelivery?.provider === "slack" &&
+            Boolean(candidate.providerDelivery.threadTs),
+          );
+          return event.type === "needs_input" && event.status === "open" && Boolean(event.publishedAt) &&
+            (!event.providerDelivery ||
+              (event.providerDelivery.provider === "slack" && !event.providerDelivery.threadTs && hasCanonicalThread));
+        }));
+    const result: LegacyAttentionRepairResult = {
+      inspected: 0,
+      eligible: 0,
+      replaced: 0,
+      skipped: 0,
+      newRootsPublished: 0,
+      deliveryMetadataPersisted: 0,
+    };
+
+    for (const legacy of candidates) {
+      result.inspected += 1;
+      const campaign = this.careerRepository.getCampaign(legacy.campaignId);
+      if (!campaign) {
+        result.skipped += 1;
+        continue;
+      }
+      const current = campaign.attentionEvents?.find((event) => event.id === legacy.id);
+      const hasCanonicalThread = (campaign.attentionEvents ?? []).some((candidate) =>
+        candidate.id !== current?.id &&
+        candidate.applicationId === current?.applicationId &&
+        candidate.providerDelivery?.provider === "slack" &&
+        Boolean(candidate.providerDelivery.threadTs),
+      );
+      if (!current || current.status !== "open" ||
+        (current.providerDelivery && !(current.providerDelivery.provider === "slack" && !current.providerDelivery.threadTs && hasCanonicalThread))) {
+        result.skipped += 1;
+        continue;
+      }
+
+      const newer = (campaign.attentionEvents ?? []).find((event) =>
+        event.id !== current.id &&
+        event.type === "needs_input" &&
+        event.status === "open" &&
+        event.applicationId === current.applicationId,
+      );
+      if (newer) {
+        const cancelled: PersistedAttentionEvent = {
+          ...current,
+          status: "cancelled",
+          resolvedAt: this.now(),
+          closureReason: "legacy_unreplyable_superseded",
+          replacementEventId: newer.id,
+        };
+        this.careerRepository.saveCampaign({
+          ...campaign,
+          attentionEvents: (campaign.attentionEvents ?? []).map((event) => event.id === current.id ? cancelled : event),
+          updatedAt: this.now(),
+        });
+        result.skipped += 1;
+        continue;
+      }
+
+      if (!current.applicationId || !current.jobId || !current.blockerId) {
+        result.skipped += 1;
+        continue;
+      }
+      const job = this.careerRepository.getJob(current.jobId);
+      if (!job || job.campaignId !== campaign.id || job.applicationId !== current.applicationId) {
+        result.skipped += 1;
+        continue;
+      }
+      let application: Application;
+      try {
+        application = this.applicationService.getApplication(current.applicationId);
+      } catch {
+        result.skipped += 1;
+        continue;
+      }
+      const blocker = job.blockers.find((candidate) =>
+        candidate.id === current.blockerId &&
+        candidate.status === "open" &&
+        attentionDescriptorSignature(candidate, job.job.compensation) !== undefined,
+      );
+      const applicationBlocker = blocker
+        ? application.blockers.find((candidate) =>
+          candidate.status === "open" &&
+          (candidate.id === blocker.field || candidate.field === blocker.field || candidate.id === blocker.id),
+        )
+        : undefined;
+      if (application.status !== "needs_input" || !blocker || !applicationBlocker) {
+        result.skipped += 1;
+        continue;
+      }
+
+      const generated = attentionEventForCareerBlocker({
+        campaignId: campaign.id,
+        jobId: job.id,
+        blocker,
+        postingCompensation: job.job.compensation,
+        createdAt: blocker.createdAt,
+        createId: this.createId,
+      });
+      if (!generated) {
+        result.skipped += 1;
+        continue;
+      }
+
+      result.eligible += 1;
+      const cancelled: PersistedAttentionEvent = {
+        ...current,
+        status: "cancelled",
+        resolvedAt: this.now(),
+        closureReason: "legacy_unreplyable_replaced",
+        replacementEventId: generated.record.id,
+      };
+      this.careerRepository.saveCampaign({
+        ...campaign,
+        attentionEvents: [
+          ...(campaign.attentionEvents ?? []).map((event) => event.id === current.id ? cancelled : event),
+          generated.record,
+        ],
+        updatedAt: this.now(),
+      });
+      result.replaced += 1;
+
+      await this.deliverAttentionRecord(generated.record);
+      const persistedReplacement = this.careerRepository
+        .getCampaign(campaign.id)
+        ?.attentionEvents?.find((event) => event.id === generated.record.id);
+      const delivery = persistedReplacement?.providerDelivery;
+      if (delivery?.provider === "slack") {
+        result.deliveryMetadataPersisted += 1;
+        if (!delivery.threadTs) result.newRootsPublished += 1;
+      }
+    }
+    return result;
+  }
+
+  private async publishConfigurationAttention(
+    campaign: Campaign,
+    readiness: Extract<CareerReadinessResult, { ok: false }>,
+  ): Promise<boolean> {
+    const currentCampaign = this.getCampaign(campaign.id);
+    const existing = currentCampaign.attentionEvents?.find((event) =>
+      event.type === "configuration_required" &&
+      event.status === "open" &&
+      event.reasonCode === readiness.reasonCode,
+    );
+    if (existing) {
+      await this.deliverAttentionRecord(existing);
+      return false;
+    }
+
+    const generated = attentionEventForConfiguration({
+      campaignId: campaign.id,
+      createdAt: this.now(),
+      createId: this.createId,
+      reasonCode: readiness.reasonCode,
+    });
+    this.careerRepository.saveCampaign({
+      ...currentCampaign,
+      attentionEvents: [...(currentCampaign.attentionEvents ?? []), generated.record],
+      updatedAt: this.now(),
+    });
+    await this.deliverAttentionRecord(generated.record);
+    return true;
+  }
+
+  private async resolveConfigurationAttentionEvents(campaignId: string): Promise<void> {
+    const campaign = this.getCampaign(campaignId);
+    const open = (campaign.attentionEvents ?? []).filter((event) =>
+      event.type === "configuration_required" && event.status === "open",
+    );
+    if (open.length === 0) return;
+
+    const resolvedAt = this.now();
+    const resolvedIds = new Set(open.map((event) => event.id));
+    const updatedEvents = (campaign.attentionEvents ?? []).map((event) =>
+      resolvedIds.has(event.id) ? { ...event, status: "resolved" as const, resolvedAt } : event,
+    );
+    this.careerRepository.saveCampaign({ ...campaign, attentionEvents: updatedEvents, updatedAt: this.now() });
+    for (const event of open) {
+      try {
+        await this.notificationAdapter?.closeAttentionEvent?.(publicAttentionEvent({
+          ...event,
+          status: "resolved",
+          resolvedAt,
+        }));
+      } catch {
+        // Resolution is durable; notification cleanup is best effort.
+      }
+    }
+  }
+
   createCampaign(input: CreateCampaignInput): Campaign {
-    if (input.searchCriteria?.minimumSalary !== undefined &&
-      (!Number.isFinite(input.searchCriteria.minimumSalary) || input.searchCriteria.minimumSalary < 0)) {
+    const searchIntent = input.searchIntent ? normalizeJobSearchIntent(input.searchIntent) : undefined;
+    if ((input.searchCriteria?.minimumSalary !== undefined &&
+      (!Number.isFinite(input.searchCriteria.minimumSalary) || input.searchCriteria.minimumSalary < 0)) ||
+      (searchIntent?.minimumSalary !== undefined &&
+        (!Number.isFinite(searchIntent.minimumSalary) || searchIntent.minimumSalary < 0))) {
       throw new Error("Minimum salary must be a non-negative finite number.");
     }
+    const searchCriteria: SearchCriteria = searchIntent
+      ? searchCriteriaFromJobSearchIntent(searchIntent, cleanList(input.searchCriteria?.excludedCompanies))
+      : {
+        ...DEFAULT_SEARCH_CRITERIA,
+        ...(input.searchCriteria?.roleLanes ? { roleLanes: cleanList(input.searchCriteria.roleLanes) } : {}),
+        ...(input.searchCriteria?.searchQueries ? { searchQueries: cleanList(input.searchCriteria.searchQueries) } : {}),
+        ...(input.searchCriteria?.locations ? { locations: cleanList(input.searchCriteria.locations) } : {}),
+        ...(input.searchCriteria?.remoteOnly !== undefined ? { remoteOnly: input.searchCriteria.remoteOnly } : {}),
+        ...(input.searchCriteria?.employmentTypes ? { employmentTypes: cleanList(input.searchCriteria.employmentTypes) } : {}),
+        ...(input.searchCriteria?.minimumSalary !== undefined ? { minimumSalary: input.searchCriteria.minimumSalary } : {}),
+        ...(input.searchCriteria?.excludedSeniorities ? { excludedSeniorities: cleanList(input.searchCriteria.excludedSeniorities) } : {}),
+        ...(input.searchCriteria?.excludedTitleTerms ? { excludedTitleTerms: cleanList(input.searchCriteria.excludedTitleTerms) } : {}),
+        ...(input.searchCriteria?.excludedCompanies ? { excludedCompanies: cleanList(input.searchCriteria.excludedCompanies) } : {}),
+      };
     const sourceConfigs = normalizeSourceConfigs(input.sourceConfigs);
     const configuredSourceIds = sourceConfigs?.map(jobSourceConfigId) ?? [];
     const searchSources = cleanList(input.searchSources.length > 0 ? input.searchSources : configuredSourceIds);
@@ -603,17 +1014,8 @@ export class CareerAgentService {
       name: cleanString(input.name, "Campaign name"),
       goal: cleanString(input.goal, "Campaign goal"),
       status: "draft",
-      searchCriteria: {
-        ...DEFAULT_SEARCH_CRITERIA,
-        ...(input.searchCriteria?.roleLanes ? { roleLanes: cleanList(input.searchCriteria.roleLanes) } : {}),
-        ...(input.searchCriteria?.searchQueries ? { searchQueries: cleanList(input.searchCriteria.searchQueries) } : {}),
-        ...(input.searchCriteria?.locations ? { locations: cleanList(input.searchCriteria.locations) } : {}),
-        ...(input.searchCriteria?.remoteOnly !== undefined ? { remoteOnly: input.searchCriteria.remoteOnly } : {}),
-        ...(input.searchCriteria?.employmentTypes ? { employmentTypes: cleanList(input.searchCriteria.employmentTypes) } : {}),
-        ...(input.searchCriteria?.minimumSalary !== undefined ? { minimumSalary: input.searchCriteria.minimumSalary } : {}),
-        ...(input.searchCriteria?.excludedSeniorities ? { excludedSeniorities: cleanList(input.searchCriteria.excludedSeniorities) } : {}),
-        ...(input.searchCriteria?.excludedCompanies ? { excludedCompanies: cleanList(input.searchCriteria.excludedCompanies) } : {}),
-      },
+      ...(searchIntent ? { searchIntent } : {}),
+      searchCriteria,
       searchSources,
       ...(sourceConfigs && sourceConfigs.length > 0 ? { sourceConfigs } : {}),
       fitPolicy: {
@@ -692,6 +1094,29 @@ export class CareerAgentService {
       ["sourceCount", String(campaign.searchSources.length)],
     ]));
     return campaign;
+  }
+
+  /**
+   * Explicit user-authorized transition for a persisted campaign. This keeps
+   * automatic submission opt-in durable without changing discovery, fit, or
+   * pursuit policy.
+   */
+  authorizeAutomaticSubmission(campaignId: string): Campaign {
+    const campaign = this.getCampaign(campaignId);
+    if (campaign.submissionPolicy.authority === "automatic" && !campaign.submissionPolicy.requireExplicitApproval) {
+      return campaign;
+    }
+    const updated = {
+      ...campaign,
+      submissionPolicy: {
+        ...campaign.submissionPolicy,
+        authority: "automatic" as const,
+        requireExplicitApproval: false,
+      },
+      updatedAt: this.now(),
+    };
+    this.careerRepository.saveCampaign(updated);
+    return updated;
   }
 
   activateCampaign(campaignId: string): Campaign {
@@ -791,9 +1216,43 @@ export class CareerAgentService {
       return finish();
     }
 
+    const readiness = trace.measureSync(
+      `campaign.readiness.${campaign.id}`,
+      "deterministic",
+      () => validateCareerAgentReadiness(this.profile, this.resumeArtifactAvailable),
+      {
+        inputCount: 1,
+        outputCount: (result) => result.ok ? 0 : 1,
+        outcome: (result) => result.ok ? "success" : "blocked",
+        failureReason: (result) => result.ok ? undefined : result.failureReason,
+        humanAttentionRequired: (result) => !result.ok,
+        humanAttentionCategory: (result) => result.ok ? undefined : result.attentionCategory,
+        metadata: { stage: "campaign.readiness" },
+      },
+    );
+    if (!readiness.ok) {
+      const created = await this.publishConfigurationAttention(campaign, readiness);
+      if (created) {
+        this.appendEvent(campaign.id, "campaign.review_needed", {
+          reasonCode: readiness.reasonCode,
+          attentionCategory: readiness.attentionCategory,
+          stage: "campaign.readiness",
+        });
+      }
+      await this.publishPendingAttentionEvents(campaignId);
+      return finish();
+    }
+    await this.resolveConfigurationAttentionEvents(campaign.id);
     await this.publishPendingAttentionEvents(campaignId);
 
-    for (const job of this.listJobs(campaignId).filter((candidate) => candidate.status === "needs_input")) {
+    await this.resolveDestinations(campaign.id);
+
+    for (const job of this.listJobs(campaignId).filter((candidate) =>
+      candidate.status === "needs_input" &&
+      candidate.destinationResolution?.status !== "unresolved" &&
+      candidate.destinationResolution?.status !== "ambiguous" &&
+      !(candidate.execution?.mode === "real_local" && candidate.execution.hostExecutionId),
+    )) {
       let resumeAttempt = 1;
       if (job.applicationResumeAttempt !== undefined && job.applicationId) {
         try {
@@ -821,6 +1280,9 @@ export class CareerAgentService {
       if (outcome.applied) accumulator.applied += 1;
       if (outcome.failure) accumulator.failures += 1;
       campaign = this.getCampaign(campaignId);
+      if (outcome.careerJob.status === "needs_input") {
+        await this.publishAttentionForJob(campaign, outcome.careerJob);
+      }
       if (campaign.status !== "active") return finish();
     }
 
@@ -1002,6 +1464,7 @@ export class CareerAgentService {
     }
 
     this.applyStopConditions(this.getCampaign(campaignId));
+    await this.publishPendingPreparationAttention(campaignId);
     return finish();
   }
 
@@ -1050,7 +1513,11 @@ export class CareerAgentService {
     }
 
     if (campaign.status === "active") {
-      return (await this.resumeBlockedJob(campaign, resolved)).careerJob;
+      const resumed = await this.resumeBlockedJob(campaign, resolved);
+      if (resumed.careerJob.status === "needs_input") {
+        await this.publishAttentionForJob(this.getCampaign(campaign.id), resumed.careerJob);
+      }
+      return resumed.careerJob;
     }
     return resolved;
   }
@@ -1091,6 +1558,9 @@ export class CareerAgentService {
     const located = this.findAttentionRecord(response.eventId);
     if (!located) throw new AttentionResponseError("That attention event is unknown.");
     const { campaign, record } = located;
+    if (record.type !== "needs_input" || !record.applicationId || !record.jobId || !record.blockerId || !record.question) {
+      throw new AttentionResponseError("That attention event does not accept a response.");
+    }
     if (record.status === "resolved") {
       if (record.response?.selectedOption !== response.selectedOption) {
         throw new AttentionResponseError("That attention event was already resolved with a different choice.");
@@ -1109,21 +1579,45 @@ export class CareerAgentService {
     if (job.campaignId !== campaign.id || job.applicationId !== record.applicationId || job.status !== "needs_input") {
       throw new AttentionResponseError("That application is no longer eligible for this attention response.");
     }
-    if (job.execution?.mode !== "real_local" || !job.execution.hostExecutionId) {
-      throw new AttentionResponseError("That application no longer has a resumable local browser execution.");
+    let application: Application;
+    try {
+      application = this.applicationService.getApplication(record.applicationId);
+    } catch {
+      throw new AttentionResponseError("That application packet is no longer available for a safe resume.");
     }
     const blocker = job.blockers.find((candidate) => candidate.id === record.blockerId);
     if (!blocker || blocker.status !== "open") {
       throw new AttentionResponseError("That application blocker is no longer open.");
     }
+    const applicationPreparationResume = blocker.unit === "application_preparation";
+    const hostExecutionResumable = job.execution?.mode === "real_local" && Boolean(job.execution.hostExecutionId);
+    let preparationOnlyResume = false;
+    if (!hostExecutionResumable) {
+      try {
+        preparationOnlyResume = this.executor.executionMode?.({
+          campaign,
+          careerJob: job,
+          application,
+          now: this.now(),
+          profile: this.profile,
+        }) === "preparation_only";
+      } catch {
+        preparationOnlyResume = false;
+      }
+    }
+    if (!hostExecutionResumable && !preparationOnlyResume && !applicationPreparationResume) {
+      throw new AttentionResponseError("That application no longer has a resumable local browser execution.");
+    }
 
-    const currentSignature = attentionDescriptorSignature(blocker);
+    const currentSignature = attentionDescriptorSignature(blocker, job.job.compensation);
     if (!currentSignature || currentSignature !== record.descriptorSignature) {
       await this.replaceStaleAttentionEvent(campaign, job, record, blocker);
       throw new AttentionResponseError("The application question changed; a new attention event was created.");
     }
 
-    const option = record.question.options.find((candidate) => candidate.id === response.selectedOption);
+    const option = record.question.kind === "single_choice"
+      ? record.question.options.find((candidate) => candidate.id === response.selectedOption)
+      : { id: response.selectedOption, label: response.selectedOption };
     if (!option) throw new AttentionResponseError("That choice is not valid for this attention event.");
 
     const resolved = await this.resolveCareerBlocker(
@@ -1133,7 +1627,16 @@ export class CareerAgentService {
       option.id,
       { attentionResponse: response },
     );
-    if (this.resumeAttention) await this.resumeAttention(campaign.id, job.id);
+    // Preparation-only background executors re-inspect through the existing
+    // service resume path. A real execution host owns its live session and
+    // must receive the explicit resume request instead.
+    // Some human boundaries are deliberately non-resumable. Submission
+    // confirmation is the critical example: once Submit has been activated
+    // without deterministic confirmation, answering the attention event must
+    // never cause a second Submit attempt.
+    if (this.resumeAttention && hostExecutionResumable && blocker.resumeAfterHuman !== false) {
+      await this.resumeAttention(campaign.id, job.id);
+    }
     const updatedCampaign = this.getCampaign(campaign.id);
     const updatedRecord = updatedCampaign.attentionEvents?.find((candidate) => candidate.id === record.id) ?? record;
     return {
@@ -1148,6 +1651,121 @@ export class CareerAgentService {
     const job = this.getJob(jobId);
     if (job.campaignId !== campaignId) throw new Error("That job does not belong to the selected campaign.");
     return (await this.resumeBlockedJob(campaign, job)).careerJob;
+  }
+
+  /**
+   * Reopens the same prepared packet after a retryable browser failure. The
+   * application and career job identities are preserved; only the transient
+   * execution state is reset for a fresh trusted host attempt.
+   */
+  recoverFailedApplicationForExecution(campaignId: string, jobId: string): CareerJob {
+    const campaign = this.getCampaign(campaignId);
+    const job = this.getJob(jobId);
+    if (job.campaignId !== campaignId) throw new Error("That job does not belong to the selected campaign.");
+    if (!job.applicationId || job.status !== "failed") {
+      throw new Error("Only a failed career job with an existing application can be recovered for browser execution.");
+    }
+    const application = this.applicationService.getApplication(job.applicationId);
+    this.applicationService.reopenFailedApplicationForExecution(application.id);
+    const recovered = this.saveJob({
+      ...job,
+      status: "preparing",
+      decisionReason: undefined,
+      ...(job.execution ? {
+        execution: {
+          ...job.execution,
+          status: "not_started",
+          hostExecutionId: undefined,
+          failureReasonCode: undefined,
+          updatedAt: this.now(),
+        },
+      } : {}),
+      updatedAt: this.now(),
+    });
+    this.appendEvent(campaign.id, "application.execution_resumed", {
+      ...careerEventMetadata(recovered),
+      recovery: "retryable_browser_execution",
+    });
+    return recovered;
+  }
+
+  /**
+   * Reopens the same application packet after the user explicitly elects to
+   * retry an automatic submission whose external result was ambiguous. This
+   * never creates a second packet or campaign, and it closes the old
+   * verification event before the new host attempt begins.
+   */
+  async retryUnconfirmedAutomaticSubmission(campaignId: string, jobId: string): Promise<CareerJob> {
+    const campaign = this.getCampaign(campaignId);
+    const job = this.getJob(jobId);
+    if (campaign.submissionPolicy.authority !== "automatic") {
+      throw new Error("An unconfirmed submission can only be retried under automatic submission authority.");
+    }
+    if (job.campaignId !== campaign.id || job.status !== "needs_input" || !job.applicationId) {
+      throw new Error("Only the same needs-input application can retry an unconfirmed submission.");
+    }
+    const application = this.applicationService.getApplication(job.applicationId);
+    if (application.status !== "ready_for_review") {
+      throw new Error("The application packet is not in a safe reviewable state for a retry.");
+    }
+    const blocker = job.blockers.find((candidate) =>
+      candidate.status === "open" &&
+      candidate.kind === "external_verification" &&
+      candidate.unit === "submission" &&
+      candidate.field === "submission-confirmation" &&
+      candidate.resumeAfterHuman === false,
+    );
+    if (!blocker) {
+      throw new Error("The application has no open ambiguous-submission verification boundary.");
+    }
+
+    const now = this.now();
+    const currentCampaign = this.getCampaign(campaign.id);
+    const cancelledEvents = (currentCampaign.attentionEvents ?? [])
+      .filter((event) => event.status === "open" && event.jobId === job.id && event.blockerId === blocker.id)
+      .map((event) => ({ ...event, status: "cancelled" as const, resolvedAt: now }));
+    const cancelledIds = new Set(cancelledEvents.map((event) => event.id));
+    this.careerRepository.saveCampaign({
+      ...currentCampaign,
+      attentionEvents: (currentCampaign.attentionEvents ?? []).map((event) =>
+        cancelledIds.has(event.id) ? cancelledEvents.find((candidate) => candidate.id === event.id) ?? event : event,
+      ),
+      updatedAt: now,
+    });
+    for (const event of cancelledEvents) {
+      try {
+        await this.notificationAdapter?.closeAttentionEvent?.(publicAttentionEvent(event));
+      } catch {
+        // Durable cancellation is authoritative; notification closure is best effort.
+      }
+    }
+
+    const retried = this.saveJob({
+      ...job,
+      status: "preparing",
+      blockers: job.blockers.map((candidate) => candidate.id === blocker.id
+        ? { ...candidate, status: "resolved" as const, resolvedAt: now, value: "explicit_retry_after_unconfirmed_submission" }
+        : candidate),
+      ...(job.execution ? {
+        execution: {
+          ...job.execution,
+          status: "not_started" as const,
+          hostExecutionId: undefined,
+          fieldsDetected: [],
+          fieldsFilled: [],
+          unresolvedFields: [],
+          evidence: [...new Set([...job.execution.evidence, "execution:explicit-unconfirmed-submission-retry"])],
+          startedAt: now,
+          updatedAt: now,
+        },
+      } : {}),
+      updatedAt: now,
+    });
+    this.appendEvent(campaign.id, "application.execution_resumed", {
+      ...careerEventMetadata(retried),
+      recovery: "explicit_unconfirmed_submission_retry",
+    });
+    return retried;
   }
 
   /**
@@ -1232,47 +1850,105 @@ export class CareerAgentService {
 
   private async deliverAttentionRecord(record: PersistedAttentionEvent): Promise<boolean> {
     if (!this.notificationAdapter || record.status !== "open" || record.publishedAt) return false;
+    let providerDelivery: Awaited<ReturnType<NotificationAdapter["publishAttentionEvent"]>>;
     try {
-      await this.notificationAdapter.publishAttentionEvent(publicAttentionEvent(record));
+      providerDelivery = await this.notificationAdapter.publishAttentionEvent(publicAttentionEvent(record));
     } catch {
-      // The durable open event remains unpublished so a later worker cycle can retry it.
+      // The durable open event remains unpublished so a later worker cycle can
+      // retry it. Only bounded, non-sensitive delivery metadata is retained.
+      const campaign = this.getCampaign(record.campaignId);
+      const events = (campaign.attentionEvents ?? []).map((candidate) => candidate.id === record.id
+        ? {
+          ...candidate,
+          deliveryFailureCount: Math.min((candidate.deliveryFailureCount ?? 0) + 1, 1_000),
+          lastDeliveryFailureAt: this.now(),
+          lastDeliveryFailureCode: "provider_error" as const,
+        }
+        : candidate);
+      this.careerRepository.saveCampaign({ ...campaign, attentionEvents: events, updatedAt: this.now() });
       return false;
     }
     const campaign = this.getCampaign(record.campaignId);
     const events = (campaign.attentionEvents ?? []).map((candidate) => candidate.id === record.id
-      ? { ...candidate, publishedAt: this.now() }
+      ? {
+        ...candidate,
+        ...(providerDelivery ? { providerDelivery } : {}),
+        publishedAt: this.now(),
+      }
       : candidate);
     this.careerRepository.saveCampaign({ ...campaign, attentionEvents: events, updatedAt: this.now() });
     return true;
   }
 
   private async publishAttentionForJob(campaign: Campaign, job: CareerJob): Promise<void> {
-    for (const blocker of job.blockers.filter((candidate) => candidate.status === "open")) {
-      const generated = attentionEventForCareerBlocker({
-        campaignId: campaign.id,
-        jobId: job.id,
-        blocker,
-        createdAt: blocker.createdAt,
-        createId: this.createId,
-      });
-      if (!generated) continue;
-
-      const currentCampaign = this.getCampaign(campaign.id);
-      const existing = currentCampaign.attentionEvents?.find((candidate) =>
-        candidate.jobId === job.id && candidate.blockerId === blocker.id && candidate.status === "open",
-      );
-      if (existing) {
-        await this.deliverAttentionRecord(existing);
-        continue;
+    const currentCampaign = this.getCampaign(campaign.id);
+    const existing = currentCampaign.attentionEvents?.find((candidate) =>
+      candidate.jobId === job.id && candidate.status === "open",
+    );
+    const blocker = job.blockers.find((candidate) =>
+      candidate.status === "open" && attentionDescriptorSignature(candidate, job.job.compensation) !== undefined,
+    );
+    if (existing) {
+      if (!blocker) {
+        this.markAttentionEventsForJob(campaign.id, job.id, "cancelled");
+        return;
       }
+      const currentSignature = attentionDescriptorSignature(blocker, job.job.compensation);
+      if (currentSignature !== existing.descriptorSignature) {
+        await this.replaceStaleAttentionEvent(currentCampaign, job, existing, blocker);
+        return;
+      }
+      const refreshed = existing.blockerId === blocker.id
+        ? existing
+        : { ...existing, blockerId: blocker.id };
+      if (refreshed !== existing) {
+        this.careerRepository.saveCampaign({
+          ...currentCampaign,
+          attentionEvents: (currentCampaign.attentionEvents ?? []).map((candidate) =>
+            candidate.id === existing.id ? refreshed : candidate,
+          ),
+          updatedAt: this.now(),
+        });
+      }
+      await this.deliverAttentionRecord(refreshed);
+      return;
+    }
 
-      const next = {
-        ...currentCampaign,
-        attentionEvents: [...(currentCampaign.attentionEvents ?? []), generated.record],
-        updatedAt: this.now(),
-      };
-      this.careerRepository.saveCampaign(next);
-      await this.deliverAttentionRecord(generated.record);
+    if (!blocker) return;
+    const generated = attentionEventForCareerBlocker({
+      campaignId: campaign.id,
+      jobId: job.id,
+      blocker,
+      postingCompensation: job.job.compensation,
+      createdAt: blocker.createdAt,
+      createId: this.createId,
+    });
+    if (!generated) return;
+
+    // Persist the durable event before attempting any external delivery.
+    const next = {
+      ...currentCampaign,
+      attentionEvents: [...(currentCampaign.attentionEvents ?? []), generated.record],
+      updatedAt: this.now(),
+    };
+    this.careerRepository.saveCampaign(next);
+    await this.deliverAttentionRecord(generated.record);
+  }
+
+  /** Reconcile every remaining preparation blocker once per campaign cycle. */
+  private async publishPendingPreparationAttention(campaignId: string): Promise<void> {
+    const openAttentionJobs = new Set(
+      (this.getCampaign(campaignId).attentionEvents ?? [])
+        .filter((event) => event.status === "open" && event.jobId)
+        .map((event) => event.jobId),
+    );
+    const pendingJobs = this.listJobs(campaignId).filter((job) =>
+      job.status === "needs_input" &&
+      !(job.execution?.mode === "real_local" && job.execution.hostExecutionId) &&
+      !openAttentionJobs.has(job.id),
+    );
+    for (const job of pendingJobs) {
+      await this.publishAttentionForJob(this.getCampaign(campaignId), job);
     }
   }
 
@@ -1287,12 +1963,14 @@ export class CareerAgentService {
     const record = currentCampaign.attentionEvents?.find((candidate) =>
       candidate.jobId === job.id && candidate.blockerId === blocker.id && candidate.status === "open",
     );
-    if (!record) return;
+    if (!record || record.type !== "needs_input" || !record.question) return;
 
     const rawValue = typeof value === "string" ? value.trim() : String(value);
-    const option = record.question.options.find((candidate) =>
-      candidate.id === rawValue || candidate.label.toLowerCase() === rawValue.toLowerCase(),
-    );
+    const option = record.question.kind === "free_text"
+      ? { id: rawValue, label: rawValue }
+      : record.question.options.find((candidate) =>
+        candidate.id === rawValue || candidate.label.toLowerCase() === rawValue.toLowerCase(),
+      );
     if (!option) return;
     const response = suppliedResponse ?? {
       eventId: record.id,
@@ -1337,6 +2015,7 @@ export class CareerAgentService {
       campaignId: campaign.id,
       jobId: job.id,
       blocker,
+      postingCompensation: job.job.compensation,
       createdAt: blocker.createdAt,
       createId: this.createId,
     });
@@ -1390,6 +2069,11 @@ export class CareerAgentService {
     });
 
     if (job.execution?.hostExecutionId !== snapshot.id) {
+      const hostExecutor = job.destinationResolution?.ats === "Greenhouse"
+        ? "greenhouse-browser-executor"
+        : job.destinationResolution?.ats === "Rippling"
+          ? "rippling-browser-executor"
+          : "lever-browser-executor";
       this.appendEvent(campaign.id, "application.execution_host_started", {
         ...careerEventMetadata(marked),
         executionId: snapshot.id,
@@ -1398,7 +2082,7 @@ export class CareerAgentService {
       });
       this.appendEvent(campaign.id, "application.execution_started", {
         ...careerEventMetadata(marked),
-        executor: "lever-browser-executor",
+        executor: hostExecutor,
         executionHost: "real_local",
       });
     }
@@ -1453,14 +2137,78 @@ export class CareerAgentService {
     if (!snapshot.result) return careerJob;
     const applicationId = careerJob.applicationId;
     if (!applicationId) throw new Error("A browser execution requires an application packet.");
+    const reconciledJob = await this.reconcileNonBlockingCaptcha(careerJob, snapshot.inspection);
     const application = this.applicationService.getApplication(applicationId);
     const result = snapshot.result;
-    const outcome = await this.executePreparedApplication(campaign, careerJob, application, {
+    const outcome = await this.executePreparedApplication(campaign, reconciledJob, application, {
       result,
       executionId: snapshot.id,
       hostStatus: snapshotStatusToCareerStatus(snapshot.status),
     });
     return outcome.careerJob ?? this.getJob(careerJob.id);
+  }
+
+  /**
+   * A reinspection can prove that a previously blocking CAPTCHA is only
+   * passive infrastructure. Close the stale attention event and blocker while
+   * retaining both records and their Slack correlation, then let the current
+   * form result publish the next real blocker if one exists.
+   */
+  private async reconcileNonBlockingCaptcha(
+    job: CareerJob,
+    inspection: ExecutionInspection | undefined,
+  ): Promise<CareerJob> {
+    const captchaState = inspection?.captcha?.state ??
+      (inspection?.evidence.includes("captcha-state:infrastructure_present") ? "infrastructure_present" : undefined);
+    if (captchaState !== "infrastructure_present") return job;
+
+    const now = this.now();
+    const staleBlockers = job.blockers.filter((blocker) => blocker.status === "open" && blocker.kind === "captcha");
+    const reconciled = staleBlockers.length === 0
+      ? job
+      : this.saveJob({
+        ...job,
+        blockers: job.blockers.map((blocker) => staleBlockers.some((stale) => stale.id === blocker.id)
+          ? {
+            ...blocker,
+            status: "resolved" as const,
+            resolvedAt: blocker.resolvedAt ?? now,
+            reason: `${blocker.reason} Reclassified as non-blocking CAPTCHA infrastructure.`,
+            evidence: [...new Set([...blocker.evidence, "captcha-reclassified:infrastructure"])],
+          }
+          : blocker),
+        updatedAt: now,
+      });
+
+    const currentCampaign = this.getCampaign(job.campaignId);
+    const staleEvents = (currentCampaign.attentionEvents ?? []).filter((event) =>
+      event.jobId === job.id && event.status === "open" && event.blockerType === "captcha",
+    );
+    if (staleEvents.length === 0) return reconciled;
+
+    const closureReason: AttentionClosureReason = "reclassified_non_blocking";
+    const cancelled = staleEvents.map((event) => ({
+      ...event,
+      status: "cancelled" as const,
+      resolvedAt: now,
+      closureReason,
+    }));
+    const staleIds = new Set(cancelled.map((event) => event.id));
+    this.careerRepository.saveCampaign({
+      ...currentCampaign,
+      attentionEvents: (currentCampaign.attentionEvents ?? []).map((event) => staleIds.has(event.id)
+        ? cancelled.find((candidate) => candidate.id === event.id) ?? event
+        : event),
+      updatedAt: now,
+    });
+    for (const event of cancelled) {
+      try {
+        await this.notificationAdapter?.closeAttentionEvent?.(publicAttentionEvent(event));
+      } catch {
+        // The durable cancellation is authoritative; notification closure is best effort.
+      }
+    }
+    return reconciled;
   }
 
   recordExecutionHostCancelled(
@@ -1560,6 +2308,13 @@ export class CareerAgentService {
     eventBaseline: ReadonlySet<string> = new Set(),
     previousTraceCompletedAt?: string,
   ): CampaignRunResult {
+    // An application.created event is the canonical boundary at which a
+    // policy-pursued job enters active application work. Deriving this from
+    // the per-run event baseline makes retries and attention resumes
+    // idempotent without requiring submission or a second counter.
+    const pursuedJobIds = new Set(this.listEvents(campaignId)
+      .filter((event) => !eventBaseline.has(event.id) && event.type === "application.created" && event.jobId)
+      .map((event) => event.jobId));
     const runTrace = trace
       ? (() => {
         const newAttentionEvents = this.listEvents(campaignId)
@@ -1587,10 +2342,14 @@ export class CareerAgentService {
       })()
       : undefined;
     const snapshot = this.snapshot(campaignId);
+    const openConfigurationAttentionCount = (snapshot.campaign.attentionEvents ?? []).filter((event) =>
+      event.type === "configuration_required" && event.status === "open",
+    ).length;
     return {
       snapshot,
       ...accumulator,
-      attentionRequired: snapshot.counts.needsYou,
+      pursued: pursuedJobIds.size,
+      attentionRequired: snapshot.counts.needsYou + openConfigurationAttentionCount,
       ...(runTrace ? { trace: runTrace } : {}),
     };
   }
@@ -1647,6 +2406,7 @@ export class CareerAgentService {
         sourceId: incoming.sourceId,
         ...(incoming.sourceRecordId ? { sourceRecordId: incoming.sourceRecordId } : {}),
         ...(incoming.sourcePublishedAt ? { sourcePublishedAt: incoming.sourcePublishedAt } : {}),
+        ...(incoming.sourceExpiresAt ? { sourceExpiresAt: incoming.sourceExpiresAt } : {}),
         job: incoming.job,
       } : {}),
       dedupeKeys: [...new Set([...(existing.dedupeKeys ?? []), ...incoming.dedupeKeys])],
@@ -1680,6 +2440,7 @@ export class CareerAgentService {
       sourceId: scouted.sourceId,
       ...(scouted.sourceRecordId ? { sourceRecordId: scouted.sourceRecordId } : {}),
       ...(scouted.sourcePublishedAt ? { sourcePublishedAt: scouted.sourcePublishedAt } : {}),
+      ...(scouted.sourceExpiresAt ? { sourceExpiresAt: scouted.sourceExpiresAt } : {}),
       dedupeKeys: [...scouted.dedupeKeys],
       sourceObservations: [...scouted.sourceObservations],
       job: scouted.job,
@@ -1779,6 +2540,11 @@ export class CareerAgentService {
       careerJob = this.decideJob(careerJob, "held", APPLICATION_CAP_HOLD_REASON);
       this.appendEvent(campaign.id, "job.held", careerEventMetadata(careerJob, undefined, careerJob.decisionReason));
       return { held: true };
+    }
+
+    careerJob = await this.resolveDestinationForJob(careerJob, trace, parentNodeId);
+    if (this.destinationResolver && careerJob.destinationResolution?.status !== "resolved") {
+      return {};
     }
 
     const outcome = await this.prepareAndMaybeExecute(campaign, {
@@ -2012,8 +2778,9 @@ export class CareerAgentService {
     // A host result is already produced by the preparation-only browser
     // executor. Never invoke the local/injected executor a second time when a
     // transport result is being recorded.
-    const preparationOnly = override.result !== undefined ||
-      this.executor.executionMode?.(executionRequest) === "preparation_only";
+    const preparationOnly = override.result !== undefined
+      ? (override.result.state !== "submitted" || campaign.submissionPolicy.authority !== "automatic")
+      : this.executor.executionMode?.(executionRequest) === "preparation_only";
     const gate = trace
       ? trace.measureSync(
         `execution.policy-check.${careerJob.id}`,
@@ -2145,8 +2912,12 @@ export class CareerAgentService {
       return { careerJob: failed, failure: true };
     }
 
-    if (preparationOnly && execution.state === "submitted") {
-      const reason = "A preparation-only executor returned submission proof; the closed Submit lane rejected it.";
+    const proofAuthorized = execution.state === "submitted" && (
+      campaign.submissionPolicy.authority === "automatic" ||
+      (campaign.submissionPolicy.authority === "simulated" && execution.proof.mode === "simulated")
+    );
+    if (execution.state === "submitted" && (preparationOnly || !proofAuthorized)) {
+      const reason = "Submission proof was returned without an authorized automatic-submission policy; applied state was not recorded.";
       const failed = this.saveJob({ ...ready, status: "failed", decisionReason: reason, updatedAt: this.now() });
       this.failPreparedApplication(application, reason);
       this.appendEvent(campaign.id, "application.failed", careerEventMetadata(failed, undefined, "preparation_only_proof_rejected"));
@@ -2200,6 +2971,7 @@ export class CareerAgentService {
       const fallbackBlocker: CareerBlockerDraft = {
         kind: "unknown_form_field",
         unit: "submission",
+        questionProvenance: "POLICY",
         field: "application-form",
         question: "Supported application form",
         reason: execution.reason,
@@ -2487,6 +3259,74 @@ export class CareerAgentService {
     return job;
   }
 
+  private async resolveDestinationForJob(
+    job: CareerJob,
+    trace?: ExecutionTraceBuilder,
+    parentNodeId?: string,
+  ): Promise<CareerJob> {
+    if (!this.destinationResolver || job.actionability === "actionable") return job;
+    const destinationResolver = this.destinationResolver;
+    const resolve = () => destinationResolver.resolve({
+      company: job.job.company,
+      role: job.job.title,
+      ...(job.job.sourceUrl ? { knownListingUrl: job.job.sourceUrl } : {}),
+      ...(job.job.applicationUrl ? { existingApplicationUrl: job.job.applicationUrl } : {}),
+      existingApplicationActionable: job.actionability === "actionable",
+      sourceObservations: job.sourceObservations ?? [],
+    });
+    let resolution: DestinationResolution;
+    try {
+      resolution = trace
+        ? await trace.measure(
+          `job.destination-resolution.${job.id}`,
+          "external_io",
+          resolve,
+          {
+            parentNodeId,
+            inputCount: 1,
+            outputCount: () => 1,
+            outcome: (result) => result.status === "resolved" ? "success" : result.status === "ambiguous" ? "blocked" : "skipped",
+            externalMetrics: () => ({ requestCount: 1, successCount: 1 }),
+            metadata: { stage: "job.destination-resolution", jobId: job.id },
+          },
+        )
+        : await resolve();
+    } catch {
+      resolution = {
+        status: "unresolved",
+        attemptedAt: this.now(),
+        evidence: ["destination-resolver:error"],
+        reason: "The bounded destination resolver was unavailable; the pursued job remains available for retry.",
+      };
+    }
+
+    if (resolution.status !== "resolved" || !resolution.destinationUrl || resolution.actionable !== true) {
+      return this.saveJob({ ...job, destinationResolution: resolution, updatedAt: this.now() });
+    }
+
+    const updatedPosting = { ...job.job, applicationUrl: resolution.destinationUrl };
+    if (job.applicationId) {
+      try {
+        this.applicationService.updateApplicationJob(job.applicationId, updatedPosting);
+      } catch {
+        const unresolved: DestinationResolution = {
+          status: "unresolved",
+          attemptedAt: resolution.attemptedAt,
+          evidence: [...resolution.evidence, "application-packet:update-failed"],
+          reason: "The verified destination could not be synchronized to the application packet; the pursued job remains available for retry.",
+        };
+        return this.saveJob({ ...job, destinationResolution: unresolved, updatedAt: this.now() });
+      }
+    }
+    return this.saveJob({
+      ...job,
+      actionability: "actionable",
+      destinationResolution: resolution,
+      job: updatedPosting,
+      updatedAt: this.now(),
+    });
+  }
+
   private mergeBlockers(
     job: CareerJob,
     drafts: readonly CareerBlockerDraft[],
@@ -2509,6 +3349,7 @@ export class CareerAgentService {
           ...current,
           kind: draft.kind,
           unit: draft.unit,
+          ...(draft.questionProvenance ? { questionProvenance: draft.questionProvenance } : {}),
           ...(draft.field ? { field: draft.field } : {}),
           question: draft.question,
           reason: draft.reason,
@@ -2521,6 +3362,7 @@ export class CareerAgentService {
       }
       return {
         ...current,
+        ...(draft.questionProvenance ? { questionProvenance: draft.questionProvenance } : {}),
         question: draft.question,
         reason: draft.reason,
         evidence: [...draft.evidence],
@@ -2533,6 +3375,7 @@ export class CareerAgentService {
         id: this.createId("career-blocker"),
         kind: draft.kind,
         unit: draft.unit,
+        ...(draft.questionProvenance ? { questionProvenance: draft.questionProvenance } : {}),
         ...(draft.field ? { field: draft.field } : {}),
         question: draft.question,
         context: {

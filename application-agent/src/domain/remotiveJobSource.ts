@@ -134,7 +134,15 @@ function remotiveJobType(value: string | undefined): string | undefined {
 }
 
 function safeCompensation(salary: string | undefined): JobPosting["compensation"] | undefined {
-  if (!salary || !/(?:annual|year|yr|k\b)/i.test(salary)) return undefined;
+  if (!salary) return undefined;
+  const period = salary.match(/\b(hourly|hour|weekly|week|fortnightly|fortnight|monthly|month|annual|yearly|year|yr)\b/i)?.[1]?.toLowerCase();
+  if (!period && !/k\b/i.test(salary)) return undefined;
+  const normalizedPeriod = period === "hour" ? "hourly"
+    : period === "week" ? "weekly"
+      : period === "fortnight" ? "fortnightly"
+        : period === "month" ? "monthly"
+          : period === "year" || period === "yearly" || period === "yr" ? "annual"
+            : period;
   const values = [...salary.matchAll(/\$\s*([\d,]+(?:\.\d+)?)\s*k?/gi)]
     .map((match) => {
       const amount = Number(match[1].replace(/,/g, ""));
@@ -147,6 +155,7 @@ function safeCompensation(salary: string | undefined): JobPosting["compensation"
     minimum: values[0],
     ...(values[1] !== undefined ? { maximum: values[1] } : {}),
     currency: "USD",
+    ...(normalizedPeriod ? { period: normalizedPeriod } : {}),
   };
 }
 
@@ -234,7 +243,13 @@ export function parseRemotiveResponse(
 
   const queries = searchQueries(criteria);
   const warnings: string[] = [];
-  const candidates: Array<{ record: RemotiveJobRecord; job: JobPosting; rawText: string; sourcePublishedAt?: string }> = [];
+  const candidates: Array<{
+    record: RemotiveJobRecord;
+    job: JobPosting;
+    rawText: string;
+    sourcePublishedAt?: string;
+    searchQueries: readonly string[];
+  }> = [];
   for (const [index, value] of payload.jobs.entries()) {
     const record = asRemotiveRecord(value);
     if (!record) {
@@ -244,13 +259,14 @@ export function parseRemotiveResponse(
 
     const plainDescription = stripAndDecodeHtml(record.description);
     const text = normalizedSearchText(record, plainDescription);
-    if (queries.length > 0 && !queries.some((query) => searchQueryMatches(query, text))) {
+    const matchedQueries = queries.filter((query) => searchQueryMatches(query, text));
+    if (queries.length > 0 && matchedQueries.length === 0) {
       continue;
     }
 
     try {
       const normalized = normalizeRemotiveJob(record, capturedAt);
-      candidates.push({ record, ...normalized });
+      candidates.push({ record, ...normalized, searchQueries: matchedQueries });
     } catch (error) {
       warnings.push(
         `Skipped Remotive job ${record.id}: ${error instanceof Error ? error.message : "normalization failed."}`,
@@ -265,7 +281,7 @@ export function parseRemotiveResponse(
   });
 
   return {
-    listings: candidates.slice(0, maxResults).map(({ record, rawText, sourcePublishedAt }) => ({
+    listings: candidates.slice(0, maxResults).map(({ record, rawText, sourcePublishedAt, searchQueries: matchedQueries }) => ({
       input: {
         rawText,
         sourceUrl: record.url,
@@ -274,6 +290,7 @@ export function parseRemotiveResponse(
         isExample: false,
       },
       sourceRecordId: String(record.id),
+      ...(matchedQueries.length > 0 ? { searchQueries: matchedQueries } : {}),
       ...(sourcePublishedAt ? { sourcePublishedAt } : {}),
       discoveredAt: capturedAt,
       sourceMode: "live",

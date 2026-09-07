@@ -133,6 +133,22 @@ export class ApplicationService {
     return application;
   }
 
+  /** Update only the normalized posting provenance after a destination is verified. */
+  updateApplicationJob(applicationId: string, job: JobPosting): Application {
+    if (!isJobPosting(job)) throw new Error("A normalized job posting is required before updating an application.");
+    const application = this.getApplication(applicationId);
+    if (application.status === "applied") {
+      throw new Error("An Applied application cannot be rewritten with a new destination.");
+    }
+    const updated: Application = {
+      ...application,
+      job,
+      updatedAt: this.now(),
+    };
+    this.repository.saveApplication(updated);
+    return updated;
+  }
+
   async assessJob(job: JobPosting): Promise<FitAssessment> {
     return this.model.assessFit(job, this.profile);
   }
@@ -274,6 +290,37 @@ export class ApplicationService {
     const fit = knownFit ?? await this.assessJob(job);
     const evaluated = await this.evaluateApplication(created.id, fit);
     return this.prepareApplication(evaluated.id);
+  }
+
+  /**
+   * Reopens the same fully prepared packet after a retryable browser-execution
+   * failure. This never creates a new application or regenerates preparation
+   * output; it only restores the manual-review boundary for another trusted
+   * execution attempt.
+   */
+  reopenFailedApplicationForExecution(applicationId: string): Application {
+    const application = this.getApplication(applicationId);
+    if (application.status !== "failed") {
+      throw new Error("Only a failed application packet can be reopened for browser execution.");
+    }
+    if (!application.fit || !application.resume) {
+      throw new Error("A failed application must retain grounded fit and resume outputs before browser recovery.");
+    }
+    if (application.blockers.some((blocker) => blocker.status === "open")) {
+      throw new Error("A failed application with unresolved preparation blockers cannot be reopened for browser execution.");
+    }
+    assertTransition(application.status, "ready_for_review");
+    const reopened: Application = {
+      ...application,
+      status: "ready_for_review",
+      failureReason: undefined,
+      updatedAt: this.now(),
+    };
+    this.repository.saveApplication(reopened);
+    this.appendEvent(applicationId, "application.ready_for_review", {
+      recovery: "retryable_browser_execution",
+    });
+    return reopened;
   }
 
   recordApplied(applicationId: string, submissionProof: SubmissionProof): Application {

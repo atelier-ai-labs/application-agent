@@ -329,7 +329,13 @@ export function parseGreenhouseResponse(
 
   const warnings: string[] = [];
   const queries = searchQueries(criteria);
-  const candidates: Array<{ record: GreenhouseJobRecord; rawText: string; job: JobPosting; sourcePublishedAt?: string }> = [];
+  const candidates: Array<{
+    record: GreenhouseJobRecord;
+    rawText: string;
+    job: JobPosting;
+    sourcePublishedAt?: string;
+    searchQueries: readonly string[];
+  }> = [];
   const rawJobs = payload.jobs.slice(0, retrievalCap);
   if (payload.jobs.length > rawJobs.length) {
     warnings.push(`Greenhouse retrieval cap applied: inspected ${rawJobs.length} of ${payload.jobs.length} published postings.`);
@@ -352,8 +358,9 @@ export function parseGreenhouseResponse(
         parsed.record.departments.map((department) => department.name).join(" "),
         normalized.job.description,
       ].filter(Boolean).join(" ").toLowerCase();
-      if (queries.length > 0 && !queries.some((query) => searchQueryMatches(query, searchText))) continue;
-      candidates.push({ record: parsed.record, ...normalized });
+      const matchedQueries = queries.filter((query) => searchQueryMatches(query, searchText));
+      if (queries.length > 0 && matchedQueries.length === 0) continue;
+      candidates.push({ record: parsed.record, ...normalized, searchQueries: matchedQueries });
     } catch (error) {
       warnings.push(`Skipped Greenhouse posting ${parsed.record.id}: ${error instanceof Error ? error.message : "normalization failed."}`);
     }
@@ -366,7 +373,7 @@ export function parseGreenhouseResponse(
   });
 
   return {
-    listings: candidates.slice(0, maxResults).map(({ record, rawText, job, sourcePublishedAt }) => ({
+    listings: candidates.slice(0, maxResults).map(({ record, rawText, job, sourcePublishedAt, searchQueries: matchedQueries }) => ({
       input: {
         rawText,
         sourceUrl: record.absoluteUrl,
@@ -376,6 +383,7 @@ export function parseGreenhouseResponse(
         isExample: false,
       },
       sourceRecordId: record.id,
+      ...(matchedQueries.length > 0 ? { searchQueries: matchedQueries } : {}),
       ...(sourcePublishedAt ? { sourcePublishedAt } : {}),
       discoveredAt: capturedAt,
       sourceMode: "live",

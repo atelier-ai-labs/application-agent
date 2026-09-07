@@ -99,17 +99,47 @@ function parseMoney(value: string): number | undefined {
 }
 
 function extractCompensation(text: string): JobPosting["compensation"] {
+  const compensationText = text.split(/\r?\n/).find((line) => /^compensation\s*:/i.test(line)) ?? text;
+  const currencySymbol = compensationText.match(/[€£$]/)?.[0];
+  const currencyCode = compensationText.match(/\b[A-Z]{3}\b/)?.[0];
+  const currency = currencyCode ?? (currencySymbol === "€" ? "EUR" : currencySymbol === "£" ? "GBP" : currencySymbol === "$" ? "USD" : undefined);
+  const period = compensationText.match(/\b(hourly|hour|weekly|week|fortnightly|fortnight|monthly|month|annual|yearly|year|yr)\b/i)?.[1]?.toLowerCase();
+  const normalizedPeriod = period === "hour" ? "hourly"
+    : period === "week" ? "weekly"
+      : period === "fortnight" ? "fortnightly"
+        : period === "month" ? "monthly"
+          : period === "yearly" || period === "year" || period === "yr" ? "annual"
+            : period;
+  const withMetadata = (minimum: number, maximum?: number): JobPosting["compensation"] => ({
+    minimum,
+    ...(maximum !== undefined ? { maximum } : {}),
+    ...(currency ? { currency } : {}),
+    ...(normalizedPeriod ? { period: normalizedPeriod } : {}),
+  });
+
   const range = text.match(/\$\s?[\d,]+(?:\.\d+)?k?\s*(?:-|–|—|to)\s*\$?\s?[\d,]+(?:\.\d+)?k?/i);
   if (range) {
     const values = range[0].split(/-|–|—|to/i).map(parseMoney).filter((value): value is number => value !== undefined);
     if (values.length === 2) {
-      return { minimum: values[0], maximum: values[1], currency: "USD" };
+      return withMetadata(values[0], values[1]);
     }
   }
 
-  const single = text.match(/\$\s?[\d,]+(?:\.\d+)?k?/i);
+  const codeRange = compensationText.match(/\b[A-Z]{3}\s*[\d,]+(?:\.\d+)?k?\s*(?:-|–|—|to)\s*(?:[A-Z]{3}\s*)?[\d,]+(?:\.\d+)?k?/);
+  if (codeRange) {
+    const values = codeRange[0].match(/[\d,]+(?:\.\d+)?k?/gi)?.map(parseMoney).filter((value): value is number => value !== undefined) ?? [];
+    if (values.length === 2) return withMetadata(values[0], values[1]);
+  }
+
+  const numericRange = compensationText.match(/[\d,]+(?:\.\d+)?k?\s*(?:-|–|—|to)\s*[\d,]+(?:\.\d+)?k?/i);
+  if (numericRange) {
+    const values = numericRange[0].split(/-|–|—|to/i).map(parseMoney).filter((value): value is number => value !== undefined);
+    if (values.length === 2) return withMetadata(values[0], values[1]);
+  }
+
+  const single = compensationText.match(/(?:\$|€|£)\s?[\d,]+(?:\.\d+)?k?/i);
   const value = single ? parseMoney(single[0]) : undefined;
-  return value === undefined ? undefined : { minimum: value, currency: "USD" };
+  return value === undefined ? undefined : withMetadata(value);
 }
 
 function extractSkills(lines: readonly string[]): {
@@ -160,6 +190,7 @@ function extractSkills(lines: readonly string[]): {
 function inferAts(sourceUrl: string | undefined, applicationUrl: string | undefined, text: string): string | undefined {
   const haystack = `${sourceUrl ?? ""} ${applicationUrl ?? ""} ${text}`.toLowerCase();
   if (haystack.includes("greenhouse")) return "Greenhouse";
+  if (haystack.includes("rippling.com")) return "Rippling";
   if (haystack.includes("lever.co")) return "Lever";
   if (haystack.includes("ashby")) return "Ashby";
   if (haystack.includes("workday")) return "Workday";
@@ -179,7 +210,9 @@ function inferEmploymentType(text: string): string | undefined {
   return match?.[1]?.replace(/-/g, " ").toLowerCase();
 }
 
-function inferSeniority(text: string): string | undefined {
+function inferSeniority(text: string, lines: readonly string[] = []): string | undefined {
+  const labeled = labelValue(lines, "seniority");
+  if (labeled) return labeled;
   const match = text.match(/\b(entry[- ]level|junior|mid[- ]level|senior|staff|principal|lead|director|manager)\b/i);
   return match?.[1]?.replace(/-/g, " ").toLowerCase();
 }
@@ -224,7 +257,9 @@ export function normalizeJobPosting(
     description: rawText,
     requiredSkills: skills.requiredSkills,
     preferredSkills: skills.preferredSkills,
-    ...(inferSeniority(rawText) ? { seniority: inferSeniority(rawText) } : {}),
+    // Seniority is a title signal. Looking through the full description would
+    // misclassify ordinary prose such as "lead projects" as a Lead role.
+    ...(inferSeniority(title, lines) ? { seniority: inferSeniority(title, lines) } : {}),
     ...(inferAts(sourceUrl, applicationUrl, rawText) ? { ats: inferAts(sourceUrl, applicationUrl, rawText) } : {}),
     capturedAt,
   };

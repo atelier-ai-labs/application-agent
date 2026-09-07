@@ -1,5 +1,10 @@
 # Application Agent: Preparation Core and Autonomous Career Agent
 
+For the current implementation audit, verified commands, and outstanding live
+configuration requirements, see [VERIFICATION.md](VERIFICATION.md). Live campaigns
+now ask for search criteria before creation. Direct Greenhouse postings can use
+the existing browser-preparation path, which still stops before final submission.
+
 This folder contains two related layers inside the Atelier HQ repository:
 
 1. **Application Preparation Core / Job Hunter Dashboard** — the original V0 workflow that accepts a candidate profile and pasted posting, then prepares one grounded packet for human review.
@@ -28,13 +33,13 @@ Career Agent introduces persistent campaigns and a caller-driven `runCampaign()`
 
 | Boundary | Current implementation | Reality |
 | --- | --- | --- |
-| Job source | `RemotiveJobSource("remotive-live")`, optional `JobReferenceSource(HttpJobDiscoveryProvider("brave-search-live"))`, configured `LeverJobSource("lever:<SITE>")`, configured `GreenhouseJobSource("greenhouse:<BOARD>")`, or `StaticJobSource("demo-local", ...)` | Remotive is broad structured listing discovery; Brave is bounded URL/reference discovery through the local Node host; Lever and Greenhouse are targeted employer/ATS board feeds; the static source is synthetic and offline |
+| Job source | `RemotiveJobSource("remotive-live")`, `HimalayasJobSource("himalayas-live")` in the background runtime, optional `JobReferenceSource(HttpJobDiscoveryProvider("brave-search-live"))`, configured `LeverJobSource("lever:<SITE>")`, configured `GreenhouseJobSource("greenhouse:<BOARD>")`, or `StaticJobSource("demo-local", ...)` | Remotive and Himalayas are structured remote discovery feeds; Brave is bounded URL/reference discovery through the local Node host; Lever and Greenhouse are targeted employer/ATS board feeds; the static source is synthetic and offline |
 | Preparation | Existing `ApplicationService` | Real local deterministic preparation core |
-| Executor | `SourceAwareApplicationExecutor` in the HQ browser surface; the loopback Node host injects the Node-only `LeverBrowserExecutor` backed by Playwright | Demo postings may receive visibly simulated proof; live Lever postings can be inspected/prepared by the real browser adapter, which stops before final Submit |
+| Executor | `SourceAwareApplicationExecutor` in the HQ browser surface; the loopback Node host injects the Node-only `LeverBrowserExecutor` backed by Playwright | Demo postings may receive visibly simulated proof; live postings can be inspected/prepared by the real browser adapter, while automatic submission is available only through the explicit server-only authority gate |
 | Tracker | `InMemoryJobTracker` for demo evidence; `HttpGoogleSheetsJobTracker` → the Node-only `GoogleSheetsJobTracker` for live confirmed applications | The canonical `Nate Job Search Tracker` is updated only after explicit Applied confirmation and configured server credentials |
-| Notifications | Durable `needs_input` attention events plus an injected server-only Slack adapter | Routine activity stays quiet; no client secrets or automatic submission |
+| Notifications | Durable `needs_input` attention events plus an injected server-only Slack adapter | Routine activity stays quiet; automatic submission can never be enabled from the client |
 
-The worker’s adapters are intentionally small interfaces: `JobSource`, `ApplicationExecutor`, and `JobTracker`. A source returns `JobSourceListing` values that are normalized through the existing `JobPosting` contract. It may return non-fatal warnings so partial provider results are visible. An executor may return a structured human blocker, `ready_to_submit`, a failure, or validated `SubmissionProof`. Only that proof allows `ApplicationService.recordApplied()` and the `application.applied` event. The real Lever browser executor never returns proof in this phase. A model response alone cannot establish external state.
+The worker’s adapters are intentionally small interfaces: `JobSource`, `ApplicationExecutor`, and `JobTracker`. A source returns `JobSourceListing` values that are normalized through the existing `JobPosting` contract. It may return non-fatal warnings so partial provider results are visible. An executor may return a structured human blocker, `ready_to_submit`, a failure, or validated `SubmissionProof`. Only that proof allows `ApplicationService.recordApplied()` and the `application.applied` event. The real browser executor returns proof only in the explicitly authorized automatic mode after deterministic confirmation; a model response alone cannot establish external state.
 
 ### Slack human attention
 
@@ -45,7 +50,8 @@ question, and buttons. A response is accepted only for an open event, the
 configured workspace/user/channel, and one of that event’s options. The core
 then records the explicit answer against that application blocker and invokes
 the existing execution-host resume port when one is supplied. It never writes
-the answer into the candidate profile and it never opens the final Submit lane.
+the answer into the candidate profile or authorizes submission; the execution
+host applies the separate campaign/host submission gate.
 
 Required server environment variables are `ATELIER_SLACK_BOT_TOKEN`,
 `ATELIER_SLACK_APP_TOKEN`, `ATELIER_SLACK_CHANNEL_ID`, and
@@ -58,6 +64,55 @@ keep every value outside `VITE_` variables. Start the transport with
 console; a background worker must construct the adapter with its existing
 Career Agent service and host-resume callback so Slack responses share that
 worker’s persisted repository.
+
+The background entrypoint is `npm run career-agent:runtime`. It owns a
+server-only file-backed repository at `.local/career-agent/state.json` by
+default, while the existing web console continues to use its separate
+browser-local state. The runtime requires a private profile file and Slack
+configuration; it does not require Vite. Start the existing loopback browser
+host separately when `ATELIER_CAREER_AGENT_BROWSER_ENABLED=false`.
+
+### Job search intent
+
+Campaigns may carry an optional provider-neutral `JobSearchIntent` with bounded
+primary, adjacent, secondary, and optional broad role lanes; preferred and
+excluded seniority terms; title exclusions; location/remote preference;
+employment type; compensation floor; and `targeted`, `balanced`, or `broad`
+search breadth. The runtime loads the private intent from
+`.local/career-agent/search-intent.json` by default, or from
+`ATELIER_CAREER_AGENT_SEARCH_INTENT_FILE`. The ignored file is user intent, not
+candidate evidence: it drives bounded query planning and deterministic title
+filters, while `assessFit()` and application policy remain unchanged.
+
+The public synthetic shape is intentionally small:
+
+```json
+{
+  "primaryLanes": ["Platform Engineer"],
+  "adjacentLanes": ["AI Platform Engineer"],
+  "secondaryLanes": ["Software Engineer"],
+  "broadLanes": ["Production Engineer"],
+  "preferredSeniorities": ["mid-level"],
+  "excludedSeniorities": ["principal"],
+  "excludedTitleTerms": ["architect"],
+  "locations": ["United States"],
+  "remotePreference": "remote_preferred",
+  "employmentTypes": ["full time"],
+  "breadth": "balanced"
+}
+```
+
+The planner deduplicates and caps the normalized intent at 24 role searches per
+campaign cycle. Remotive receives the selected terms but keeps its existing
+single-request/local-OR limitation; the background-only Himalayas adapter uses
+the filtered JSON endpoint for at most three deterministic round-robin lane
+queries, one page of at most 20 jobs per query, and keeps unsupported salary and
+exclusion policy checks local; Lever and Greenhouse continue to fetch only
+explicitly configured watchlists and filter locally; Brave translates the
+bounded plan into its existing capped web queries. Dedupe records the matching
+query terms in source observations. Provider limitations do not rewrite the
+stored intent, and preferred seniority remains a preference rather than a
+silent hard rejection.
 
 ### Browser execution host
 
@@ -154,6 +209,39 @@ To add a real source, implement `JobSource.discover(criteria, context)`, preserv
 Remotive documents one `search` term and a `limit` parameter. The live response currently observed did not honor those query parameters, so the adapter sends a single search term only when one lane is configured, then always applies deterministic local OR matching for multiple `searchQueries`, sorts by the provider publication timestamp, and caps the result before normalization. Campaign role lanes, location, remote, employment, salary, exclusions, and final safety checks remain local policy decisions; the adapter does not claim the provider applied them. Remotive’s public feed is remote-only, has delayed listings, should not be polled frequently, and includes terms restricting downstream third-party submission. This phase uses it for current discovery and preparation only.
 
 Each accepted listing retains `sourceId: "remotive-live"`, the provider job ID, the Remotive source URL, `sourcePublishedAt` when valid, a capture/discovery timestamp, and `sourceMode: "live"`. Remotive does not provide a verified employer application URL in this response, so `applicationUrl` remains absent rather than being set to the Remotive listing page. Provider HTML is converted to plain text before it reaches the shared posting contract.
+
+`HimalayasJobSource` is registered only by the server-side background runtime as
+`himalayas-live`; the browser workspace does not import or call this adapter.
+It calls `GET https://himalayas.app/jobs/api/search` with the provider-supported
+keyword, country/worldwide, preferred-seniority, employment-type, recent-sort,
+and first-page parameters. The adapter never sends candidate profile data, has
+no credential path, and stops at three deterministic lane queries per cycle.
+Each accepted record keeps the official `guid`, provider application link when
+valid, normalized publication/expiry timestamps, location restrictions,
+remote-only semantics, employment type, seniority values, and salary bounds with
+currency and pay period. Himalayas application links remain
+`discoverable_only`; the source is not treated as an ATS and cannot authorize
+browser execution or submission. The API is refreshed daily, is rate limited,
+and returns HTTP 429 when the limit is exceeded; the adapter reports that state
+without retrying or hiding partial results. Any UI displaying these records
+must mention Himalayas and link back to `https://himalayas.app`.
+
+The adapter follows the official [Himalayas API reference](https://himalayas.app/docs/remote-jobs-api)
+and [OpenAPI schema](https://himalayas.app/docs/openapi.json). The live feed
+observed during acceptance used country-name strings, numeric UTC offsets, and
+Unix-second publication/expiry values in places where the published schema
+describes country objects, UTC strings, and Unix milliseconds; the normalizer
+accepts both shapes so this drift remains an explicit compatibility boundary.
+
+For pursued strong/good jobs whose Himalayas application link remains
+provider-hosted, the server runtime can perform one bounded destination-
+enrichment pass from a reviewed public-evidence list. A candidate must match the
+company and role, be current, be an application page, and pass the existing URL
+trust/classification rules. A verified destination updates only the normalized
+`applicationUrl` and application packet; the Himalayas `sourceUrl` and source
+observation remain intact. Unresolved or ambiguous jobs stay pursued and are
+not silently converted into rejects. The evidence file is server-only, ignored
+by Git, capped at eight candidates, and contains no candidate profile data.
 
 ### Targeted Lever source
 
@@ -393,13 +481,13 @@ The parent `src/` directory integrates the capability through the HQ registry, a
 
 `profile.example.json` is a safe schema template with obvious placeholder values. The bundled example profile is also explicitly marked `profileKind: "example"` and is labelled in the UI. Do not replace it in the repository with real personal information.
 
-To use a private profile:
+To use a private profile in the engineering console:
 
 1. Copy `profile.example.json` to a local file such as `profile.local.json`.
 2. Replace placeholders with verified facts only.
 3. Load the JSON through **Load private profile JSON** in the Application Agent page.
 
-The UI validates the profile before storing it in browser local storage. `profile.local.json` is ignored by Git. Existing applications are not rewritten when a profile is changed; new packets use the active profile.
+The UI validates the profile before storing it in browser local storage. `profile.local.json` is ignored by Git. Existing applications are not rewritten when a profile is changed; new packets use the active profile. Do not manually transcribe resume facts into a second profile: the background workflow in `automation/README.md` imports explicit facts from a private PDF/DOCX and refreshes the server-only profile plus its ignored artifact mapping.
 
 The profile is the factual source for identity, contact information, employment, education, skills, projects, certifications, work preferences, work authorization, resume families, and approved reusable answers. The system does not fill gaps by inference.
 
@@ -425,19 +513,20 @@ Allowed transitions are:
 ```text
 discovered ──→ evaluated ──→ preparing ──→ needs_input ──→ ready_for_review
       │             │             │              │                  │
-      └─────────────┴─────────────┴──────────────┴──→ failed         └──→ applied (manual confirmation)
+      └─────────────┴─────────────┴──────────────┴──→ failed         └──→ applied (manual or authorized automatic confirmation)
 failed ──→ discovered
 ```
 
-The packet UI’s V0 boundary still exposes no submission path. `submitApplication(applicationId, approval)` requires an explicit `SubmissionApproval` value, then still raises `SubmissionDisabledError`. The Career Agent may call the separate `recordApplied()` method after an injected executor returns validated external or explicitly simulated proof, or may use its explicit manual-confirmation path after the user submits. These paths record the result and do not themselves contact an employer. The Playwright Lever executor stops earlier at `ready_to_submit` and cannot produce proof.
+The packet UI’s V0 boundary still exposes no submission path. `submitApplication(applicationId, approval)` requires an explicit `SubmissionApproval` value, then still raises `SubmissionDisabledError`. The Career Agent may call the separate `recordApplied()` method after an injected executor returns validated external or explicitly simulated proof, or may use its explicit manual-confirmation path after the user submits. These paths record the result and do not themselves contact an employer. The Playwright browser executor stops earlier at `ready_to_submit` unless both campaign authority and the server-only execution-host gate explicitly enable automatic submission.
 
-For a live browser-prepared packet, the user opens the employer page, performs
-the final Submit action, and then explicitly selects **Mark as submitted** in
-Career Agent. That confirmation records a `manualSubmissionConfirmation` and
-transitions the application/career job to `applied`; reaching
-`ready_to_submit` alone never does. `application.applied` is emitted before
-the downstream tracker call. A real tracker failure leaves the application
-Applied and records `trackerSync.status: "failed"` for retry.
+For a live browser-prepared packet under the default manual policy, the user
+opens the employer page, performs the final Submit action, and then explicitly
+selects **Mark as submitted** in Career Agent. Under the separately authorized
+automatic policy, the server executor may perform that final action only after
+all safe fields are satisfied and deterministic confirmation is observed.
+Reaching `ready_to_submit` alone never does. `application.applied` is emitted
+before the downstream tracker call. A real tracker failure leaves the
+application Applied and records `trackerSync.status: "failed"` for retry.
 
 ## Grounding and provenance
 
@@ -530,6 +619,6 @@ The local campaign acceptance flow is: create the demo campaign → start → ru
 
 ## Known limitations and roadmap
 
-The preparation core has no URL ingestion or real resume PDF/DOCX generation. Career Agent additionally has no scheduler, ChatGPT delivery, authentication, or multi-user storage. The Google Sheets adapter is implemented behind the local Node host; the local OAuth client/token are not configured in this checkout, although the connected Sheets workflow completed one controlled temporary live upsert/readback/repeat/cleanup against the canonical tab. The Lever browser adapter supports only the common visible simple controls it can classify safely; it does not fill arbitrary custom widgets, bypass CAPTCHA/MFA, persist sessions to disk, or click Submit. The Node host is local-only, ephemeral, and not an authenticated remote service; a host restart loses its live browser session and the UI marks it interrupted. Remotive is a single public remote feed rather than broad job-market coverage; its public data is delayed and its terms do not authorize blindly forwarding listings to third-party submission systems. Brave broad discovery is a bounded, credentialed URL-search experiment with no claim of comprehensive coverage; it does not fetch result pages, scrape HTML, or resolve Ashby/Workday/custom/unknown references. Lever and Greenhouse are targeted only at explicitly configured employer SITE/board identifiers and are not global ATS searches. Greenhouse structured postings are not connected to a browser executor yet, even when their official hosted URL is classified as actionable for future executor work. Local storage is a single-browser workspace and is not a durable server-side record. The static source, simulated executor, and in-memory tracker are test/demo infrastructure, not production integrations.
+The preparation core does not generate resume PDF/DOCX files. Career Agent now has a server-only deterministic local PDF/DOCX importer and an ignored family-to-artifact manifest; the importer adds only explicitly supported resume facts and leaves consequential answers for the existing human-attention path. Career Agent additionally has no scheduler, ChatGPT delivery, authentication, or multi-user storage. The Google Sheets adapter is implemented behind the local Node host; the local OAuth client/token are not configured in this checkout, although the connected Sheets workflow completed one controlled temporary live upsert/readback/repeat/cleanup against the canonical tab. The browser adapter supports only the common visible controls it can classify safely; it does not fill arbitrary custom widgets, bypass CAPTCHA/MFA, or persist sessions to disk. Final submission remains disabled unless the server-only automatic authority gate is explicitly enabled. The Node host is local-only, ephemeral, and not an authenticated remote service; a host restart loses its live browser session and the UI marks it interrupted. Remotive is a single public remote feed rather than broad job-market coverage; its public data is delayed and its terms do not authorize blindly forwarding listings to third-party submission systems. Brave broad discovery is a bounded, credentialed URL-search experiment with no claim of comprehensive coverage; it does not fetch result pages, scrape HTML, or resolve Ashby/Workday/custom/unknown references. Lever and Greenhouse are targeted only at explicitly configured employer SITE/board identifiers and are not global ATS searches. Local storage is a single-browser workspace and is not a durable server-side record. The static source, simulated executor, and in-memory tracker are test/demo infrastructure, not production integrations.
 
-The next sensible integration is a safe local/private resume-artifact workflow and expanded verified field fixtures. Any future submission path must require deliberate user approval, external proof, and the current policy/provenance model. Do not add a scheduler or multi-agent runtime until a source and executor are production-authorized.
+The next practical step is to place a real private PDF/DOCX under the ignored resume directory, run the importer, review its non-sensitive counts, and perform one bounded upload check. Any automatic submission path requires deliberate server-side authority, external proof, and the current policy/provenance model. Do not add a scheduler or multi-agent runtime until a source and executor are production-authorized.

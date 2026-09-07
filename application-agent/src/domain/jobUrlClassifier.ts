@@ -1,6 +1,6 @@
 import { canonicalJobUrl } from "./scout";
 
-export type AtsClassificationKind = "lever" | "greenhouse" | "ashby" | "workday" | "custom" | "unknown";
+export type AtsClassificationKind = "lever" | "greenhouse" | "rippling" | "ashby" | "workday" | "custom" | "unknown";
 
 export interface JobUrlClassification {
   kind: AtsClassificationKind;
@@ -12,6 +12,7 @@ export interface JobUrlClassification {
 
 const LEVER_HOSTS = new Set(["jobs.lever.co", "jobs.eu.lever.co"]);
 const GREENHOUSE_HOSTS = new Set(["boards.greenhouse.io", "job-boards.greenhouse.io"]);
+const RIPPLING_HOSTS = new Set(["ats.rippling.com"]);
 const ASHBY_HOSTS = new Set(["jobs.ashbyhq.com", "jobs.ashby.com"]);
 
 function decodeSegment(value: string): string | undefined {
@@ -84,6 +85,20 @@ export function classifyJobUrl(value: string): JobUrlClassification {
     };
   }
 
+  if (RIPPLING_HOSTS.has(host) &&
+    (segments.length === 3 || (segments.length === 4 && segments[3].toLowerCase() === "apply")) &&
+    segments[0].length > 0 &&
+    segments[1].toLowerCase() === "jobs" &&
+    segments[2].length > 0) {
+    return {
+      kind: "rippling",
+      canonicalUrl,
+      siteIdentifier: segments[0],
+      postingIdentifier: segments[2],
+      evidence: [`hostname:${host}`, "path:<organization>/jobs/<posting-id>[/apply]"],
+    };
+  }
+
   if (ASHBY_HOSTS.has(host) && segments.length >= 2 && segments[0].length > 0 && segments[1].length > 0) {
     return {
       kind: "ashby",
@@ -108,4 +123,18 @@ export function classifyJobUrl(value: string): JobUrlClassification {
     canonicalUrl,
     evidence: ["valid HTTP(S) URL did not match a supported ATS hostname/path."],
   };
+}
+
+/** Rippling exposes the public posting and form as adjacent routes. */
+export function ripplingApplicationUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const classification = classifyJobUrl(value);
+  if (classification.kind !== "rippling" || !classification.canonicalUrl) return undefined;
+  return classification.canonicalUrl.endsWith("/apply")
+    ? classification.canonicalUrl
+    : `${classification.canonicalUrl}/apply`;
+}
+
+export function isVerifiedRipplingApplicationUrl(value: string | undefined): boolean {
+  return classifyJobUrl(value ?? "").kind === "rippling" && Boolean(ripplingApplicationUrl(value));
 }
