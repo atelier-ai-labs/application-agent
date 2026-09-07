@@ -36,6 +36,7 @@ import { loadCandidateProfile } from "../domain/profile";
 import type {
   AnswerValue,
   CandidateProfile,
+  JobIntakeInput,
 } from "../domain/types";
 import type {
   Campaign,
@@ -62,6 +63,7 @@ import {
 } from "../service/executionHostClient";
 import { HttpGoogleSheetsJobTracker } from "../service/trackerClient";
 import { HttpJobDiscoveryProvider } from "../service/jobDiscoveryClient";
+import type { JobSearchIntent } from "../domain/searchIntent";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Career Agent could not complete that action.";
@@ -199,11 +201,13 @@ export function useCareerAgentWorkspace() {
     }
   }, [refresh, service]);
 
-  const createLiveCampaign = useCallback((): Campaign | null => {
+  const createLiveCampaign = useCallback((searchIntent?: JobSearchIntent): Campaign | null => {
     setError(null);
     setNotice(null);
     try {
-      const campaign = service.createCampaign(liveCampaignInput);
+      const campaign = service.createCampaign(searchIntent
+        ? createLiveCampaignInput(leverSites, greenhouseBoards, broadDiscoveryEnabled, searchIntent)
+        : liveCampaignInput);
       refresh();
       const targetedParts = [
         leverSites.length > 0 ? `${leverSites.length} configured Lever site${leverSites.length === 1 ? "" : "s"}` : "",
@@ -217,7 +221,7 @@ export function useCareerAgentWorkspace() {
       setError(errorMessage(actionError));
       return null;
     }
-  }, [broadDiscoveryEnabled, greenhouseBoards.length, leverSites.length, liveCampaignInput, refresh, service]);
+  }, [broadDiscoveryEnabled, greenhouseBoards, leverSites, liveCampaignInput, refresh, service]);
 
   const activate = useCallback((campaignId: string): boolean => {
     setBusy(true);
@@ -281,6 +285,24 @@ export function useCareerAgentWorkspace() {
       setError(errorMessage(actionError));
       refresh();
       return false;
+    } finally {
+      setBusy(false);
+    }
+  }, [refresh, service]);
+
+  const addCuratedJob = useCallback(async (campaignId: string, input: JobIntakeInput): Promise<CareerJob | null> => {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const job = await service.processCuratedJob(campaignId, input);
+      refresh();
+      setNotice(`${job.job.company} — ${job.job.title} evaluated as ${job.fit?.classification ?? "unclassified"}. No application was submitted.`);
+      return job;
+    } catch (actionError) {
+      setError(errorMessage(actionError));
+      refresh();
+      return null;
     } finally {
       setBusy(false);
     }
@@ -502,6 +524,7 @@ export function useCareerAgentWorkspace() {
     sourceModeFor: useCallback((campaign: Campaign): JobSourceMode => {
       if (campaign.lastDiscovery?.sourceModes.includes("live")) return "live";
       if (campaign.lastDiscovery?.sourceModes.includes("demo")) return "demo";
+      if (service.listJobs(campaign.id).some((job) => job.sourceMode === "live")) return "live";
       return campaign.searchSources.includes(REMOTIVE_SOURCE_ID) ||
         campaign.searchSources.some((sourceId) => sourceId.startsWith("lever:")) ||
         campaign.searchSources.some((sourceId) => sourceId.startsWith("greenhouse:")) ||
@@ -510,10 +533,11 @@ export function useCareerAgentWorkspace() {
         || campaign.sourceConfigs?.some((source) => source.type === "greenhouse" || source.type === "brave_search")
         ? "live"
         : "demo";
-    }, []),
+    }, [service]),
     activate,
     pause,
     runNow,
+    addCuratedJob,
     resolveBlocker,
     startBrowserExecution,
     resumeBrowserExecution,

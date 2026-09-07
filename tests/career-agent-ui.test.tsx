@@ -5,6 +5,7 @@ import { AppRoutes } from "../src/App";
 import {
   clearCareerRepositoryStorage,
   resetDefaultCareerRepository,
+  getDefaultCareerRepository,
 } from "../application-agent/src";
 
 function renderAt(path: string) {
@@ -66,13 +67,22 @@ describe("Autonomous Career Agent HQ surface", () => {
   it("exposes a distinct live campaign without presenting it as demo data", async () => {
     renderAt("/career-agent");
     fireEvent.click(screen.getAllByRole("button", { name: /Create live campaign/i })[0]);
+    fireEvent.change(screen.getByLabelText("Target roles"), { target: { value: "platform engineer, frontend developer" } });
+    fireEvent.change(screen.getByLabelText("Locations"), { target: { value: "United States" } });
+    fireEvent.change(screen.getByLabelText("Exclude title terms"), { target: { value: "principal, director" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save live campaign" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Live remote engineering search" })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Live platform engineer search" })).toBeInTheDocument();
     });
     expect(screen.getByText("LIVE SOURCE")).toBeInTheDocument();
     expect(screen.getByText("LIVE · Remotive")).toBeInTheDocument();
     expect(screen.getByText("No discovery run yet")).toBeInTheDocument();
     expect(screen.getByText(/No employer was contacted/)).toBeInTheDocument();
+    const campaign = getDefaultCareerRepository().listCampaigns()[0];
+    expect(campaign.searchCriteria.roleLanes).toEqual(["platform engineer", "frontend developer"]);
+    expect(campaign.searchCriteria.locations).toEqual(["United States"]);
+    expect(campaign.searchCriteria.excludedTitleTerms).toEqual(["principal", "director"]);
+    expect(campaign.submissionPolicy.authority).toBe("never");
   });
 });

@@ -38,6 +38,9 @@ export function attentionCategoryForEvent(
   }
   if (type === "campaign.review_needed") {
     if (hint.includes("tracker")) return hint.includes("auth") || hint.includes("config") ? "tracker_auth" : "tracker_failure";
+    if (hint.includes("provider_configuration") || hint.includes("configuration") || hint.includes("profile") || hint.includes("resume_family")) {
+      return "provider_configuration";
+    }
     if (hint.includes("policy") || hint.includes("cap") || hint.includes("hold") || hint.includes("reject")) return "policy_decision";
     if (hint.includes("preparation") || hint.includes("unknown")) return "candidate_fact_missing";
     return "operational_failure";

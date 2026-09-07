@@ -17,11 +17,52 @@ import type {
   CampaignSnapshot,
   DiscoverySummary,
 } from "../domain/campaignTypes";
+import { HIMALAYAS_SOURCE_ID } from "../domain/campaignTypes";
 import { discoveryCoverageRatios } from "../domain/jobDiscovery";
 import { eventLabel } from "../domain/notifications";
 import type { ExecutionRunTrace } from "../domain/executionTrace";
 import { useCareerAgentWorkspace } from "./useCareerAgentWorkspace";
+import type { JobSearchIntent } from "../domain/searchIntent";
+import type { JobIntakeInput } from "../domain/types";
 import "./application-agent.css";
+
+function LiveSearchForm({ busy, onCreate, onCancel }: {
+  busy: boolean;
+  onCreate: (intent: JobSearchIntent) => void;
+  onCancel: () => void;
+}) {
+  const [roles, setRoles] = useState("engineer, developer, architect");
+  const [locations, setLocations] = useState("");
+  const [excluded, setExcluded] = useState("");
+  const [remoteOnly, setRemoteOnly] = useState(true);
+  const split = (value: string) => value.split(",").map((term) => term.trim()).filter(Boolean);
+  return (
+    <section className="agent-panel" aria-labelledby="new-search-heading">
+      <h2 id="new-search-heading">Configure your search</h2>
+      <p>Separate multiple roles, locations, or excluded title terms with commas. Public feeds may have limited location coverage.</p>
+      <form onSubmit={(event) => {
+        event.preventDefault();
+        onCreate({
+          primaryLanes: split(roles), adjacentLanes: [], secondaryLanes: [],
+          preferredSeniorities: [], excludedSeniorities: [], excludedTitleTerms: split(excluded),
+          locations: split(locations), remotePreference: remoteOnly ? "remote_only" : "any",
+          employmentTypes: ["full time"], breadth: "targeted",
+        });
+      }}>
+        <div className="agent-form-grid">
+          <label>Target roles<input required value={roles} onChange={(event) => setRoles(event.target.value)} /></label>
+          <label>Locations<input value={locations} onChange={(event) => setLocations(event.target.value)} placeholder="Any location" /></label>
+          <label>Exclude title terms<input value={excluded} onChange={(event) => setExcluded(event.target.value)} placeholder="Optional" /></label>
+          <label><input type="checkbox" checked={remoteOnly} onChange={(event) => setRemoteOnly(event.target.checked)} /> Remote only</label>
+        </div>
+        <div className="agent-form-actions">
+          <button className="agent-primary-button" type="submit" disabled={busy || split(roles).length === 0}>Save live campaign</button>
+          <button className="agent-secondary-button" type="button" onClick={onCancel}>Cancel</button>
+        </div>
+      </form>
+    </section>
+  );
+}
 
 function readable(value: string): string {
   return value.replace(/_/g, " ");
@@ -33,10 +74,12 @@ function jobStatusLabel(status: CareerJob["status"]): string {
 
 function sourceDisplayName(sourceId: string): string {
   if (sourceId === "remotive-live") return "Remotive";
+  if (sourceId === HIMALAYAS_SOURCE_ID) return "Himalayas";
   if (sourceId === "demo-local") return "Demo";
   if (sourceId.startsWith("references:brave-search")) return "Brave broad search";
   if (sourceId.startsWith("lever:")) return `Lever · ${sourceId.slice("lever:".length)}`;
   if (sourceId.startsWith("greenhouse:")) return `Greenhouse · ${sourceId.slice("greenhouse:".length)}`;
+  if (sourceId === "curated-live") return "User-selected posting";
   return sourceId;
 }
 
@@ -47,9 +90,6 @@ function jobProvenanceLabel(job: CareerJob): string {
 }
 
 function jobActionabilityLabel(job: CareerJob): string {
-  if (job.actionability === "actionable" && job.sourceId.startsWith("greenhouse:") && job.job.applicationUrl) {
-    return "Verified application URL · structured only";
-  }
   return job.actionability === "actionable" && job.job.applicationUrl
     ? "Verified application URL"
     : "Discovery only";
@@ -83,6 +123,7 @@ export function CareerAgentPage() {
     ? workspace.campaigns.find((campaign) => campaign.id === campaignId)
     : workspace.campaigns[0];
   const snapshot = selectedCampaign ? workspace.snapshotFor(selectedCampaign.id) : null;
+  const [showSearchForm, setShowSearchForm] = useState(false);
 
   function createDemo() {
     const campaign = workspace.createDemoCampaign();
@@ -90,7 +131,12 @@ export function CareerAgentPage() {
   }
 
   function createLive() {
-    const campaign = workspace.createLiveCampaign();
+    setShowSearchForm(true);
+  }
+
+  function saveSearch(intent: JobSearchIntent) {
+    const campaign = workspace.createLiveCampaign(intent);
+    if (campaign) setShowSearchForm(false);
     if (campaign) navigate(`/career-agent/${campaign.id}`);
   }
 
@@ -124,6 +170,7 @@ export function CareerAgentPage() {
 
       {workspace.error ? <div className="agent-notice agent-notice-error">{workspace.error}</div> : null}
       {workspace.notice ? <div className="agent-notice">{workspace.notice}</div> : null}
+      {showSearchForm ? <LiveSearchForm busy={workspace.busy} onCreate={saveSearch} onCancel={() => setShowSearchForm(false)} /> : null}
 
       <div className="career-workspace-grid">
         <aside className="career-campaign-rail">
@@ -191,6 +238,7 @@ export function CareerAgentPage() {
               onActivate={workspace.activate}
               onPause={workspace.pause}
               onRun={workspace.runNow}
+              onAddCuratedJob={workspace.addCuratedJob}
               onComplete={workspace.markOfferAccepted}
               onResolve={workspace.resolveBlocker}
               onStartExecution={workspace.startBrowserExecution}
@@ -267,6 +315,7 @@ interface CampaignWorkspaceProps {
   onActivate: (campaignId: string) => boolean;
   onPause: (campaignId: string) => boolean;
   onRun: (campaignId: string) => Promise<boolean>;
+  onAddCuratedJob: (campaignId: string, input: JobIntakeInput) => Promise<CareerJob | null>;
   onComplete: (campaignId: string) => boolean;
   onResolve: (campaignId: string, jobId: string, blockerId: string, value: string) => Promise<CareerJob | null>;
   onStartExecution: (campaignId: string, jobId: string) => Promise<boolean>;
@@ -283,6 +332,7 @@ function CampaignWorkspace({
   onActivate,
   onPause,
   onRun,
+  onAddCuratedJob,
   onComplete,
   onResolve,
   onStartExecution,
@@ -331,6 +381,13 @@ function CampaignWorkspace({
         ) : null}
       </section>
 
+      <CuratedJobPanel
+        campaignId={campaign.id}
+        active={campaign.status === "active"}
+        busy={busy}
+        onAdd={onAddCuratedJob}
+      />
+
       <DiscoveryStrip discovery={campaign.lastDiscovery} sourceMode={sourceMode} />
       <RunTraceNote trace={campaign.lastRunTrace} />
 
@@ -373,7 +430,7 @@ function CampaignWorkspace({
             <p>
               This campaign requests current postings from its configured live sources. No employer was
               contacted by this browser surface; it never writes to the tracker or submits an application.
-              Actionable Lever packets
+              Actionable Lever, Greenhouse, or Rippling packets
               can be prepared through the separately started local Node browser host, which always stops
               before final submission; an explicit successful-submission confirmation may then sync the
               Applied record through that trusted host.
@@ -390,6 +447,98 @@ function CampaignWorkspace({
         <span className="boundary-status"><span className="system-indicator" /> {sourceMode === "live" ? "Discovery live · browser host separate" : "Simulated only"}</span>
       </section>
     </>
+  );
+}
+
+function CuratedJobPanel({
+  campaignId,
+  active,
+  busy,
+  onAdd,
+}: {
+  campaignId: string;
+  active: boolean;
+  busy: boolean;
+  onAdd: (campaignId: string, input: JobIntakeInput) => Promise<CareerJob | null>;
+}) {
+  const [rawText, setRawText] = useState("");
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [applicationUrl, setApplicationUrl] = useState("");
+  const [companyHint, setCompanyHint] = useState("");
+  const [titleHint, setTitleHint] = useState("");
+
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const created = await onAdd(campaignId, {
+      rawText,
+      sourceUrl,
+      applicationUrl,
+      ...(companyHint.trim() ? { companyHint } : {}),
+      ...(titleHint.trim() ? { titleHint } : {}),
+    });
+    if (created) {
+      setRawText("");
+      setSourceUrl("");
+      setApplicationUrl("");
+      setCompanyHint("");
+      setTitleHint("");
+    }
+  }
+
+  return (
+    <section className="agent-panel career-curated-panel" aria-labelledby="curated-job-heading">
+      <div className="agent-panel-heading">
+        <div>
+          <p className="eyebrow">Selected posting</p>
+          <h2 id="curated-job-heading">Add one from the daily hunt</h2>
+        </div>
+        <span className="agent-panel-index">BOUNDED</span>
+      </div>
+      <p className="agent-panel-intro">
+        Paste one public posting and its application link. The campaign evaluates it with the existing
+        fit and pursuit policy; this does not broaden discovery or submit anything.
+      </p>
+      {!active ? <p className="career-muted-copy">Start this campaign before adding a selected posting.</p> : null}
+      <form className="agent-intake-form" onSubmit={(event) => void submit(event)}>
+        <div className="agent-form-grid">
+          <label>
+            <span>Company <small>optional if in posting</small></span>
+            <input value={companyHint} onChange={(event) => setCompanyHint(event.target.value)} disabled={!active || busy} />
+          </label>
+          <label>
+            <span>Role <small>optional if in posting</small></span>
+            <input value={titleHint} onChange={(event) => setTitleHint(event.target.value)} disabled={!active || busy} />
+          </label>
+        </div>
+        <label>
+          <span>Posting text <small>required</small></span>
+          <textarea
+            value={rawText}
+            onChange={(event) => setRawText(event.target.value)}
+            placeholder="Paste the public job posting text…"
+            minLength={20}
+            required
+            rows={7}
+            disabled={!active || busy}
+          />
+        </label>
+        <div className="agent-form-grid">
+          <label>
+            <span>Posting/source URL <small>required</small></span>
+            <input type="url" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="https://…" required disabled={!active || busy} />
+          </label>
+          <label>
+            <span>Application URL <small>required</small></span>
+            <input type="url" value={applicationUrl} onChange={(event) => setApplicationUrl(event.target.value)} placeholder="https://…" required disabled={!active || busy} />
+          </label>
+        </div>
+        <div className="agent-form-actions">
+          <button className="agent-secondary-button" type="submit" disabled={!active || busy}>
+            {busy ? "Evaluating…" : "Evaluate selected posting"} <ArrowUpRight size={14} />
+          </button>
+        </div>
+      </form>
+    </section>
   );
 }
 
@@ -635,7 +784,7 @@ function AttentionJob({
         ) : null}
         {job.job.sourceUrl ? (
           <a className="resource-link" href={job.job.sourceUrl} target="_blank" rel="noreferrer">
-            Open posting <ExternalLink size={13} />
+            {job.sourceId === HIMALAYAS_SOURCE_ID ? "Open source link" : "Open posting"} <ExternalLink size={13} />
           </a>
         ) : null}
         {job.actionability === "actionable" && job.job.applicationUrl ? (
@@ -789,6 +938,7 @@ function RecentActivity({ events }: { events: readonly CareerEvent[] }) {
 }
 
 function CampaignPolicy({ campaign }: { campaign: Campaign }) {
+  const usesHimalayas = campaign.searchSources.includes(HIMALAYAS_SOURCE_ID);
   return (
     <section className="agent-panel career-policy-panel" aria-labelledby="career-policy-heading">
       <div className="agent-panel-heading">
@@ -798,17 +948,26 @@ function CampaignPolicy({ campaign }: { campaign: Campaign }) {
         </div>
       </div>
       <dl className="career-policy-list">
+        <div><dt>Target roles</dt><dd>{campaign.searchCriteria.roleLanes.join(", ") || "Any role"}</dd></div>
+        <div><dt>Locations</dt><dd>{campaign.searchCriteria.locations.join(", ") || "Any location"}</dd></div>
+        <div><dt>Remote only</dt><dd>{campaign.searchCriteria.remoteOnly ? "Yes" : "No"}</dd></div>
+        <div><dt>Excluded titles</dt><dd>{campaign.searchCriteria.excludedTitleTerms?.join(", ") || "None"}</dd></div>
         <div><dt>Fit pursuit</dt><dd>Strong / good pursue · stretch hold · weak reject</dd></div>
         <div><dt>Submission</dt><dd>{readable(campaign.submissionPolicy.authority)}</dd></div>
         <div><dt>Daily cap</dt><dd>{campaign.dailyApplicationLimit} applications</dd></div>
         <div><dt>Sources</dt><dd>{campaign.searchSources.map(sourceDisplayName).join(", ") || "None configured"}</dd></div>
       </dl>
+      {usesHimalayas ? (
+        <p className="career-policy-footnote">
+          Himalayas is the source of these remote listings. <a href="https://himalayas.app" target="_blank" rel="noreferrer">Visit Himalayas</a>.
+        </p>
+      ) : null}
       <p className="career-policy-footnote">A model cannot grant authority. Explicit policy, grounding, and external proof are required.</p>
     </section>
   );
 }
 
-function BrowserExecutionControls({
+export function BrowserExecutionControls({
   job,
   busy,
   compact = false,
@@ -823,9 +982,17 @@ function BrowserExecutionControls({
   onResumeExecution: CampaignWorkspaceProps["onResumeExecution"];
   onCancelExecution: CampaignWorkspaceProps["onCancelExecution"];
 }) {
-  // Greenhouse actionability means its hosted application URL was verified,
-  // but this build intentionally has no Greenhouse browser executor yet.
-  if (!job.applicationId || job.actionability !== "actionable" || !job.job.applicationUrl || !job.sourceId.startsWith("lever:")) return null;
+  const isVerifiedGreenhouseDestination = job.destinationResolution?.status === "resolved" &&
+    job.destinationResolution.ats === "Greenhouse" &&
+    job.destinationResolution.actionable === true &&
+    job.destinationResolution.destinationUrl === job.job.applicationUrl;
+  const isVerifiedRipplingDestination = job.destinationResolution?.status === "resolved" &&
+    job.destinationResolution.ats === "Rippling" &&
+    job.destinationResolution.actionable === true &&
+    job.destinationResolution.destinationUrl === job.job.applicationUrl;
+  const isSupportedBrowserDestination = job.sourceId.startsWith("lever:") || job.sourceId.startsWith("greenhouse:") ||
+    isVerifiedGreenhouseDestination || isVerifiedRipplingDestination;
+  if (!job.applicationId || job.actionability !== "actionable" || !job.job.applicationUrl || !isSupportedBrowserDestination) return null;
 
   const execution = job.execution;
   const isRealLocal = execution?.mode === "real_local" && Boolean(execution.hostExecutionId);
@@ -932,7 +1099,7 @@ function JobHistory({
                   <span>{sourceDisplayName(job.sourceId)}</span>
                   <span className={`career-actionability ${jobActionabilityClass(job)}`}>{jobActionabilityLabel(job)}</span>
                   {job.job.sourceUrl ? (
-                    <a href={job.job.sourceUrl} target="_blank" rel="noreferrer">Open posting <ExternalLink size={11} /></a>
+                    <a href={job.job.sourceUrl} target="_blank" rel="noreferrer">{job.sourceId === HIMALAYAS_SOURCE_ID ? "Open source link" : "Open posting"} <ExternalLink size={11} /></a>
                   ) : null}
                   {job.actionability === "actionable" && job.job.applicationUrl ? (
                     <a href={job.job.applicationUrl} target="_blank" rel="noreferrer">Open application <ExternalLink size={11} /></a>
