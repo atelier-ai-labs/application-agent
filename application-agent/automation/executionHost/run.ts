@@ -18,7 +18,7 @@ const host = createConfiguredExecutionHostServer({
 
 host.server.listen(host.port, host.host, () => {
   console.log(`[career-agent-executor] listening on http://${host.host}:${host.port}`);
-  console.log("[career-agent-executor] final application submission is disabled; browser sessions stop before Submit");
+  console.log(`[career-agent-executor] automatic submission authority: ${process.env.ATELIER_EXECUTION_SUBMISSION_AUTHORITY?.trim() || "never"}`);
 });
 
 const shutdown = () => {

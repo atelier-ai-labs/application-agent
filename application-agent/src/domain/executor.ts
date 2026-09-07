@@ -35,8 +35,12 @@ export type ApplicationFieldType =
 
 export type ApplicationFieldClassification =
   | "contact"
+  | "linkedin"
+  | "website"
   | "resume_upload"
   | "location"
+  | "desired_work_location"
+  | "start_availability"
   | "employment_history"
   | "education"
   | "work_authorization"
@@ -100,6 +104,7 @@ export type BrowserCaptchaState = "none" | "infrastructure_present" | "active_ch
 export type BrowserCaptchaEvidenceCategory =
   | "no_markers"
   | "hidden_infrastructure"
+  | "passive_infrastructure"
   | "visible_challenge_iframe"
   | "visible_challenge_control"
   | "explicit_challenge_text"
@@ -240,12 +245,22 @@ export interface LeverBrowserField extends ApplicationFieldDescriptor {
   readValue?(): Promise<string | boolean | null>;
 }
 
+/** Result of a browser Submit interaction before it becomes durable proof. */
+export interface BrowserSubmissionResult {
+  clicked: boolean;
+  confirmed: boolean;
+  externalApplicationId?: string;
+  evidence: string;
+}
+
 export interface LeverBrowserSession {
   navigate(url: string): Promise<void>;
   currentUrl(): string | Promise<string>;
   inspectFields(): Promise<readonly LeverBrowserField[]>;
   detectHumanBoundary(): Promise<BrowserHumanBoundary | null>;
   hasSubmitControl(): Promise<boolean>;
+  /** Clicks only the verified form Submit control and proves the resulting confirmation. */
+  submit(): Promise<BrowserSubmissionResult>;
   diagnostics?(): {
     boundaries?: BrowserExecutionBoundaryState;
     navigation?: BrowserNavigationDiagnostics;
@@ -368,6 +383,7 @@ export class SimulatedApplicationExecutor implements ApplicationExecutor {
         blocker: {
           kind: "external_login",
           unit: "external",
+          questionProvenance: "POLICY",
           question: "Authenticate the application session",
           reason: "The executor requires a user-authenticated browser session before it can continue.",
           evidence: [`executor:${this.id}`, "credentials-never-requested-in-application-state"],
@@ -426,6 +442,7 @@ export class UnavailableApplicationExecutor implements ApplicationExecutor {
       blocker: {
         kind: "external_verification",
         unit: "external",
+        questionProvenance: "CONFIGURATION",
         question: "Configure an authorized application executor",
         reason: "No real ATS or browser executor is configured; no external application was attempted.",
         evidence: ["executor:unavailable", "external-state:not-verified"],

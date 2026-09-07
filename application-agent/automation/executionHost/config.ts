@@ -1,6 +1,14 @@
+import { existsSync } from "node:fs";
 import { resolve, relative, isAbsolute } from "node:path";
 import type { ResumeFamilyId } from "../../src/domain/types";
+import type { SubmissionAuthority } from "../../src/domain/campaignTypes";
 import type { GoogleSheetsEnvironment } from "../googleSheetsJobTracker";
+import {
+  DEFAULT_RESUME_ARTIFACT_MANIFEST,
+  DEFAULT_RESUME_DIRECTORY,
+  resolveResumeArtifactManifest,
+  ResumeArtifactError,
+} from "../resume/resumeArtifact";
 
 export const DEFAULT_EXECUTION_ALLOWED_ORIGINS = [
   "http://localhost:5173",
@@ -18,6 +26,8 @@ export interface ExecutionHostEnvironment extends GoogleSheetsEnvironment {
   ATELIER_EXECUTION_BROWSER_TIMEOUT_MS?: string;
   ATELIER_EXECUTION_MAX_CONCURRENT?: string;
   ATELIER_EXECUTION_SESSION_TIMEOUT_MS?: string;
+  /** Server-only final-submission capability. Defaults to never. */
+  ATELIER_EXECUTION_SUBMISSION_AUTHORITY?: string;
   /** Server-only Brave Search configuration; never exposed to Vite. */
   ATELIER_BRAVE_SEARCH_API_KEY?: string;
   ATELIER_BRAVE_SEARCH_API_BASE_URL?: string;
@@ -29,6 +39,7 @@ export interface ExecutionHostEnvironment extends GoogleSheetsEnvironment {
   ATELIER_BRAVE_SEARCH_COUNTRY?: string;
   ATELIER_BRAVE_SEARCH_LANGUAGE?: string;
   ATELIER_RESUME_ROOT?: string;
+  ATELIER_RESUME_MANIFEST_FILE?: string;
   ATELIER_RESUME_CLOUD_PLATFORM_PATH?: string;
   ATELIER_RESUME_FRONTEND_SOFTWARE_PATH?: string;
   ATELIER_RESUME_AI_PLATFORM_AGENTIC_PATH?: string;
@@ -43,6 +54,7 @@ export interface ExecutionHostConfig {
   browserTimeoutMs: number;
   maxConcurrent: number;
   sessionTimeoutMs: number;
+  submissionAuthority: Extract<SubmissionAuthority, "never" | "automatic">;
   resumePaths: Partial<Record<ResumeFamilyId, string>>;
   braveSearch: {
     apiKey?: string;
@@ -90,6 +102,12 @@ function booleanValue(value: string | undefined, fallback: boolean, label: strin
   throw new Error(`${label} must be true or false.`);
 }
 
+function submissionAuthority(value: string | undefined): Extract<SubmissionAuthority, "never" | "automatic"> {
+  const normalized = value?.trim() || "never";
+  if (normalized === "never" || normalized === "automatic") return normalized;
+  throw new Error("ATELIER_EXECUTION_SUBMISSION_AUTHORITY must be never or automatic.");
+}
+
 function originList(value: string | undefined): readonly string[] {
   const values = value === undefined || value.trim() === ""
     ? [...DEFAULT_EXECUTION_ALLOWED_ORIGINS]
@@ -107,15 +125,29 @@ function isWithinRoot(root: string, candidate: string): boolean {
  * supply paths; this configuration is read by the trusted Node process.
  */
 export function resolveResumePathsFromEnv(env: ExecutionHostEnvironment): Partial<Record<ResumeFamilyId, string>> {
+  const explicitManifestPath = env.ATELIER_RESUME_MANIFEST_FILE?.trim();
+  const configuredRoot = env.ATELIER_RESUME_ROOT?.trim();
+  const usesDefaultRoot = !configuredRoot || resolve(configuredRoot) === resolve(DEFAULT_RESUME_DIRECTORY);
+  const shouldLoadManifest = Boolean(explicitManifestPath) || usesDefaultRoot;
+  const manifestPath = resolve(explicitManifestPath || DEFAULT_RESUME_ARTIFACT_MANIFEST);
+  let manifestPaths: Partial<Record<ResumeFamilyId, string>> = {};
+  if (shouldLoadManifest && existsSync(manifestPath)) {
+    try {
+      manifestPaths = resolveResumeArtifactManifest(manifestPath, configuredRoot || undefined);
+    } catch (error) {
+      if (error instanceof ResumeArtifactError) throw new Error(error.message);
+      throw error;
+    }
+  }
   const configured = RESUME_ENV_KEYS
     .map(([family, key]) => [family, env[key]] as const)
     .filter(([, value]) => typeof value === "string" && value.trim().length > 0);
-  if (configured.length === 0) return {};
+  if (configured.length === 0) return manifestPaths;
   if (!env.ATELIER_RESUME_ROOT?.trim()) {
     throw new Error("ATELIER_RESUME_ROOT is required when a resume artifact is configured.");
   }
   const root = resolve(env.ATELIER_RESUME_ROOT);
-  const paths: Partial<Record<ResumeFamilyId, string>> = {};
+  const paths: Partial<Record<ResumeFamilyId, string>> = { ...manifestPaths };
   for (const [family, rawPath] of configured) {
     if (!rawPath) continue;
     const candidate = resolve(rawPath);
@@ -136,6 +168,7 @@ export function resolveExecutionHostConfig(env: ExecutionHostEnvironment): Execu
   const browserTimeoutMs = positiveInteger(env.ATELIER_EXECUTION_BROWSER_TIMEOUT_MS, 15_000, "ATELIER_EXECUTION_BROWSER_TIMEOUT_MS");
   const maxConcurrent = positiveInteger(env.ATELIER_EXECUTION_MAX_CONCURRENT, 1, "ATELIER_EXECUTION_MAX_CONCURRENT");
   const sessionTimeoutMs = positiveInteger(env.ATELIER_EXECUTION_SESSION_TIMEOUT_MS, 30 * 60 * 1_000, "ATELIER_EXECUTION_SESSION_TIMEOUT_MS");
+  const configuredSubmissionAuthority = submissionAuthority(env.ATELIER_EXECUTION_SUBMISSION_AUTHORITY);
   const braveSearchApiKey = env.ATELIER_BRAVE_SEARCH_API_KEY?.trim() || undefined;
   const braveSearchEndpoint = env.ATELIER_BRAVE_SEARCH_API_BASE_URL?.trim() || undefined;
   return {
@@ -147,6 +180,7 @@ export function resolveExecutionHostConfig(env: ExecutionHostEnvironment): Execu
     browserTimeoutMs,
     maxConcurrent,
     sessionTimeoutMs,
+    submissionAuthority: configuredSubmissionAuthority,
     resumePaths: resolveResumePathsFromEnv(env),
     braveSearch: {
       ...(braveSearchApiKey ? { apiKey: braveSearchApiKey } : {}),

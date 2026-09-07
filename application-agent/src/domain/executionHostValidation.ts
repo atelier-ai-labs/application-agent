@@ -12,6 +12,7 @@ import type {
   CareerBlockerDraft,
   CareerBlockerKind,
   CareerBlockerUnit,
+  QuestionProvenance,
 } from "./campaignTypes";
 import type {
   ExecutionHostRequest,
@@ -24,6 +25,7 @@ import {
   isCandidateProfile,
   isJobPosting,
   isRecord,
+  isSubmissionProof,
 } from "./validation";
 import { isExecutionFailureReason } from "./executionTrace";
 import { isCampaign, isCareerJob } from "../persistence/careerRepository";
@@ -120,7 +122,7 @@ function isBrowserCaptchaDiagnostics(value: unknown): value is BrowserCaptchaDia
     isNonNegativeInteger(value.visibleMarkerCount) &&
     isNonNegativeInteger(value.challengeIframeCount) &&
     isNonNegativeInteger(value.visibleChallengeIframeCount) &&
-    (value.evidenceCategory === "no_markers" || value.evidenceCategory === "hidden_infrastructure" ||
+    (value.evidenceCategory === "no_markers" || value.evidenceCategory === "hidden_infrastructure" || value.evidenceCategory === "passive_infrastructure" ||
       value.evidenceCategory === "visible_challenge_iframe" || value.evidenceCategory === "visible_challenge_control" ||
       value.evidenceCategory === "explicit_challenge_text" || value.evidenceCategory === "visible_marker_ambiguous");
 }
@@ -145,7 +147,8 @@ function isFieldType(value: unknown): boolean {
 }
 
 function isFieldClassification(value: unknown): boolean {
-  return value === "contact" || value === "resume_upload" || value === "location" ||
+  return value === "contact" || value === "linkedin" || value === "website" || value === "resume_upload" || value === "location" ||
+    value === "desired_work_location" || value === "start_availability" ||
     value === "employment_history" || value === "education" || value === "work_authorization" ||
     value === "sponsorship" || value === "salary" || value === "relocation" || value === "travel" ||
     value === "free_text" || value === "demographic" || value === "legal_attestation" || value === "unknown";
@@ -197,10 +200,16 @@ function isCareerBlockerUnit(value: unknown): value is CareerBlockerUnit {
   return value === "application_preparation" || value === "submission" || value === "external";
 }
 
+function isQuestionProvenance(value: unknown): value is QuestionProvenance {
+  return value === "ATS_FORM" || value === "APPLICATION_PREPARATION" || value === "POLICY" ||
+    value === "CONFIGURATION" || value === "UNKNOWN";
+}
+
 export function isCareerBlockerDraft(value: unknown): value is CareerBlockerDraft {
   if (!isRecord(value)) return false;
   return isCareerBlockerKind(value.kind) &&
     isCareerBlockerUnit(value.unit) &&
+    (value.questionProvenance === undefined || isQuestionProvenance(value.questionProvenance)) &&
     (value.field === undefined || isNonEmptyString(value.field)) &&
     isNonEmptyString(value.question) &&
     isNonEmptyString(value.reason) &&
@@ -229,6 +238,10 @@ export function isExecutionInspection(value: unknown): value is ExecutionInspect
 
 export function isExecutionHostResult(value: unknown): value is ExecutionHostResult {
   if (!isRecord(value)) return false;
+  if (value.state === "submitted") {
+    return isSubmissionProof(value.proof) &&
+      (value.note === undefined || typeof value.note === "string");
+  }
   if (value.state === "requires_human") {
     return isCareerBlockerDraft(value.blocker) &&
       (value.blockers === undefined || (Array.isArray(value.blockers) && value.blockers.every(isCareerBlockerDraft))) &&
@@ -248,7 +261,6 @@ export function isExecutionHostResult(value: unknown): value is ExecutionHostRes
       typeof value.retryable === "boolean" &&
       (value.inspection === undefined || isExecutionInspection(value.inspection));
   }
-  // In particular, a submitted result is not part of the host response.
   return false;
 }
 

@@ -15,6 +15,7 @@ import {
   type CareerBlocker,
   type CareerJob,
   type Campaign,
+  type CandidateProfile,
   type LeverBrowserField,
   type LeverBrowserSession,
   type LeverBrowserSessionFactory,
@@ -22,6 +23,7 @@ import {
 import {
   classifyCaptchaEvidence,
   questionDescriptorFromEvidence,
+  stableSelectorForControl,
   type CaptchaDomObservation,
 } from "../application-agent/automation/playwrightLeverBrowserSession";
 
@@ -128,6 +130,16 @@ class FakeSession implements LeverBrowserSession {
 
   async hasSubmitControl(): Promise<boolean> {
     return this.submitControl;
+  }
+
+  async submit() {
+    this.submitClicks += 1;
+    return {
+      clicked: true,
+      confirmed: true,
+      externalApplicationId: "confirmation:test",
+      evidence: "submit:clicked; confirmation:text",
+    };
   }
 
   async close(): Promise<void> {
@@ -301,6 +313,17 @@ describe("LeverBrowserExecutor", () => {
     ...overrides,
   });
 
+  it("binds browser controls by stable DOM identity rather than a shifting position", () => {
+    const initial = stableSelectorForControl({ tagName: "input", id: "resume" });
+    const afterRerender = stableSelectorForControl({ tagName: "input", id: "resume" });
+    const school = stableSelectorForControl({ tagName: "input", id: "school--0" });
+
+    expect(initial).toEqual({ selector: "input#resume", source: "dom-id:resume" });
+    expect(afterRerender).toEqual(initial);
+    expect(school?.selector).toBe("input#school--0");
+    expect(initial?.selector).not.toContain("nth");
+  });
+
   it("classifies CAPTCHA evidence without treating marker presence as an active challenge", () => {
     expect(classifyCaptchaEvidence(captchaObservation())).toMatchObject({
       state: "none",
@@ -357,6 +380,22 @@ describe("LeverBrowserExecutor", () => {
     expect(result.evidence).toContain("captcha-state:infrastructure_present");
   });
 
+  it("allows safe preparation with a passive visible badge while withholding consequential answers", async () => {
+    const email = new FakeField({ id: "email", label: "Email", type: "email", required: true });
+    const salary = new FakeField({ id: "salary", label: "Salary expectations", type: "text", required: true });
+    const session = new FakeSession([email, salary]);
+    session.captchaDiagnostics = classifyCaptchaEvidence(captchaObservation({ markerCount: 3, visibleMarkerCount: 2, passiveVisibleMarkerCount: 2 }));
+    const result = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      allowedFieldClassifications: ["contact", "resume_upload"],
+    }).execute(request());
+    expect(email.fillCalls).toBe(1);
+    expect(salary.fillCalls).toBe(0);
+    expect(result.state).toBe("requires_human");
+    if (result.state === "requires_human") expect(result.blocker.questionProvenance).toBe("ATS_FORM");
+    expect(session.submitClicks).toBe(0);
+  });
+
   it.each([
     ["active_challenge", "active_challenge"],
     ["uncertain", "uncertain"],
@@ -377,6 +416,8 @@ describe("LeverBrowserExecutor", () => {
 
     expect(result.status).toBe("needs_input");
     expect(result.blockers[0]?.kind).toBe("captcha");
+    expect(result.blockers[0]?.questionProvenance).toBe("POLICY");
+    expect(session.submitClicks).toBe(0);
     expect(result.captcha?.state).toBe(expectedState);
   });
 
@@ -517,16 +558,45 @@ describe("LeverBrowserExecutor", () => {
     expect(result.state).toBe("requires_human");
     if (result.state !== "requires_human") return;
     expect(result.blocker.kind).toBe("unknown_form_field");
+    expect(result.blocker.questionProvenance).toBe("ATS_FORM");
     expect(result.blocker.field).toBe(fieldId);
     expect(result.blocker.question).toBe(`Required question under "Standard Work Authorization - US": "Are you legally eligible to work in the US?" — choose Yes or No.`);
     expect(result.blocker.reason).toContain("no value was guessed");
     expect(result.blocker.evidence).toContain("field-type:radio");
     expect(result.blocker.evidence).toContain("field-required:true");
+    expect(result.blocker.evidence).toContain("field-label:Yes");
     expect(result.blocker.evidence).toContain("options:Yes|No");
     expect(result.blocker.evidence).toContain("question-source:question_container");
     expect(result.blocker.evidence).toContain("question-confidence:high");
     expect(session.fields[0].selectCalls).toBe(0);
     expect(session.submitClicks).toBe(0);
+  });
+
+  it("does not reuse a prepared answer for an unknown inspected control", async () => {
+    const field = new FakeField({
+      id: "question_123",
+      label: "Yes",
+      type: "select",
+      required: true,
+      options: [{ label: "Yes", value: "yes" }, { label: "No", value: "no" }],
+      questionDescriptor: {
+        promptText: "An employer-specific question",
+        sourceStrategy: "question_container",
+        confidence: "high",
+      },
+    });
+    const session = new FakeSession([field]);
+    const result = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      now: () => capturedAt,
+    }).execute(request({
+      application: application({
+        answers: [answer("employment_history", "Prepared employment summary")],
+      }),
+    }));
+
+    expect(result.state).toBe("requires_human");
+    expect(field.selectCalls).toBe(0);
   });
 
   it("does not apply a resolved unknown-field answer after the inspected question changes", async () => {
@@ -744,6 +814,7 @@ describe("LeverBrowserExecutor", () => {
     expect(first.inspection?.durationMs).toBeGreaterThanOrEqual(0);
     expect(first.inspection?.domInspectionCount).toBe(1);
     expect(first.blocker.kind).toBe("salary");
+    expect(first.blocker.questionProvenance).toBe("ATS_FORM");
     expect(fields[0].fillCalls).toBe(1);
     expect(fields[1].fillCalls).toBe(1);
     expect(fields[2].fillCalls).toBe(0);
@@ -763,6 +834,77 @@ describe("LeverBrowserExecutor", () => {
     expect(session.submitClicks).toBe(0);
   });
 
+  it("reuses a resolved free-text ATS answer when the inspected field has no options", async () => {
+    const field = new FakeField({
+      id: "question-referral",
+      label: "Were you referred by a Kapitus employee? If yes, please provide the employee's full name*",
+      type: "text",
+      required: true,
+      questionDescriptor: {
+        promptText: "Were you referred by a Kapitus employee? If yes, please provide the employee's full name*",
+        sourceStrategy: "question_container",
+        confidence: "high",
+      },
+    });
+    const blocker: CareerBlocker = {
+      ...resolvedCareerBlocker("question-referral", "No"),
+      kind: "unknown_form_field",
+      question: field.label,
+      evidence: [
+        "executor:greenhouse-browser",
+        "field-id:question-referral",
+        "field-type:text",
+        `field-label:${field.label}`,
+        "field-required:true",
+        "classification:unknown",
+        `question-prompt:${field.label}`,
+      ],
+    };
+    const result = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(new FakeSession([field])),
+      now: () => capturedAt,
+    }).execute(request({ careerJob: careerJob({ blockers: [blocker] }) }));
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(field.current).toBe("No");
+  });
+
+  it("reuses a resolved combobox answer when Greenhouse hides options on resume", async () => {
+    const field = new FakeField({
+      id: "question-age",
+      label: "Are you 18 years of age or older?*",
+      type: "select",
+      required: true,
+      questionDescriptor: {
+        promptText: "Are you 18 years of age or older?*",
+        sourceStrategy: "question_container",
+        confidence: "high",
+      },
+    });
+    const blocker: CareerBlocker = {
+      ...resolvedCareerBlocker("question-age", "yes"),
+      kind: "unknown_form_field",
+      question: field.label,
+      evidence: [
+        "executor:greenhouse-browser",
+        "field-id:question-age",
+        "field-type:select",
+        `field-label:${field.label}`,
+        "field-required:true",
+        "classification:unknown",
+        "options:Yes|No",
+        `question-prompt:${field.label}`,
+      ],
+    };
+    const result = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(new FakeSession([field])),
+      now: () => capturedAt,
+    }).execute(request({ careerJob: careerJob({ blockers: [blocker] }) }));
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(field.current).toBe("yes");
+  });
+
   it("does not fabricate missing facts and handles policy-sensitive demographic/legal fields conservatively", async () => {
     const requiredDemographic = new FakeSession([
       new FakeField({ id: "gender", label: "Gender identity", type: "select", required: true, options: [{ label: "Option", value: "option" }] }),
@@ -770,12 +912,14 @@ describe("LeverBrowserExecutor", () => {
     const demographicResult = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(requiredDemographic), now: () => capturedAt }).execute(request());
     expect(demographicResult.state).toBe("requires_human");
     expect(demographicResult.state === "requires_human" && demographicResult.blocker.kind).toBe("demographic_disclosure");
+    expect(demographicResult.state === "requires_human" && demographicResult.blocker.questionProvenance).toBe("ATS_FORM");
 
     const optionalDemographic = new FakeSession([
       new FakeField({ id: "gender", label: "Gender identity", type: "select", required: false, options: [{ label: "Option", value: "option" }] }),
     ]);
     const optionalResult = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(optionalDemographic), now: () => capturedAt }).execute(request());
     expect(optionalResult.state).toBe("ready_to_submit");
+    expect(optionalResult.state === "ready_to_submit" && optionalResult.inspection.blockers).toHaveLength(0);
     expect(optionalDemographic.fields[0].current).toBeNull();
 
     const legal = new FakeSession([
@@ -793,6 +937,180 @@ describe("LeverBrowserExecutor", () => {
     expect(unknownResult.state).toBe("requires_human");
     expect(unknownResult.state === "requires_human" && unknownResult.blocker.kind).toBe("unknown_form_field");
     expect(unknown.fields[0].fillCalls).toBe(0);
+  });
+
+  it.each([
+    ["LinkedIn URL", "linkedin_url", "LinkedIn URL", "linkedinUrl", "https://www.linkedin.com/in/example-candidate"],
+    ["website URL", "website", "Personal website", "websiteUrl", "https://example.com"],
+    ["preferred work location", "desired_location", "What is your preferred work location?", "preferredWorkLocation", "Remote - United States"],
+    ["available start date", "availability", "When are you available to start?", "availabilityStartDate", "2026-10-01"],
+  ] as const)("does not map an unrelated fact into %s, but fills the explicit fact when present", async (_name, id, label, fact, expected) => {
+    expect(classifyLeverApplicationField({ id, label, type: "text" })).toBe(
+      fact === "linkedinUrl" ? "linkedin" :
+        fact === "websiteUrl" ? "website" :
+          fact === "preferredWorkLocation" ? "desired_work_location" : "start_availability",
+    );
+    const absentField = new FakeField({ id, label, type: "text", required: true });
+    const absentSession = new FakeSession([absentField]);
+    const absentResult = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(absentSession),
+      now: () => capturedAt,
+    }).execute(request());
+
+    expect(absentResult.state).toBe("requires_human");
+    expect(absentField.current).toBeNull();
+    expect(absentResult.state === "requires_human" && absentResult.blocker.kind).toBe("unknown_fact");
+
+    const explicitField = new FakeField({ id, label, type: "text", required: true });
+    const explicitSession = new FakeSession([explicitField]);
+    const explicitProfile: CandidateProfile = {
+      ...exampleCandidateProfile,
+      identity: {
+        ...exampleCandidateProfile.identity,
+        ...(fact === "linkedinUrl" ? { linkedinUrl: expected } : {}),
+        ...(fact === "websiteUrl" ? { websiteUrl: expected } : {}),
+      },
+      workPreferences: {
+        ...exampleCandidateProfile.workPreferences,
+        ...(fact === "preferredWorkLocation" ? { preferredWorkLocation: expected } : {}),
+        ...(fact === "availabilityStartDate" ? { availabilityStartDate: expected } : {}),
+      },
+    };
+    const explicitResult = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(explicitSession),
+      now: () => capturedAt,
+    }).execute(request({ profile: explicitProfile }));
+
+    expect(explicitResult.state).toBe("ready_to_submit");
+    expect(explicitField.current).toBe(expected);
+  });
+
+  it("maps compound Greenhouse country and availability controls to grounded option values", async () => {
+    const fields = [
+      new FakeField({
+        id: "country",
+        label: "Country*",
+        type: "select",
+        required: true,
+        options: [{ label: "United States +1", value: "United States +1" }],
+      }),
+      new FakeField({
+        id: "start-month--0",
+        label: "Start date month",
+        type: "select",
+        options: [{ label: "October", value: "October" }],
+      }),
+      new FakeField({ id: "start-year--0", label: "Start date year", type: "text" }),
+    ];
+    const profile: CandidateProfile = {
+      ...exampleCandidateProfile,
+      identity: { ...exampleCandidateProfile.identity, location: "Pittsburgh, PA, United States" },
+      workPreferences: { ...exampleCandidateProfile.workPreferences, availabilityStartDate: "2026-10-01" },
+    };
+    const result = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(new FakeSession(fields)),
+      now: () => capturedAt,
+    }).execute(request({ profile }));
+
+    expect(result.state).toBe("ready_to_submit");
+    if (result.state !== "ready_to_submit") return;
+    expect(isExecutionInspection(result.inspection)).toBe(true);
+    expect(fields[0].current).toBe("United States +1");
+    expect(fields[1].current).toBe("October");
+    expect(fields[2].current).toBe("2026");
+  });
+
+  it("matches a grounded full state name to an abbreviated select option", async () => {
+    const state = new FakeField({
+      id: "question-state",
+      label: "What state do you currently reside in?*",
+      type: "select",
+      required: true,
+      options: [{ label: "PA", value: "pa" }],
+    });
+    const profile: CandidateProfile = {
+      ...exampleCandidateProfile,
+      identity: { ...exampleCandidateProfile.identity, location: "Pittsburgh, Pennsylvania, United States" },
+    };
+    const result = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(new FakeSession([state])),
+      now: () => capturedAt,
+    }).execute(request({ profile }));
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(state.current).toBe("pa");
+  });
+
+  it("uses the actual inspected controls and preserves job-specific questions", async () => {
+    const salary = new FakeSession([new FakeField({
+      id: "salary-one",
+      label: "Compensation expectation",
+      type: "text",
+      required: true,
+      questionDescriptor: {
+        promptText: "What base salary would you expect for this role?",
+        sourceStrategy: "question_container",
+        confidence: "high",
+      },
+    })]);
+    const salaryResult = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(salary),
+      now: () => capturedAt,
+    }).execute(request());
+    expect(salaryResult.state).toBe("requires_human");
+    if (salaryResult.state !== "requires_human") return;
+    expect(salaryResult.blockers?.[0]).toMatchObject({
+      kind: "salary",
+      question: "What base salary would you expect for this role?",
+      questionProvenance: "ATS_FORM",
+    });
+
+    const travel = new FakeSession([new FakeField({
+      id: "travel-two",
+      label: "Travel availability",
+      type: "select",
+      required: true,
+      options: [{ label: "None", value: "none" }, { label: "Up to 25%", value: "25" }],
+      questionDescriptor: {
+        promptText: "How much travel are you willing to do?",
+        sourceStrategy: "aria_labelledby",
+        confidence: "high",
+      },
+    })]);
+    const travelResult = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(travel),
+      now: () => capturedAt,
+    }).execute(request());
+    expect(travelResult.state).toBe("requires_human");
+    if (travelResult.state !== "requires_human") return;
+    expect(travelResult.blockers?.[0]).toMatchObject({
+      kind: "travel",
+      question: "How much travel are you willing to do?",
+      questionProvenance: "ATS_FORM",
+    });
+    expect(travelResult.blockers?.[0]?.question).not.toBe(salaryResult.blockers?.[0]?.question);
+
+    const custom = new FakeSession([new FakeField({
+      id: "custom-question",
+      label: "Additional information",
+      type: "textarea",
+      required: true,
+      questionDescriptor: {
+        promptText: "Tell us about a system you improved recently.",
+        sourceStrategy: "nearby_text",
+        confidence: "medium",
+      },
+    })]);
+    const customResult = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(custom),
+      now: () => capturedAt,
+    }).execute(request());
+    expect(customResult.state).toBe("requires_human");
+    expect(customResult.state === "requires_human" && customResult.blocker).toMatchObject({
+      kind: "subjective_answer",
+      question: "Tell us about a system you improved recently.",
+      questionProvenance: "ATS_FORM",
+    });
   });
 
   it("returns resume and widget blockers, and recognizes authentication boundaries", async () => {
@@ -832,5 +1150,42 @@ describe("LeverBrowserExecutor", () => {
     expect(result.state).toBe("unsupported");
     expect(result.state === "unsupported" && result.blocker?.kind).toBe("unsupported_widget");
     expect(session.submitClicks).toBe(0);
+  });
+
+  it("submits only when the campaign and trusted executor both authorize automatic submission", async () => {
+    const session = new FakeSession([
+      new FakeField({ id: "email", label: "Email", type: "email", required: true }),
+    ]);
+    const automaticCampaign = {
+      ...campaign(),
+      submissionPolicy: { authority: "automatic" as const, requireExplicitApproval: false },
+    };
+    const result = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      allowAutomaticSubmission: true,
+      now: () => capturedAt,
+    }).execute(request({ campaign: automaticCampaign }));
+
+    expect(result.state).toBe("submitted");
+    expect(result.state === "submitted" && result.proof.mode).toBe("external");
+    expect(session.submitClicks).toBe(1);
+  });
+
+  it("never submits an automatic campaign when a required field remains unresolved", async () => {
+    const session = new FakeSession([
+      new FakeField({ id: "email", label: "Email", type: "email", required: true }),
+      new FakeField({ id: "salary", label: "Expected salary", type: "text", required: true }),
+    ]);
+    const result = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      allowAutomaticSubmission: true,
+      now: () => capturedAt,
+    }).execute(request({
+      campaign: { ...campaign(), submissionPolicy: { authority: "automatic", requireExplicitApproval: false } },
+    }));
+
+    expect(result.state).toBe("requires_human");
+    expect(session.submitClicks).toBe(0);
+    expect(result.state === "requires_human" && result.blocker.kind).toBe("salary");
   });
 });

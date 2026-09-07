@@ -24,6 +24,7 @@ export type ExecutionHostStatus =
   | "waiting_for_human"
   | "resuming"
   | "ready_to_submit"
+  | "submitted"
   | "failed"
   | "cancelled"
   | "closed";
@@ -41,10 +42,11 @@ export interface ExecutionHostRequest {
 }
 
 /**
- * Submission proof is deliberately absent from this transport contract. A
- * preparation-only host may never return, persist, or forward it.
+ * Submission proof is transportable only after the server-side automatic
+ * submission gate has accepted a verified external confirmation.
  */
 export type ExecutionHostResult =
+  | Extract<ApplicationExecutorResult, { state: "submitted" }>
   | Extract<ApplicationExecutorResult, { state: "requires_human" }>
   | Extract<ApplicationExecutorResult, { state: "ready_to_submit" }>
   | Extract<ApplicationExecutorResult, { state: "unsupported" }>
@@ -79,6 +81,7 @@ export function isExecutionHostStatus(value: unknown): value is ExecutionHostSta
     value === "waiting_for_human" ||
     value === "resuming" ||
     value === "ready_to_submit" ||
+    value === "submitted" ||
     value === "failed" ||
     value === "cancelled" ||
     value === "closed";

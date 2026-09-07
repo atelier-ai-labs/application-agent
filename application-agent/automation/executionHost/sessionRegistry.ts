@@ -30,6 +30,8 @@ export interface ExecutionHostLogEntry {
 
 export interface ExecutionSessionRegistryOptions {
   executor: ApplicationExecutor;
+  /** Server-only capability gate; never inferred from a browser request. */
+  allowAutomaticSubmission?: boolean;
   now?: () => string;
   createId?: () => string;
   maxConcurrent?: number;
@@ -137,6 +139,7 @@ function blockerFromInspection(inspection: ExecutionInspection): ExecutionHostRe
 }
 
 function statusForResult(result: ExecutionHostResult): ExecutionHostStatus {
+  if (result.state === "submitted") return "submitted";
   if (result.state === "requires_human") return isBoundaryBlocker(result) ? "waiting_for_human" : "needs_input";
   if (result.state === "unsupported") return "needs_input";
   if (result.state === "ready_to_submit") return "ready_to_submit";
@@ -147,6 +150,7 @@ export class ExecutionSessionRegistry {
   private readonly now: () => string;
   private readonly createId: () => string;
   private readonly executor: ApplicationExecutor;
+  private readonly allowAutomaticSubmission: boolean;
   private readonly maxConcurrent: number;
   private readonly sessionTimeoutMs: number;
   private readonly logger?: (entry: ExecutionHostLogEntry) => void;
@@ -156,6 +160,7 @@ export class ExecutionSessionRegistry {
     this.now = options.now ?? defaultNow;
     this.createId = options.createId ?? defaultCreateId;
     this.executor = options.executor;
+    this.allowAutomaticSubmission = options.allowAutomaticSubmission === true;
     this.maxConcurrent = options.maxConcurrent ?? 1;
     this.sessionTimeoutMs = options.sessionTimeoutMs ?? 30 * 60 * 1_000;
     this.logger = options.logger;
@@ -390,6 +395,22 @@ export class ExecutionSessionRegistry {
     const browserPreparationStartedAt = monotonicNow();
     try {
       const request = () => requestForHost(session.request, this.now());
+      if (session.request.campaign.submissionPolicy.authority === "automatic" && !this.allowAutomaticSubmission) {
+        await this.finish(session, {
+          state: "requires_human",
+          blocker: {
+            kind: "submission_approval",
+            unit: "submission",
+            questionProvenance: "CONFIGURATION",
+            field: "submission-authority",
+            question: "Enable automatic submission on the trusted execution host",
+            reason: "The persisted campaign allows automatic submission, but the local execution host has not been explicitly enabled for it.",
+            evidence: ["submission-authority:automatic", "execution-host-authority:never", "submit:not-clicked"],
+            resumeAfterHuman: true,
+          },
+        });
+        return;
+      }
       if (this.executor.supports && !this.executor.supports(request())) {
         await this.finish(session, {
           state: "unsupported",
@@ -447,12 +468,12 @@ export class ExecutionSessionRegistry {
         ...(result.state === "submitted" || !result.inspection?.diagnostic ? {} : { diagnostic: result.inspection.diagnostic }),
         ...(result.state === "submitted" || !result.inspection?.captcha ? {} : { captcha: result.inspection.captcha }),
       });
-      if (result.state === "submitted") {
-        // This is a defense-in-depth check. The production Lever executor is
-        // preparation-only, and this host never forwards submission proof.
+      if (result.state === "submitted" && (!this.allowAutomaticSubmission || session.request.campaign.submissionPolicy.authority !== "automatic")) {
+        // Defense in depth: a submission proof is accepted only when both the
+        // persisted campaign and this server-only host opt in.
         await this.finish(session, {
           state: "failed",
-          reason: "The local preparation host rejected submission proof from an executor; no application was submitted.",
+          reason: "The execution host rejected submission proof because automatic submission was not authorized; no application was submitted and application state was not advanced.",
           retryable: false,
         });
         return;
@@ -499,16 +520,16 @@ export class ExecutionSessionRegistry {
         : result.state === "unsupported"
           ? "validation_error"
           : result.state === "failed" ? executionFailureReason(result.reason) : undefined,
-      ...(result.inspection ? { inspection: clone(result.inspection) } : {}),
+      ...(result.state !== "submitted" && result.inspection ? { inspection: clone(result.inspection) } : {}),
       result: clone(result),
       updatedAt: this.now(),
       ...(result.state === "failed" ? { error: safeReason(result.reason, "The browser executor failed.") } : {}),
     };
-    if (status === "failed") {
+    if (status === "failed" || status === "submitted") {
       session.terminal = true;
       this.clearTimer(session);
       await this.closeExecutor(session);
-      this.log(session, "failed", result.state === "failed" ? result.reason : "unsupported");
+      this.log(session, status === "failed" ? "failed" : "closed", result.state === "failed" ? result.reason : undefined);
     } else {
       this.touch(session);
       this.log(session, "status");

@@ -8,6 +8,7 @@ import type {
   BrowserExecutionBoundaryState,
   BrowserExecutionDiagnostic,
   BrowserNavigationDiagnostics,
+  BrowserSubmissionResult,
   LeverBrowserField,
   LeverBrowserSession,
   LeverBrowserSessionFactory,
@@ -29,6 +30,10 @@ interface InspectedRawField {
   label: string;
   type: ApplicationFieldType;
   required: boolean;
+  stableSelector?: string;
+  stableSelectorSource?: string;
+  stableIdentity?: StableControlIdentity;
+  stableIdentityUnique?: boolean;
   options?: readonly ApplicationFieldOption[];
   section?: string;
   groupName?: string;
@@ -43,6 +48,15 @@ export interface LeverQuestionAssociationEvidence {
   nearbyPromptText?: string;
   sectionTitle?: string;
   nearbyInstructionText?: string;
+}
+
+export interface StableControlIdentity {
+  tagName: string;
+  id?: string;
+  name?: string;
+  type?: string;
+  value?: string;
+  ariaLabel?: string;
 }
 
 function boundedDescriptorText(value: string | undefined, maximum = 240): string | undefined {
@@ -126,6 +140,7 @@ export function questionDescriptorFromEvidence(
 export interface CaptchaDomObservation {
   markerCount: number;
   visibleMarkerCount: number;
+  passiveVisibleMarkerCount?: number;
   challengeIframeCount: number;
   visibleChallengeIframeCount: number;
   visibleChallengeControlCount: number;
@@ -178,7 +193,7 @@ export function classifyCaptchaEvidence(observation: CaptchaDomObservation): Bro
       evidenceCategory: "no_markers",
     };
   }
-  if (observation.visibleMarkerCount > 0) {
+  if (observation.visibleMarkerCount > (observation.passiveVisibleMarkerCount ?? 0)) {
     return {
       state: "uncertain",
       markerCount: observation.markerCount,
@@ -191,10 +206,10 @@ export function classifyCaptchaEvidence(observation: CaptchaDomObservation): Bro
   return {
     state: "infrastructure_present",
     markerCount: observation.markerCount,
-    visibleMarkerCount: 0,
+    visibleMarkerCount: observation.visibleMarkerCount,
     challengeIframeCount: observation.challengeIframeCount,
     visibleChallengeIframeCount: 0,
-    evidenceCategory: "hidden_infrastructure",
+    evidenceCategory: observation.visibleMarkerCount > 0 ? "passive_infrastructure" : "hidden_infrastructure",
   };
 }
 
@@ -206,6 +221,7 @@ const CAPTCHA_MARKER_SELECTOR = [
   'script[src*="captcha"]',
   'script[src*="recaptcha"]',
   'input[name*="captcha"]',
+  'textarea[name*="captcha"]',
   '[data-sitekey]',
 ].join(", ");
 
@@ -255,6 +271,57 @@ function isTimeoutError(error: unknown): boolean {
   return name.toLowerCase().includes("timeout") || message.toLowerCase().includes("timeout");
 }
 
+/** Escapes a value for a CSS identifier without relying on a browser global. */
+export function escapeCssIdentifier(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]/g, (character) => `\\${character}`);
+}
+
+function escapeCssAttribute(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+/** Builds a stable locator from DOM identity; it never falls back to position. */
+export function stableSelectorForControl(
+  identity: StableControlIdentity,
+): { selector: string; source: string } | undefined {
+  const tagName = identity.tagName.toLowerCase();
+  if (identity.id?.trim()) {
+    return {
+      selector: `${tagName}#${escapeCssIdentifier(identity.id.trim())}`,
+      source: `dom-id:${identity.id.trim()}`,
+    };
+  }
+  if (identity.name?.trim()) {
+    const nameSelector = `${tagName}[name="${escapeCssAttribute(identity.name.trim())}"]`;
+    const selector = identity.type?.toLowerCase() === "radio" && identity.value !== undefined
+      ? `${nameSelector}[value="${escapeCssAttribute(identity.value)}"]`
+      : nameSelector;
+    return { selector, source: `dom-name:${identity.name.trim()}` };
+  }
+  if (identity.ariaLabel?.trim()) {
+    return {
+      selector: `${tagName}[aria-label="${escapeCssAttribute(identity.ariaLabel.trim())}"]`,
+      source: "dom-aria-label",
+    };
+  }
+  return undefined;
+}
+
+/** Greenhouse country options append a dialing code to the visible label. */
+export function greenhouseOptionMatches(
+  optionText: string,
+  optionValue: string | null,
+  desired: string,
+): boolean {
+  const normalize = (value: string): string => value.trim().toLowerCase().replace(/\s+/g, " ");
+  const normalizedText = normalize(optionText);
+  const normalizedDesired = normalize(desired);
+  return normalizedText === normalizedDesired ||
+    (optionValue !== null && normalize(optionValue) === normalizedDesired) ||
+    normalizedText.startsWith(`${normalizedDesired}+`) ||
+    normalizedText.startsWith(`${normalizedDesired} +`);
+}
+
 class PlaywrightLeverBrowserField implements LeverBrowserField {
   public readonly classification = "unknown" as const;
   public readonly id: string;
@@ -276,14 +343,21 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
     this.required = raw.required;
     this.options = raw.options;
     this.section = raw.section;
-    this.sourceSelector = `form-control-index:${raw.index}`;
+    this.sourceSelector = raw.stableSelector
+      ? (raw.stableSelectorSource ?? "dom-selector:stable")
+      : "dom-selector:unavailable";
     this.questionDescriptor = raw.questionEvidence
       ? questionDescriptorFromEvidence(raw.questionEvidence)
       : undefined;
   }
 
   private locator(): Locator {
-    return this.page.locator("input, textarea, select").nth(this.raw.index);
+    if (!this.raw.stableSelector) {
+      throw new Error(`No stable DOM identity was available for ${this.raw.id}.`);
+    }
+    // Resolve the selector at action time so React rerenders after an upload
+    // cannot retarget a different positional control.
+    return this.page.locator(this.raw.stableSelector);
   }
 
   async fill(value: string): Promise<void> {
@@ -292,8 +366,93 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
 
   async select(value: string): Promise<void> {
     if (this.type === "select") {
-      await this.locator().selectOption(value);
-      return;
+      const locator = this.locator();
+      const tagName = await locator.evaluate((element) => element.tagName.toLowerCase());
+      if (tagName === "select") {
+        await locator.selectOption(value);
+        return;
+      }
+      // Greenhouse uses a React combobox rather than a native select. Open
+      // only the verified field, then choose an exact visible option.
+      const toggle = locator
+        .locator('xpath=ancestor::div[contains(@class, "select__container")]')
+        .getByRole("button", { name: "Toggle flyout" });
+      const expanded = await locator.getAttribute("aria-expanded").catch(() => null);
+      if (expanded !== "true") {
+        // Greenhouse's react-select opens reliably from the combobox keyboard
+        // path, including the phone-country control. Some deployments expose
+        // a toggle button that changes focus without opening the list.
+        await locator.press("ArrowDown").catch(() => undefined);
+      }
+      if ((await locator.getAttribute("aria-expanded").catch(() => null)) !== "true") {
+        if (await toggle.count() > 0 && await visibleFormControl(toggle.first())) {
+          await toggle.first().click();
+        } else {
+          await locator.click();
+        }
+      }
+      // Greenhouse's React select uses the visible option label as a search
+      // input. Clicking the rendered option is not sufficient on every
+      // Greenhouse deployment: the menu can close without committing the
+      // controlled value. Select through the widget's keyboard path, then
+      // verify the committed single-value state before returning.
+      const matchedOption = this.options?.find((option) =>
+        greenhouseOptionMatches(option.label, option.value, value));
+      if (this.options && !matchedOption) {
+        throw new Error(`The select option ${value} was not found.`);
+      }
+      await locator.fill(matchedOption?.label ?? value);
+      await locator.press("Enter");
+      const expectedValue = matchedOption?.value ?? value;
+      const isCommitted = async (): Promise<boolean> => {
+        const selected = await this.readValue();
+        if (typeof selected !== "string") return false;
+        if (selected === expectedValue || greenhouseOptionMatches(selected, selected, expectedValue)) return true;
+        // The Greenhouse phone-country control displays only the dialing code
+        // after commit (for example, "+1") even though the selected option was
+        // the uniquely filtered full country label. Accept that representation
+        // only when it is the exact suffix of the option we selected.
+        const selectedDialingCode = selected.trim().match(/^\+\d+$/)?.[0];
+        const expectedDialingCode = expectedValue.trim().match(/\+\d+$/)?.[0];
+        return Boolean(selectedDialingCode && expectedDialingCode && selectedDialingCode === expectedDialingCode);
+      };
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (await isCommitted()) return;
+        if (attempt < 19) await this.page.waitForTimeout(50);
+      }
+      // A few Greenhouse deployments do not commit a filtered option from
+      // Enter alone. Clicking the exact visible option is safe because the
+      // option was discovered from this same verified control.
+      const visibleOption = this.page.getByRole("option", { name: matchedOption?.label ?? value, exact: true }).first();
+      if (await visibleOption.count() > 0 && await visibleFormControl(visibleOption)) {
+        await visibleOption.click();
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          if (await isCommitted()) return;
+          if (attempt < 19) await this.page.waitForTimeout(50);
+        }
+      }
+      // If Enter closed the menu before the controlled value was committed,
+      // reopen the same combobox and click the exact option text as a second
+      // safe interaction. This is needed by some Greenhouse phone-country
+      // deployments whose option list is virtualized.
+      if ((await locator.getAttribute("aria-expanded").catch(() => null)) !== "true") {
+        await locator.press("ArrowDown").catch(() => undefined);
+      }
+      await locator.fill(matchedOption?.label ?? value);
+      const options = this.page.locator('[role="option"], .select__option');
+      for (let index = 0; index < await options.count(); index += 1) {
+        const option = options.nth(index);
+        if (!(await visibleFormControl(option))) continue;
+        const label = (await option.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+        if (label !== (matchedOption?.label ?? value).trim()) continue;
+        await option.click();
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          if (await isCommitted()) return;
+          if (attempt < 19) await this.page.waitForTimeout(50);
+        }
+        break;
+      }
+      throw new Error(`The select option ${value} was not committed by the form.`);
     }
 
     if (this.type === "radio") {
@@ -331,6 +490,22 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
     await this.locator().setInputFiles(path);
   }
 
+  private async readCustomSelection(): Promise<string | null> {
+    const candidate = await this.locator().evaluate((element) => {
+      const root = element.closest(".select__container") ?? element.parentElement;
+      const selectedValue = root?.querySelector(".select__single-value")?.textContent;
+      const ariaValue = element.getAttribute("aria-valuetext");
+      const dataValue = element.parentElement?.getAttribute("data-value");
+      return [selectedValue, ariaValue, dataValue]
+        .map((value) => value?.replace(/\s+/g, " ").trim() ?? "")
+        .find(Boolean) ?? null;
+    }).catch(() => null);
+    if (!candidate) return null;
+    const matchedOption = this.options?.find((option) =>
+      greenhouseOptionMatches(option.label, option.value, candidate));
+    return matchedOption?.value ?? candidate;
+  }
+
   async readValue(): Promise<string | boolean | null> {
     if (this.type === "checkbox") {
       return this.locator().isChecked();
@@ -347,6 +522,10 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
         if (state) return state;
       }
       return null;
+    }
+    if (this.type === "select") {
+      const tagName = await this.locator().evaluate((element) => element.tagName.toLowerCase());
+      if (tagName !== "select") return this.readCustomSelection();
     }
     const value = await this.locator().inputValue();
     return value.trim() ? value : null;
@@ -441,7 +620,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       const diagnostic: BrowserExecutionDiagnostic = {
         stage: "navigation",
         reasonCode: isTimeoutError(error) ? "navigation_timeout" : "navigation_failed",
-        message: safeBrowserDiagnosticMessage(error, "The Lever application page could not be opened."),
+        message: safeBrowserDiagnosticMessage(error, "The application page could not be opened."),
         boundaries: { ...this.boundaryState },
         navigation: { ...this.navigationDiagnostics },
       };
@@ -458,6 +637,11 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
     const passwordCount = await this.page.locator('input[type="password"]').count().catch(() => 0);
     const captchaObservation = await this.page.locator(CAPTCHA_MARKER_SELECTOR).evaluateAll((elements): Omit<CaptchaDomObservation, "explicitChallengeText"> => {
       const isVisible = (element: Element): boolean => {
+        for (let ancestor: Element | null = element; ancestor; ancestor = ancestor.parentElement) {
+          const style = window.getComputedStyle(ancestor);
+          if (ancestor.getAttribute("aria-hidden") === "true" || style.display === "none" ||
+            style.visibility === "hidden" || Number.parseFloat(style.opacity || "1") === 0) return false;
+        }
         const style = window.getComputedStyle(element);
         const rect = element.getBoundingClientRect();
         return element.getAttribute("aria-hidden") !== "true" &&
@@ -469,6 +653,13 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       };
       const isChallengeIframe = (element: Element): boolean => {
         if (element.tagName.toLowerCase() !== "iframe") return false;
+        // Invisible reCAPTCHA renders its attribution badge using an anchor
+        // iframe too. That iframe is not a checkbox or image challenge.
+        try {
+          const url = new URL(element.getAttribute("src") ?? "", document.baseURI);
+          if (/\/(?:api2|enterprise)\/anchor$/.test(url.pathname) &&
+            url.searchParams.get("size") === "invisible" && element.closest(".grecaptcha-badge")) return false;
+        } catch { /* Unknown visible frames remain ambiguous. */ }
         const haystack = [
           element.getAttribute("src") ?? "",
           element.getAttribute("title") ?? "",
@@ -486,6 +677,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
         return /(?:verify\s+you\s+are\s+human|prove\s+you\s+are\s+human|i['’]?m\s+not\s+a\s+robot|select\s+all\b|captcha\s+challenge|recaptcha\s+challenge|complete\s+(?:the\s+)?captcha|checking\s+your\s+browser|security\s+check)/i.test(haystack);
       };
       let visibleMarkerCount = 0;
+      let passiveVisibleMarkerCount = 0;
       let challengeIframeCount = 0;
       let visibleChallengeIframeCount = 0;
       let visibleChallengeControlCount = 0;
@@ -496,17 +688,34 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
         if (challengeIframe) challengeIframeCount += 1;
         if (challengeIframe && visible) visibleChallengeIframeCount += 1;
         if (isChallengeControl(element, visible)) visibleChallengeControlCount += 1;
+        if (visible && !challengeIframe && !isChallengeControl(element, visible)) {
+          const badge = element.closest(".grecaptcha-badge");
+          const passiveText = /protected by\s+recaptcha/i.test(element.textContent ?? "") &&
+            !element.querySelector('iframe, input, button, [role="checkbox"], [role="dialog"]');
+          // Unknown frames cannot become passive solely through their parent.
+          const unexpectedControl = badge && Array.from(badge.querySelectorAll('button, input, select, textarea, [role="button"], [role="checkbox"], [role="dialog"], [tabindex]')).some(isVisible);
+          let passiveFrame = element.matches('.grecaptcha-badge, .grecaptcha-logo') && !unexpectedControl;
+          if (element.tagName.toLowerCase() === "iframe" && badge && !unexpectedControl) {
+            try {
+              const url = new URL(element.getAttribute("src") ?? "", document.baseURI);
+              passiveFrame = /\/(?:api2|enterprise)\/anchor$/.test(url.pathname) && url.searchParams.get("size") === "invisible";
+            } catch { /* Remain uncertain. */ }
+          }
+          if ((badge && passiveFrame) || passiveText) passiveVisibleMarkerCount += 1;
+        }
       }
       return {
         markerCount: elements.length,
         visibleMarkerCount,
+        passiveVisibleMarkerCount,
         challengeIframeCount,
         visibleChallengeIframeCount,
         visibleChallengeControlCount,
       };
     }).catch(() => ({
-      markerCount: 0,
-      visibleMarkerCount: 0,
+      // Failure to observe is not evidence that no challenge exists.
+      markerCount: 1,
+      visibleMarkerCount: 1,
       challengeIframeCount: 0,
       visibleChallengeIframeCount: 0,
       visibleChallengeControlCount: 0,
@@ -515,6 +724,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
     const lowerBody = bodyText.toLowerCase();
     this.captchaDiagnostics = classifyCaptchaEvidence({
       ...captchaObservation,
+      markerCount: /protected by\s+recaptcha/i.test(bodyText) ? Math.max(1, captchaObservation.markerCount) : captchaObservation.markerCount,
       explicitChallengeText: ACTIVE_CAPTCHA_TEXT.test(lowerBody),
     });
 
@@ -522,7 +732,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       return {
         kind: "captcha",
         question: "Complete the CAPTCHA in the browser",
-        reason: "The Lever application is protected by a CAPTCHA or human-verification boundary. The executor will not bypass it.",
+        reason: "The application is protected by a CAPTCHA or human-verification boundary. The executor will not bypass it.",
         evidence: [
           ...captchaEvidence(this.captchaDiagnostics),
           "credentials-never-requested",
@@ -548,6 +758,11 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
     const raw = await controls.evaluateAll((elements) => elements.flatMap((element, index): InspectedRawField[] => {
       const control = element as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
       if (control instanceof HTMLInputElement && ["hidden", "submit", "button", "reset"].includes(control.type.toLowerCase())) {
+        return [];
+      }
+      // Greenhouse uses visually-hidden required inputs as validation mirrors
+      // for its custom comboboxes. They are infrastructure, not user fields.
+      if (control instanceof HTMLInputElement && (control.classList.contains("requiredInput") || control.className.includes("requiredInput"))) {
         return [];
       }
 
@@ -621,6 +836,8 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
         ? "textarea"
         : control instanceof HTMLSelectElement
           ? "select"
+          : control.getAttribute("role") === "combobox"
+            ? "select"
           : rawType === "email"
             ? "email"
             : rawType === "tel"
@@ -651,6 +868,39 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
               })
           : undefined;
       const id = control.id.trim() || control.getAttribute("name")?.trim() || `field-${index + 1}`;
+      const tagName = control.tagName.toLowerCase();
+      const escapeIdentifier = (value: string): string => value.replace(/[^a-zA-Z0-9_-]/g, (character) => `\\${character}`);
+      const escapeAttribute = (value: string): string => value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      const uniqueSelector = (selector: string): boolean => document.querySelectorAll(selector).length === 1;
+      let stableSelector: string | undefined;
+      let stableSelectorSource: string | undefined;
+      if (control.id.trim()) {
+        const selector = `${tagName}#${escapeIdentifier(control.id.trim())}`;
+        if (uniqueSelector(selector)) {
+          stableSelector = selector;
+          stableSelectorSource = `dom-id:${control.id.trim()}`;
+        }
+      }
+      if (!stableSelector && control.name?.trim()) {
+        const nameSelector = `${tagName}[name="${escapeAttribute(control.name.trim())}"]`;
+        const selector = control instanceof HTMLInputElement && control.type.toLowerCase() === "radio"
+          ? `${nameSelector}[value="${escapeAttribute(control.value)}"]`
+          : nameSelector;
+        if (uniqueSelector(selector)) {
+          stableSelector = selector;
+          stableSelectorSource = `dom-name:${control.name.trim()}`;
+        }
+      }
+      if (!stableSelector) {
+        const ariaLabelValue = control.getAttribute("aria-label")?.trim();
+        if (ariaLabelValue) {
+          const selector = `${tagName}[aria-label="${escapeAttribute(ariaLabelValue)}"]`;
+          if (uniqueSelector(selector)) {
+            stableSelector = selector;
+            stableSelectorSource = "dom-aria-label";
+          }
+        }
+      }
       const isFirstRadioInGroup = type !== "radio" || !control.name ||
         Array.from(document.querySelectorAll('input[type="radio"]')).find((candidate) => (candidate as HTMLInputElement).name === control.name) === control;
       return [{
@@ -659,6 +909,8 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
         label,
         type,
         required: isFirstRadioInGroup && (control.required || control.getAttribute("aria-required") === "true"),
+        ...(stableSelector ? { stableSelector } : {}),
+        ...(stableSelectorSource ? { stableSelectorSource } : {}),
         ...(options && options.length > 0 ? { options } : {}),
         ...(legend ? { section: legend } : {}),
         ...(control instanceof HTMLInputElement && control.type.toLowerCase() === "radio" && control.name
@@ -676,32 +928,114 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       const uniqueItem = occurrence === 0
         ? item
         : { ...item, id: `${item.id}--${occurrence + 1}` };
-      const locator = controls.nth(uniqueItem.index);
+      const enrichedItem = uniqueItem.type === "select" && (!uniqueItem.options || uniqueItem.options.length === 0)
+        ? { ...uniqueItem, options: await this.inspectCustomSelectOptions(uniqueItem) }
+        : uniqueItem;
+      const locator = enrichedItem.stableSelector ? this.page.locator(enrichedItem.stableSelector) : controls.nth(enrichedItem.index);
       if (await visibleFormControl(locator)) {
-        fields.push(new PlaywrightLeverBrowserField(this.page, uniqueItem));
+        fields.push(new PlaywrightLeverBrowserField(this.page, enrichedItem));
       }
     }
     return fields;
   }
 
-  async hasSubmitControl(): Promise<boolean> {
-    const submitInputs = this.page.locator('input[type="submit"], button[type="submit"]');
-    if (await submitInputs.count() > 0) {
-      for (let index = 0; index < await submitInputs.count(); index += 1) {
-        if (await visibleFormControl(submitInputs.nth(index))) return true;
+  /** Opens a custom combobox only to read its visible options; no option is selected. */
+  private async inspectCustomSelectOptions(raw: InspectedRawField): Promise<readonly ApplicationFieldOption[] | undefined> {
+    if (!raw.stableSelector) return undefined;
+    const field = this.page.locator(raw.stableSelector);
+    if (!(await visibleFormControl(field))) return undefined;
+    const toggle = field
+      .locator('xpath=ancestor::div[contains(@class, "select__container")]')
+      .getByRole("button", { name: "Toggle flyout" });
+    if (await toggle.count() > 0 && await visibleFormControl(toggle.first())) {
+      await toggle.first().click();
+    } else {
+      await field.click();
+    }
+    try {
+      const options = this.page.locator('[role="option"], .select__option');
+      const result: ApplicationFieldOption[] = [];
+      const seen = new Set<string>();
+      for (let index = 0; index < await options.count(); index += 1) {
+        const option = options.nth(index);
+        if (!(await visibleFormControl(option))) continue;
+        const label = (await option.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+        if (!label) continue;
+        const value = (await option.getAttribute("data-value").catch(() => null)) ??
+          (await option.getAttribute("value").catch(() => null)) ?? label;
+        const key = `${value}\u0000${label}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.push({ label, value });
       }
+      return result.length > 0 ? result : undefined;
+    } finally {
+      await this.page.keyboard.press("Escape").catch(() => undefined);
+    }
+  }
+
+  async hasSubmitControl(): Promise<boolean> {
+    return Boolean(await this.submitControl());
+  }
+
+  private async submitControl(): Promise<Locator | null> {
+    const submitInputs = this.page.locator('input[type="submit"], button[type="submit"]');
+    for (let index = 0; index < await submitInputs.count(); index += 1) {
+      const candidate = submitInputs.nth(index);
+      if (await visibleFormControl(candidate)) return candidate;
     }
     // Text-only buttons are considered only inside the application form. This
     // avoids treating a page-level cookie/help/navigation button as Submit.
     const buttons = this.page.locator("form button");
-    const count = await buttons.count();
-    for (let index = 0; index < count; index += 1) {
+    for (let index = 0; index < await buttons.count(); index += 1) {
       const button = buttons.nth(index);
       if (!(await visibleFormControl(button))) continue;
       const text = (await button.innerText().catch(() => "")).trim().toLowerCase();
-      if (/^(?:submit(?: application)?|apply(?: now)?|send application)$/.test(text)) return true;
+      if (/^(?:submit(?: application)?|apply(?: now)?|send application)$/.test(text)) return button;
     }
-    return false;
+    return null;
+  }
+
+  async submit(): Promise<BrowserSubmissionResult> {
+    const control = await this.submitControl();
+    if (!control) return { clicked: false, confirmed: false, evidence: "submit:control-missing" };
+    if (await control.isDisabled().catch(() => true) || (await control.getAttribute("aria-disabled").catch(() => null)) === "true") {
+      return { clicked: false, confirmed: false, evidence: "submit:control-disabled" };
+    }
+
+    const beforeUrl = this.page.url();
+    let clicked = false;
+    try {
+      await control.click();
+      clicked = true;
+    } catch {
+      // A navigation can race the click promise. The post-click inspection
+      // below remains conservative and will not claim success without proof.
+      clicked = this.page.url() !== beforeUrl;
+    }
+
+    await this.page.waitForLoadState("domcontentloaded", { timeout: Math.min(this.timeoutMs, 5_000) }).catch(() => undefined);
+    await this.page.waitForTimeout(Math.min(750, this.timeoutMs));
+    const afterUrl = this.page.url();
+    const bodyText = await this.page.locator("body").innerText({ timeout: this.timeoutMs }).catch(() => "");
+    const confirmationText = /\b(?:your application (?:has been )?submitted|application (?:has been )?submitted|thank you for applying|thanks for applying|application received)\b/i.test(bodyText);
+    const confirmationUrl = /\/(?:confirmation|success|thank[-_]?you)(?:\/|$)/i.test(new URL(afterUrl).pathname);
+    const confirmed = clicked && (confirmationText || confirmationUrl);
+    if (!confirmed) {
+      return {
+        clicked,
+        confirmed: false,
+        evidence: clicked ? "submit:clicked; confirmation:not-detected" : "submit:not-clicked; confirmation:not-detected",
+      };
+    }
+
+    const parsed = new URL(afterUrl);
+    return {
+      clicked: true,
+      confirmed: true,
+      externalApplicationId: `confirmation:${parsed.hostname}${parsed.pathname}`,
+      evidence: confirmationUrl ? "submit:clicked; confirmation:url" : "submit:clicked; confirmation:text",
+    };
   }
 
   async close(): Promise<void> {

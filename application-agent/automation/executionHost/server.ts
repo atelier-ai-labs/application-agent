@@ -151,6 +151,7 @@ export function createExecutionHostServer(options: ExecutionHostServerOptions): 
 
   const registry = options.registry ?? new ExecutionSessionRegistry({
     executor: options.executor ?? (() => { throw new Error("An application executor is required."); })(),
+    ...(options.allowAutomaticSubmission !== undefined ? { allowAutomaticSubmission: options.allowAutomaticSubmission } : {}),
     ...(options.now ? { now: options.now } : {}),
     ...(options.createId ? { createId: options.createId } : {}),
     ...(options.maxConcurrent !== undefined ? { maxConcurrent: options.maxConcurrent } : {}),
@@ -319,9 +320,11 @@ export function createConfiguredExecutionHostServer(
 ): ExecutionHostServer {
   const config = resolveExecutionHostConfig(options.env ?? process.env);
   const executor = createPlaywrightLeverBrowserExecutor({
+    provider: "auto",
     headless: config.headless,
     timeoutMs: config.browserTimeoutMs,
     ...(Object.keys(config.resumePaths).length > 0 ? { resumePaths: config.resumePaths } : {}),
+    allowAutomaticSubmission: config.submissionAuthority === "automatic",
     ...(options.now ? { now: options.now } : {}),
   });
   return createExecutionHostServer({
@@ -337,6 +340,7 @@ export function createConfiguredExecutionHostServer(
     allowNonLoopback: config.allowNonLoopback,
     maxConcurrent: config.maxConcurrent,
     sessionTimeoutMs: config.sessionTimeoutMs,
+    allowAutomaticSubmission: config.submissionAuthority === "automatic",
     ...(options.now ? { now: options.now } : {}),
     ...(options.logger ? { logger: options.logger } : {}),
   });

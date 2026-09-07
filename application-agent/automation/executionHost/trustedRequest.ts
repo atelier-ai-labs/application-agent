@@ -4,6 +4,11 @@ import {
   isVerifiedLeverHostedUrl,
   leverSourceId,
 } from "../../src/domain/leverJobSource";
+import {
+  isVerifiedGreenhouseApplicationUrl,
+  isVerifiedGreenhouseHostedUrl,
+} from "../../src/domain/greenhouseJobSource";
+import { classifyJobUrl, isVerifiedRipplingApplicationUrl } from "../../src/domain/jobUrlClassifier";
 import { isExecutionHostRequest } from "../../src/domain/executionHostValidation";
 
 function nonEmpty(value: string | undefined): string | undefined {
@@ -48,20 +53,8 @@ export function trustedExecutionRequestReason(value: unknown): string | undefine
     return "A private/local candidate profile is required before opening a live application form.";
   }
 
-  const sourceId = nonEmpty(careerJob.sourceId);
-  const postingId = nonEmpty(careerJob.sourceRecordId);
-  if (!sourceId?.startsWith("lever:") || !postingId) {
-    return "The posting is missing its verified Lever source identity.";
-  }
-
-  let site: string;
-  try {
-    site = leverSourceId(sourceId.slice("lever:".length)).slice("lever:".length);
-  } catch {
-    return "The Lever SITE identifier is invalid.";
-  }
   if (!careerJob.job.sourceUrl || !careerJob.job.applicationUrl) {
-    return "The posting does not contain both verified Lever URLs.";
+    return "The posting does not contain both its source and application URLs.";
   }
   if (application.job.sourceUrl !== careerJob.job.sourceUrl || application.job.applicationUrl !== careerJob.job.applicationUrl) {
     return "The application packet URL provenance does not match the career job.";
@@ -77,13 +70,65 @@ export function trustedExecutionRequestReason(value: unknown): string | undefine
   } catch {
     return "The application URL is not syntactically valid.";
   }
-  if (!isVerifiedLeverHostedUrl(careerJob.job.sourceUrl, site, postingId)) {
-    return "The posting URL is not the verified Lever hosted URL for this provider ID.";
+  const sourceId = nonEmpty(careerJob.sourceId) ?? "";
+  const applicationClassification = classifyJobUrl(careerJob.job.applicationUrl);
+  if (sourceId.startsWith("lever:")) {
+    const postingId = nonEmpty(careerJob.sourceRecordId);
+    if (!postingId) return "The posting is missing its verified Lever source identity.";
+    let site: string;
+    try {
+      site = leverSourceId(sourceId.slice("lever:".length)).slice("lever:".length);
+    } catch {
+      return "The Lever SITE identifier is invalid.";
+    }
+    if (!isVerifiedLeverHostedUrl(careerJob.job.sourceUrl, site, postingId)) {
+      return "The posting URL is not the verified Lever hosted URL for this provider ID.";
+    }
+    if (!isVerifiedLeverApplicationUrl(careerJob.job.applicationUrl, site, postingId)) {
+      return "The application URL is not the verified Lever /apply path for this provider ID.";
+    }
+    return undefined;
   }
-  if (!isVerifiedLeverApplicationUrl(careerJob.job.applicationUrl, site, postingId)) {
-    return "The application URL is not the verified Lever /apply URL for this provider ID.";
+
+  if (applicationClassification.kind === "greenhouse" &&
+    applicationClassification.siteIdentifier && applicationClassification.postingIdentifier) {
+    const resolution = careerJob.destinationResolution;
+    const destinationMatches = resolution?.status === "resolved" &&
+      resolution.actionable === true &&
+      resolution.ats === "Greenhouse" &&
+      resolution.destinationUrl === careerJob.job.applicationUrl;
+    const directGreenhouseSource = sourceId.startsWith("greenhouse:") &&
+      Boolean(careerJob.sourceRecordId) &&
+      isVerifiedGreenhouseHostedUrl(careerJob.job.sourceUrl, sourceId.slice("greenhouse:".length), careerJob.sourceRecordId ?? "");
+    if (!destinationMatches && !directGreenhouseSource) {
+      return "The Greenhouse destination is not independently verified for this posting.";
+    }
+    if (directGreenhouseSource && !isVerifiedGreenhouseApplicationUrl(
+      careerJob.job.applicationUrl,
+      applicationClassification.siteIdentifier,
+      applicationClassification.postingIdentifier,
+    )) {
+      return "The application URL is not the verified Greenhouse application path for this provider ID.";
+    }
+    return undefined;
   }
-  return undefined;
+
+  if (applicationClassification.kind === "rippling" &&
+    applicationClassification.siteIdentifier &&
+    applicationClassification.postingIdentifier &&
+    isVerifiedRipplingApplicationUrl(careerJob.job.applicationUrl)) {
+    const resolution = careerJob.destinationResolution;
+    const destinationMatches = resolution?.status === "resolved" &&
+      resolution.actionable === true &&
+      resolution.ats === "Rippling" &&
+      resolution.destinationUrl === careerJob.job.applicationUrl;
+    if (!destinationMatches) {
+      return "The Rippling destination is not independently verified for this posting.";
+    }
+    return undefined;
+  }
+
+  return "The posting does not have a supported verified application destination.";
 }
 
 export function assertTrustedExecutionRequest(value: unknown): asserts value is ExecutionHostRequest {

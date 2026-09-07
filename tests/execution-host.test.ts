@@ -1,3 +1,5 @@
+// @vitest-environment node
+
 import type { AddressInfo } from "node:net";
 import { describe, expect, it } from "vitest";
 import {
@@ -30,6 +32,7 @@ import { HttpExecutionHostClient, ExecutionHostUnavailableError } from "../appli
 import { createExecutionHostServer } from "../application-agent/automation/executionHost/server";
 import { ExecutionHostRegistryError, ExecutionSessionRegistry } from "../application-agent/automation/executionHost/sessionRegistry";
 import { resolveResumePathsFromEnv } from "../application-agent/automation/executionHost/config";
+import { trustedExecutionRequestReason } from "../application-agent/automation/executionHost/trustedRequest";
 
 const capturedAt = "2026-08-30T12:00:00.000Z";
 
@@ -256,6 +259,70 @@ async function json(response: Response): Promise<Record<string, unknown>> {
 }
 
 describe("trusted local execution host", () => {
+  it("trusts a verified Greenhouse destination without confusing it with the discovery source", async () => {
+    const fixtureValue = await fixture("greenhouse-destination");
+    const greenhouseUrl = "https://job-boards.greenhouse.io/kapitus/jobs/4390052009";
+    const greenhouseJob = {
+      ...fixtureValue.careerJob,
+      sourceId: "himalayas-live",
+      sourceRecordId: "kapitus-himalayas-guid",
+      destinationResolution: {
+        status: "resolved" as const,
+        attemptedAt: capturedAt,
+        destinationUrl: greenhouseUrl,
+        ats: "Greenhouse" as const,
+        actionable: true,
+        provenance: "recognized_ats_evidence" as const,
+        evidence: ["bounded public destination evidence"],
+      },
+      job: {
+        ...fixtureValue.careerJob.job,
+        company: "Kapitus",
+        title: "Software Engineer II - Engineering",
+        sourceUrl: "https://himalayas.app/jobs/kapitus/software-engineer-ii-engineering",
+        applicationUrl: greenhouseUrl,
+      },
+    };
+    const request: ExecutionHostRequest = {
+      ...fixtureValue.request,
+      careerJob: greenhouseJob,
+      application: { ...fixtureValue.application, job: greenhouseJob.job },
+    };
+    expect(trustedExecutionRequestReason(request)).toBeUndefined();
+  });
+
+  it("trusts a verified curated Rippling destination and keeps it on the supported path", async () => {
+    const fixtureValue = await fixture("rippling-destination");
+    const ripplingUrl = "https://ats.rippling.com/fullthrottle1/jobs/rippling-posting-123";
+    const ripplingJob = {
+      ...fixtureValue.careerJob,
+      sourceId: "curated-live",
+      sourceRecordId: "fullthrottle1:rippling-posting-123",
+      destinationResolution: {
+        status: "resolved" as const,
+        attemptedAt: capturedAt,
+        destinationUrl: ripplingUrl,
+        ats: "Rippling" as const,
+        actionable: true,
+        provenance: "recognized_ats_evidence" as const,
+        evidence: ["curated:explicit-public-posting"],
+      },
+      job: {
+        ...fixtureValue.careerJob.job,
+        company: "FullThrottle.ai",
+        title: "AI Platform Engineer",
+        sourceUrl: ripplingUrl,
+        applicationUrl: ripplingUrl,
+      },
+    };
+    const request: ExecutionHostRequest = {
+      ...fixtureValue.request,
+      careerJob: ripplingJob,
+      application: { ...fixtureValue.application, job: ripplingJob.job },
+    };
+    expect(trustedExecutionRequestReason(request)).toBeUndefined();
+  });
+
   it("keeps the browser handle server-side and resumes the same session", async () => {
     const executor = new BlockingPreparationExecutor();
     const { request } = await fixture("same-session", executor);
@@ -391,6 +458,44 @@ describe("trusted local execution host", () => {
     expect(failed.error).toContain("rejected submission proof");
     expect(failed.result?.state).toBe("failed");
     expect(failed.result && "reason" in failed.result ? failed.result.reason : undefined).toContain("no application was submitted");
+  });
+
+  it("forwards submission proof only when the campaign and host both authorize it", async () => {
+    const executor = new SubmittedProofExecutor();
+    executor.completeHumanStep();
+    const { request } = await fixture("proof-accepted", executor);
+    const automaticRequest = {
+      ...request,
+      campaign: {
+        ...request.campaign,
+        submissionPolicy: { authority: "automatic" as const, requireExplicitApproval: false },
+      },
+    };
+    const registry = new ExecutionSessionRegistry({ executor, allowAutomaticSubmission: true });
+    const started = registry.start(automaticRequest);
+    const submitted = await registry.waitForStatus(started.id, ["submitted"]);
+    expect(submitted.status).toBe("submitted");
+    expect(submitted.result?.state).toBe("submitted");
+  });
+
+  it("records applied state only after an authorized host submission proof", async () => {
+    const executor = new SubmittedProofExecutor();
+    executor.completeHumanStep();
+    const { request, campaign, careerJob, service, tracker } = await fixture("proof-lifecycle", executor);
+    const authorizedCampaign = service.authorizeAutomaticSubmission(campaign.id);
+    const automaticRequest = {
+      ...request,
+      campaign: authorizedCampaign,
+    };
+    const registry = new ExecutionSessionRegistry({ executor, allowAutomaticSubmission: true });
+    const started = registry.start(automaticRequest);
+    const submitted = await registry.waitForStatus(started.id, ["submitted"]);
+    expect(service.getApplication(careerJob.applicationId!).status).toBe("ready_for_review");
+
+    const applied = await service.recordExecutionHostSnapshot(campaign.id, careerJob.id, submitted);
+    expect(applied.status).toBe("applied");
+    expect(service.getApplication(careerJob.applicationId!).status).toBe("applied");
+    expect(tracker.listUpdates()).toHaveLength(1);
   });
 
   it("persists a host result without applied state or tracker writes", async () => {

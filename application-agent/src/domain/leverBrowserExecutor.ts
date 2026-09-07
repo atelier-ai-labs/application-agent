@@ -26,6 +26,7 @@ import {
 import type {
   CareerBlocker,
   CareerBlockerDraft,
+  QuestionProvenance,
   CareerJob,
 } from "./campaignTypes";
 import type {
@@ -40,14 +41,29 @@ import {
   isVerifiedLeverHostedUrl,
   leverSourceId,
 } from "./leverJobSource";
+import {
+  isVerifiedGreenhouseApplicationUrl,
+  isVerifiedGreenhouseHostedUrl,
+} from "./greenhouseJobSource";
+import {
+  classifyJobUrl,
+  isVerifiedRipplingApplicationUrl,
+  ripplingApplicationUrl,
+} from "./jobUrlClassifier";
 import { monotonicNow } from "./executionTrace";
 
 export interface LeverBrowserExecutorOptions {
   sessionFactory: LeverBrowserSessionFactory;
+  /** Defaults to Lever for backwards compatibility; auto accepts verified ATS destinations. */
+  provider?: "lever" | "greenhouse" | "rippling" | "auto";
   /** Local/private resume artifacts keyed by the selected family. Never persisted by the domain. */
   resumePaths?: Partial<Record<ResumeFamilyId, string>>;
   /** The concrete host may check a path before the browser attempts upload. */
   resumeFileExists?: (path: string) => boolean | Promise<boolean>;
+  /** Optional host-side restriction for a bounded preparation-only run. */
+  allowedFieldClassifications?: readonly ApplicationFieldClassification[];
+  /** Server-only capability gate; campaign policy must independently be automatic. */
+  allowAutomaticSubmission?: boolean;
   now?: () => string;
 }
 
@@ -57,6 +73,7 @@ interface SessionState {
 }
 
 interface TrustedTarget {
+  provider: "lever" | "greenhouse" | "rippling";
   site: string;
   postingId: string;
   applicationUrl: string;
@@ -148,15 +165,60 @@ function fieldText(field: Pick<LeverBrowserField, "id" | "label" | "section">): 
   return normalized([field.id, field.label, field.section].filter(Boolean).join(" "));
 }
 
+function inspectedPromptText(field: Pick<LeverBrowserField, "id" | "label" | "section">): string {
+  const contextualField = field as Pick<LeverBrowserField, "id" | "label" | "section"> & {
+    questionDescriptor?: {
+      promptText?: string;
+      accessibleName?: string;
+      nearbyInstructionText?: string;
+      sectionTitle?: string;
+    };
+  };
+  return normalized([
+    field.id,
+    field.label,
+    field.section,
+    contextualField.questionDescriptor?.promptText,
+    contextualField.questionDescriptor?.accessibleName,
+    contextualField.questionDescriptor?.nearbyInstructionText,
+    contextualField.questionDescriptor?.sectionTitle,
+  ].filter(Boolean).join(" "));
+}
+
+type ProfileFactField = "linkedin" | "website" | "desired_work_location" | "start_availability";
+
+function profileFactField(field: Pick<LeverBrowserField, "id" | "label" | "section">): ProfileFactField | undefined {
+  const text = inspectedPromptText(field).replace(/[_-]+/g, " ");
+  if (hasPhrase(text, /linkedin|linked in/)) return "linkedin";
+  if (hasPhrase(text, /website|personal site|web site/)) return "website";
+  if (hasPhrase(text, /(?:desired|preferred|target) (?:work )?location|location preference|where do you prefer to work|where would you like to work/)) {
+    return "desired_work_location";
+  }
+  if (hasPhrase(text, /employ|employer|company|work history|job history|position held|job title|occupation/)) return undefined;
+  if (hasPhrase(text, /(?:available|availability|start|commence|join|begin).{0,24}(?:date|when)|(?:date|when).{0,24}(?:available|availability|start|commence|join|begin)/)) {
+    return "start_availability";
+  }
+  return undefined;
+}
+
 function hasPhrase(text: string, pattern: RegExp): boolean {
   return pattern.test(text);
+}
+
+/** Preferred names require an explicit profile fact; fullName is never a fallback. */
+export function isPreferredNameField(
+  field: Pick<LeverBrowserField, "id" | "label" | "section">,
+): boolean {
+  const text = fieldText(field).replace(/[_-]+/g, " ");
+  return /\bpreferred(?: first| given)? name\b/.test(text);
 }
 
 export function classifyLeverApplicationField(
   field: Pick<LeverBrowserField, "id" | "label" | "section" | "type">,
 ): ApplicationFieldClassification {
   const text = fieldText(field);
-  if (field.type === "file" || hasPhrase(text, /resume|cv|curriculum vitae/)) return "resume_upload";
+  const factField = profileFactField(field);
+  if (hasPhrase(text, /resume|cv|curriculum vitae/)) return "resume_upload";
   if (hasPhrase(text, /demographic|gender identity|race|ethnicity|veteran|disability|voluntary self/)) return "demographic";
   if (hasPhrase(text, /legal|attest|certif(?:y|ication)|agree to|authorize|terms|accurate and complete/)) return "legal_attestation";
   if (hasPhrase(text, /work authorization|authorized to work|legally authorized|right to work|eligible to work/)) return "work_authorization";
@@ -166,6 +228,7 @@ export function classifyLeverApplicationField(
   if (hasPhrase(text, /travel/)) return "travel";
   if (hasPhrase(text, /education|degree|university|college|school|major|study/)) return "education";
   if (hasPhrase(text, /why|interest|motivat|cover letter|tell us|anything else|additional information/)) return "free_text";
+  if (factField) return factField;
   if (hasPhrase(text, /employ|employer|company|work history|job history|position held|job title|occupation|start date|end date/)) return "employment_history";
   if (hasPhrase(text, /location|city|state|country|address|postal|zip/)) return "location";
   if (hasPhrase(text, /first name|given name|last name|family name|surname|full name|email|e-mail|phone|telephone|mobile|linkedin|portfolio|website/)) return "contact";
@@ -191,11 +254,12 @@ function descriptor(field: LeverBrowserField): ApplicationFieldDescriptor {
   };
 }
 
-function fieldEvidence(field: ApplicationFieldDescriptor): string[] {
+function fieldEvidence(field: ApplicationFieldDescriptor, executor = "lever-browser"): string[] {
   return [
-    "executor:lever-browser",
+    `executor:${executor}`,
     `field-id:${field.id}`,
     `field-type:${field.type}`,
+    ...(nonEmpty(field.label) ? [`field-label:${field.label}`] : []),
     `field-required:${field.required}`,
     `classification:${field.classification}`,
     ...(field.options && field.options.length > 0
@@ -229,6 +293,7 @@ function blockerQuestion(field: ApplicationFieldDescriptor): string {
     }
     return `Required Yes/No application question. Nearby text may be: "${questionDescriptor.promptText}". Please answer manually.`;
   }
+  if (questionDescriptor?.promptText) return questionDescriptor.promptText;
   return isUnlabeledBinaryRadio
     ? `Required yes/no application question (control ${field.id}); the question text was not exposed.`
     : field.label;
@@ -255,25 +320,29 @@ function formBlocker(
   field: ApplicationFieldDescriptor,
   reason: string,
   kind = blockerKind(field.classification),
+  questionProvenance: QuestionProvenance = "ATS_FORM",
+  executor = "lever-browser",
 ): CareerBlockerDraft {
   return {
     kind,
     unit: "submission",
+    questionProvenance,
     field: field.id,
     question: blockerQuestion(field),
     reason,
-    evidence: fieldEvidence(field),
+    evidence: fieldEvidence(field, executor),
     resumeAfterHuman: true,
   };
 }
 
-function boundaryBlocker(boundary: BrowserHumanBoundary): CareerBlockerDraft {
+function boundaryBlocker(boundary: BrowserHumanBoundary, executor = "lever-browser"): CareerBlockerDraft {
   return {
     kind: boundary.kind,
     unit: "external",
+    questionProvenance: "POLICY",
     question: boundary.question,
     reason: boundary.reason,
-    evidence: ["executor:lever-browser", ...boundary.evidence],
+    evidence: [`executor:${executor}`, ...boundary.evidence],
     resumeAfterHuman: true,
   };
 }
@@ -403,6 +472,63 @@ function firstEducation(profile: CandidateProfile | undefined) {
   return profile?.education[0];
 }
 
+function groundedCountryFromLocation(value: string | null | undefined): string | undefined {
+  const location = nonEmpty(value);
+  if (!location) return undefined;
+  const country = location.split(",").map((part) => part.trim()).filter(Boolean).at(-1);
+  if (!country) return undefined;
+  if (/^(?:us|u\.s\.?|usa|u\.s\.a\.?|united states|united states of america)$/i.test(country)) {
+    return "United States";
+  }
+  return country;
+}
+
+function groundedStateFromLocation(value: string | null | undefined): string | undefined {
+  const parts = value?.split(",").map((part) => part.trim()).filter(Boolean) ?? [];
+  if (parts.length < 2) return undefined;
+  const country = parts.at(-1);
+  if (!country || !/^(?:us|u\.s\.?|usa|u\.s\.a\.?|united states|united states of america)$/i.test(country)) {
+    return undefined;
+  }
+  return nonEmpty(parts.at(-2));
+}
+
+const US_STATE_ABBREVIATIONS: Readonly<Record<string, string>> = {
+  alabama: "al", alaska: "ak", arizona: "az", arkansas: "ar", california: "ca",
+  colorado: "co", connecticut: "ct", delaware: "de", florida: "fl", georgia: "ga",
+  hawaii: "hi", idaho: "id", illinois: "il", indiana: "in", iowa: "ia",
+  kansas: "ks", kentucky: "ky", louisiana: "la", maine: "me", maryland: "md",
+  massachusetts: "ma", michigan: "mi", minnesota: "mn", mississippi: "ms",
+  missouri: "mo", montana: "mt", nebraska: "ne", nevada: "nv", "new hampshire": "nh",
+  "new jersey": "nj", "new mexico": "nm", "new york": "ny", "north carolina": "nc",
+  "north dakota": "nd", ohio: "oh", oklahoma: "ok", oregon: "or", pennsylvania: "pa",
+  "rhode island": "ri", "south carolina": "sc", "south dakota": "sd", tennessee: "tn",
+  texas: "tx", utah: "ut", vermont: "vt", virginia: "va", washington: "wa",
+  "west virginia": "wv", wisconsin: "wi", wyoming: "wy",
+};
+
+function groundedStateEligibilityFromLocation(
+  fieldTextValue: string,
+  location: string | null | undefined,
+): string | undefined {
+  const state = groundedStateFromLocation(location);
+  if (!state) return undefined;
+  const normalizedState = normalized(state);
+  const abbreviation = US_STATE_ABBREVIATIONS[normalizedState];
+  if (!abbreviation) return undefined;
+  const listedCodes: readonly string[] = fieldTextValue.match(/\b[a-z]{2}\b/g) ?? [];
+  return listedCodes.includes(abbreviation) || fieldTextValue.includes(normalizedState) ? "Yes" : "No";
+}
+
+function groundedDatePart(value: string | null | undefined, part: "month" | "year"): string | undefined {
+  const match = value?.match(/\b(\d{4})[-/]\s*(\d{1,2})\b/);
+  if (!match) return undefined;
+  if (part === "year") return match[1];
+  const month = Number(match[2]);
+  if (month < 1 || month > 12) return undefined;
+  return ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"][month - 1];
+}
+
 function answerAliases(classification: ApplicationFieldClassification, text: string): readonly string[] {
   switch (classification) {
     case "salary": return ["salary_expectations"];
@@ -422,6 +548,15 @@ function answerAliases(classification: ApplicationFieldClassification, text: str
   }
 }
 
+function profileFactAnswerAliases(factField: ProfileFactField): readonly string[] {
+  switch (factField) {
+    case "linkedin": return ["linkedin", "linkedin_url", "linkedinUrl"];
+    case "website": return ["website", "website_url", "websiteUrl", "personal_website"];
+    case "desired_work_location": return ["preferred_work_location", "preferredWorkLocation", "desired_work_location"];
+    case "start_availability": return ["availability_start_date", "availabilityStartDate", "start_availability", "available_start_date"];
+  }
+}
+
 function answerForField(
   field: ApplicationFieldDescriptor,
   answers: readonly ApplicationAnswer[],
@@ -430,6 +565,13 @@ function answerForField(
   const aliases = new Set(answerAliases(field.classification, text));
   const direct = answers.find((answer) => aliases.has(answer.field));
   if (direct) return direct;
+
+  // Consequential categories may only use their exact answer alias (and the
+  // resolved blocker path); loose token matching can cross-match unrelated
+  // prepared answers such as employment summaries.
+  if (["work_authorization", "sponsorship", "salary", "relocation", "travel", "demographic", "legal_attestation"].includes(field.classification)) {
+    return undefined;
+  }
 
   const tokens = normalizedTokens(text);
   return answers.find((answer) => {
@@ -455,13 +597,21 @@ function careerBlockerMatchesField(blocker: CareerBlocker, field: ApplicationFie
     if (!actualSection || normalized(expectedSection) !== normalized(actualSection)) return false;
   }
 
-  const expectedOptions = blockerEvidenceValue(blocker, "options:")
-    ?.split("|")
-    .map((option) => normalized(option))
-    .filter(Boolean);
-  const actualOptions = field.options?.map((option) => normalized(option.label)).filter(Boolean);
-  if (!expectedOptions || !actualOptions || expectedOptions.length !== actualOptions.length ||
-    expectedOptions.some((option) => !actualOptions.includes(option))) return false;
+  const rawExpectedOptions = blockerEvidenceValue(blocker, "options:");
+  if (rawExpectedOptions !== undefined) {
+    const expectedOptions = rawExpectedOptions
+      .split("|")
+      .map((option) => normalized(option))
+      .filter(Boolean);
+    const actualOptions = field.options?.map((option) => normalized(option.label)).filter(Boolean) ?? [];
+    // Greenhouse React comboboxes can expose their option list during the
+    // first inspection and hide it until the control is opened on resume.
+    // An empty later list is therefore not evidence that the question
+    // changed; a different non-empty list still is.
+    if (actualOptions.length > 0 &&
+      (expectedOptions.length !== actualOptions.length ||
+        expectedOptions.some((option) => !actualOptions.includes(option)))) return false;
+  }
   return true;
 }
 
@@ -501,7 +651,40 @@ function explicitValueForField(
 ): { value?: AnswerValue; explicit: boolean } {
   const fromBlocker = resolvedCareerValue(field, request);
   if (isAnswerValuePresent(fromBlocker)) return { value: fromBlocker, explicit: true };
-  return usableAnswer(answerForField(field, request.application.answers), request);
+  const factField = profileFactField(field);
+  if (factField) {
+    const answer = usableAnswer(
+      request.application.answers.find((candidate) => profileFactAnswerAliases(factField).includes(candidate.field)),
+      request,
+    );
+    return answer;
+  }
+  // A generic `name` answer must never be reused for an optional preferred-name
+  // field. Only an explicit profile preferredName may fill it automatically.
+  if (isPreferredNameField(field)) return { explicit: false };
+  // Preparation may contain a full location answer. Country/state controls
+  // need the grounded component, not the full city/state string.
+  if (field.classification === "location" && hasPhrase(fieldText(field), /\b(?:country|states?)\b/)) {
+    return { explicit: false };
+  }
+  // Prepared education/employment summaries are not field-level answers. Let
+  // the profile record (when present) supply the exact employer/school/date
+  // value, and otherwise leave the control for human review.
+  if (field.classification === "employment_history" || field.classification === "education") {
+    return { explicit: false };
+  }
+  // The inspected control did not match a known semantic class. Prepared
+  // answer token matching is too broad to be safe for such a field.
+  if (field.classification === "unknown" && field.questionDescriptor?.promptText) return { explicit: false };
+  const answer = usableAnswer(answerForField(field, request.application.answers), request);
+  // Greenhouse custom travel comboboxes do not expose their options until
+  // opened. Do not send a free-form/stale travel value into an unknown option
+  // set; a grounded Yes/No answer remains safe to use.
+  if (field.classification === "travel" && (!field.options || field.options.length === 0) &&
+    answer.value !== undefined && booleanAnswer(answer.value) === undefined) {
+    return { explicit: false };
+  }
+  return answer;
 }
 
 function profileValueForField(
@@ -510,6 +693,17 @@ function profileValueForField(
 ): AnswerValue | undefined {
   if (!profile) return undefined;
   const text = fieldText(field);
+  const factField = profileFactField(field);
+  if (isPreferredNameField(field)) return profile.identity.preferredName ?? undefined;
+  if (factField === "linkedin") return profile.identity.linkedinUrl ?? undefined;
+  if (factField === "website") return profile.identity.websiteUrl ?? undefined;
+  if (factField === "desired_work_location") return profile.workPreferences.preferredWorkLocation ?? undefined;
+  if (factField === "start_availability") {
+    const availability = profile.workPreferences.availabilityStartDate;
+    if (hasPhrase(text, /\byear\b/)) return groundedDatePart(availability, "year");
+    if (hasPhrase(text, /\bmonth\b/)) return groundedDatePart(availability, "month");
+    return availability ?? undefined;
+  }
   const name = splitFullName(profile.identity.fullName ?? undefined);
   if (field.classification === "contact") {
     if (hasPhrase(text, /email|e-mail/)) return profile.identity.email ?? undefined;
@@ -518,10 +712,33 @@ function profileValueForField(
     if (hasPhrase(text, /first name|given name/)) return name.first;
     return name.full;
   }
-  if (field.classification === "location") return profile.identity.location ?? profile.location ?? undefined;
+  if (field.classification === "location") {
+    if (hasPhrase(text, /\bcountry\b/)) {
+      return groundedCountryFromLocation(profile.identity.location ?? profile.location);
+    }
+    if (hasPhrase(text, /listed states we hire in/)) {
+      return groundedStateEligibilityFromLocation(text, profile.identity.location ?? profile.location);
+    }
+    if (hasPhrase(text, /\bstates?\b/)) {
+      const state = groundedStateFromLocation(profile.identity.location ?? profile.location);
+      if (!state) return undefined;
+      return field.options && field.options.length > 0
+        ? state
+        : US_STATE_ABBREVIATIONS[normalized(state)] ?? state;
+    }
+    return profile.identity.location ?? profile.location ?? undefined;
+  }
+  if (factField === "desired_work_location") return profile.workPreferences.preferredWorkLocation ?? undefined;
+  if (factField === "start_availability") return profile.workPreferences.availabilityStartDate ?? undefined;
   if (field.classification === "employment_history") {
     const employment = employmentForField(field, profile);
     if (!employment) return undefined;
+    if (hasPhrase(text, /\bmonth\b/)) {
+      return groundedDatePart(hasPhrase(text, /end|to date/) ? employment.endDate : employment.startDate, "month");
+    }
+    if (hasPhrase(text, /\byear\b/)) {
+      return groundedDatePart(hasPhrase(text, /end|to date/) ? employment.endDate : employment.startDate, "year");
+    }
     if (hasPhrase(text, /employer|company/)) return employment.employer;
     if (hasPhrase(text, /job title|position|role|occupation/)) return employment.title;
     if (hasPhrase(text, /start date|started|from/)) return employment.startDate;
@@ -531,6 +748,8 @@ function profileValueForField(
   if (field.classification === "education") {
     const education = firstEducation(profile);
     if (!education) return undefined;
+    if (hasPhrase(text, /\bmonth\b/)) return groundedDatePart(education.completionDate, "month");
+    if (hasPhrase(text, /\byear\b/)) return groundedDatePart(education.completionDate, "year");
     if (hasPhrase(text, /university|college|school|institution/)) return education.institution;
     if (hasPhrase(text, /degree/)) return education.degree;
     if (hasPhrase(text, /major|field|study/)) return education.field ?? undefined;
@@ -543,7 +762,10 @@ function profileValueForField(
   }
   if (field.classification === "work_authorization") return profile.workAuthorization.status ?? undefined;
   if (field.classification === "relocation") return profile.workPreferences.relocation ?? undefined;
-  if (field.classification === "travel") return profile.workPreferences.travel ?? undefined;
+  if (field.classification === "travel") {
+    const value = profile.workPreferences.travel ?? undefined;
+    return (!field.options || field.options.length === 0) && booleanAnswer(value) === undefined ? undefined : value;
+  }
   return undefined;
 }
 
@@ -553,12 +775,25 @@ function optionValue(
 ): string | undefined {
   if (!field.options || field.options.length === 0) return valueAsString(value);
   const desired = normalized(valueAsString(value));
+  const desiredAliases = field.classification === "location" && /\bstate\b/.test(fieldText(field))
+    ? [
+        desired,
+        US_STATE_ABBREVIATIONS[desired],
+        Object.entries(US_STATE_ABBREVIATIONS).find(([, abbreviation]) => abbreviation === desired)?.[0],
+      ].filter((alias): alias is string => Boolean(alias))
+    : [desired];
   const booleanAliases = typeof value === "boolean"
     ? value ? ["yes", "true"] : ["no", "false"]
     : [];
   const option = field.options.find((candidate) => {
     const labels = [normalized(candidate.value), normalized(candidate.label)];
-    return labels.includes(desired) || booleanAliases.some((alias) => labels.includes(alias));
+    return desiredAliases.some((alias) => labels.includes(alias)) ||
+      // Greenhouse's phone-country control appends the dialing code to the
+      // grounded country name (for example, "United States +1"). Preserve
+      // exact option selection while accepting that display form.
+      labels.some((label) => desiredAliases.some((alias) =>
+        label.startsWith(`${alias}+`) || label.startsWith(`${alias} +`))) ||
+      booleanAliases.some((alias) => labels.includes(alias));
   });
   return option?.value;
 }
@@ -571,19 +806,29 @@ function checkboxValue(value: AnswerValue | undefined): boolean | undefined {
   return undefined;
 }
 
+function booleanAnswer(value: AnswerValue | undefined): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  const text = normalized(valueAsString(value));
+  if (text === "yes" || text === "true") return true;
+  if (text === "no" || text === "false") return false;
+  return undefined;
+}
+
 function missingFieldDecision(
   field: ApplicationFieldDescriptor,
   reason: string,
   kind?: CareerBlockerDraft["kind"],
+  executor = "lever-browser",
 ): FieldDecision {
   if (!field.required) return { explicit: false, leaveUntouched: true };
-  return { explicit: false, blocker: formBlocker(field, reason, kind) };
+  return { explicit: false, blocker: formBlocker(field, reason, kind, "ATS_FORM", executor) };
 }
 
 function decisionForField(
   field: ApplicationFieldDescriptor,
   request: ApplicationExecutionRequest,
   resumePath: string | undefined,
+  executor = "lever-browser",
 ): FieldDecision {
   const explicit = explicitValueForField(field, request);
   const profileValue = profileValueForField(field, request.profile);
@@ -592,14 +837,14 @@ function decisionForField(
 
   if (!SUPPORTED_FIELD_TYPES.has(field.type)) {
     return field.required
-      ? { explicit: false, blocker: formBlocker(field, "This required field uses a widget the executor does not safely support.", "unsupported_widget") }
+      ? { explicit: false, blocker: formBlocker(field, "This required field uses a widget the executor does not safely support.", "unsupported_widget", "ATS_FORM", executor) }
       : { explicit: false, leaveUntouched: true };
   }
 
   if (field.classification === "demographic") {
     if (!explicit.explicit) {
       return field.required
-        ? { explicit: false, blocker: formBlocker(field, "Demographic disclosures are never selected automatically; provide an explicit response.", "demographic_disclosure") }
+        ? { explicit: false, blocker: formBlocker(field, "Demographic disclosures are never selected automatically; provide an explicit response.", "demographic_disclosure", "ATS_FORM", executor) }
         : { explicit: false, leaveUntouched: true };
     }
   }
@@ -607,14 +852,14 @@ function decisionForField(
   if (field.classification === "legal_attestation") {
     if (!explicit.explicit) {
       return field.required
-        ? { explicit: false, blocker: formBlocker(field, "A legal or certification commitment requires human review before it can be accepted.", "legal_attestation") }
+        ? { explicit: false, blocker: formBlocker(field, "A legal or certification commitment requires human review before it can be accepted.", "legal_attestation", "ATS_FORM", executor) }
         : { explicit: false, leaveUntouched: true };
     }
   }
 
   if (field.classification === "resume_upload") {
     if (!resumePath) {
-      return missingFieldDecision(field, "The selected resume family has no local resume artifact configured.", "resume_missing");
+      return missingFieldDecision(field, "The selected resume family has no local resume artifact configured.", "resume_missing", executor);
     }
     return { value: resumePath, explicit: true };
   }
@@ -633,6 +878,7 @@ function decisionForField(
           ? "The field could not be classified safely; no value was guessed."
           : "No verified profile fact or explicitly resolved answer is available.",
       kind,
+      executor,
     );
   }
 
@@ -640,7 +886,7 @@ function decisionForField(
     const checked = checkboxValue(supplied.value);
     if (checked === undefined) {
       return field.required
-        ? { explicit: false, blocker: formBlocker(field, "The checkbox value is not an explicit boolean answer.", "unknown_form_field") }
+        ? { explicit: false, blocker: formBlocker(field, "The checkbox value is not an explicit boolean answer.", "unknown_form_field", "ATS_FORM", executor) }
         : { explicit: false, leaveUntouched: true };
     }
     return { value: checked, explicit: supplied.explicit };
@@ -652,7 +898,7 @@ function decisionForField(
       return field.required
         ? {
             explicit: false,
-            blocker: formBlocker(field, "The verified answer does not exactly match one of the provider's available options.", "unknown_form_field"),
+            blocker: formBlocker(field, "The verified answer does not exactly match one of the provider's available options.", "unknown_form_field", "ATS_FORM", executor),
           }
         : { explicit: false, leaveUntouched: true };
     }
@@ -665,7 +911,7 @@ function decisionForField(
 
   const stringValue = valueAsString(supplied.value);
   if (!stringValue) {
-    return missingFieldDecision(field, "The verified value was empty; no replacement was invented.");
+    return missingFieldDecision(field, "The verified value was empty; no replacement was invented.", undefined, executor);
   }
   return { value: stringValue, explicit: supplied.explicit };
 }
@@ -676,31 +922,45 @@ function meaningfulCurrentValue(value: string | boolean | null | undefined): boo
     : value !== null && value !== undefined && value.trim().length > 0;
 }
 
-function sameLeverApplicationPage(value: string, target: TrustedTarget): boolean {
+function providerLabel(provider: TrustedTarget["provider"]): string {
+  if (provider === "greenhouse") return "Greenhouse";
+  if (provider === "rippling") return "Rippling";
+  return "Lever";
+}
+
+function executorEvidenceLabel(provider: TrustedTarget["provider"]): string {
+  if (provider === "greenhouse") return "greenhouse-browser";
+  if (provider === "rippling") return "rippling-browser";
+  return "lever-browser";
+}
+
+function sameApplicationPage(value: string, target: TrustedTarget): boolean {
   try {
     const url = new URL(value);
+    if (target.provider === "greenhouse") {
+      return url.protocol === "https:" && isVerifiedGreenhouseApplicationUrl(url.toString(), target.site, target.postingId);
+    }
+    if (target.provider === "rippling") {
+      return url.protocol === "https:" && isVerifiedRipplingApplicationUrl(url.toString()) &&
+        classifyJobUrl(url.toString()).siteIdentifier === target.site &&
+        classifyJobUrl(url.toString()).postingIdentifier === target.postingId &&
+        url.pathname.endsWith("/apply");
+    }
     return url.protocol === "https:" && isVerifiedLeverApplicationUrl(url.toString(), target.site, target.postingId);
   } catch {
     return false;
   }
 }
 
-function trustedTarget(request: ApplicationExecutionRequest): { target?: TrustedTarget; reason?: string } {
+function trustedTarget(
+  request: ApplicationExecutionRequest,
+  configuredProvider: LeverBrowserExecutorOptions["provider"] = "lever",
+): { target?: TrustedTarget; reason?: string } {
   const job = request.careerJob;
   const posting = job.job;
   if (job.sourceMode !== "live") return { reason: "The executor requires explicit live source provenance." };
   if (job.actionability !== "actionable") return { reason: "The posting is discovery-only and has no verified application endpoint." };
-  if (typeof job.sourceId !== "string" || !job.sourceId.startsWith("lever:")) return { reason: "Only verified Lever postings are supported by this executor." };
-  if (!job.sourceRecordId) return { reason: "The Lever provider posting ID is missing." };
   if (!posting.applicationUrl || !posting.sourceUrl) return { reason: "The posting is missing a verified hosted or application URL." };
-  const rawSite = job.sourceId.slice("lever:".length).trim();
-  if (!rawSite) return { reason: "The Lever SITE identifier is missing from source provenance." };
-  let site: string;
-  try {
-    site = leverSourceId(rawSite).slice("lever:".length);
-  } catch {
-    return { reason: "The Lever SITE identifier is invalid." };
-  }
   if (request.application.job.applicationUrl !== posting.applicationUrl || request.application.job.sourceUrl !== posting.sourceUrl) {
     return { reason: "The application packet provenance does not match the career posting." };
   }
@@ -710,19 +970,85 @@ function trustedTarget(request: ApplicationExecutionRequest): { target?: Trusted
   } catch {
     return { reason: "The application URL is not syntactically valid." };
   }
-  if (!isVerifiedLeverHostedUrl(posting.sourceUrl, site, job.sourceRecordId)) {
-    return { reason: "The posting URL is not the verified Lever hosted page for this provider ID." };
+
+  const sourceId = typeof job.sourceId === "string" ? job.sourceId : "";
+  const destination = classifyJobUrl(posting.applicationUrl);
+  const provider = configuredProvider === "auto"
+    ? sourceId.startsWith("lever:") ? "lever" :
+      destination.kind === "greenhouse" ? "greenhouse" :
+        destination.kind === "rippling" ? "rippling" : undefined
+    : configuredProvider;
+
+  if (provider === "lever") {
+    if (!sourceId.startsWith("lever:")) return { reason: "Only verified Lever postings are supported by this executor." };
+    if (!job.sourceRecordId) return { reason: "The Lever provider posting ID is missing." };
+    const rawSite = sourceId.slice("lever:".length).trim();
+    if (!rawSite) return { reason: "The Lever SITE identifier is missing from source provenance." };
+    let site: string;
+    try {
+      site = leverSourceId(rawSite).slice("lever:".length);
+    } catch {
+      return { reason: "The Lever SITE identifier is invalid." };
+    }
+    if (!isVerifiedLeverHostedUrl(posting.sourceUrl, site, job.sourceRecordId)) {
+      return { reason: "The posting URL is not the verified Lever hosted page for this provider ID." };
+    }
+    if (!isVerifiedLeverApplicationUrl(posting.applicationUrl, site, job.sourceRecordId)) {
+      return { reason: "The application URL is not the verified Lever /apply path for this provider ID." };
+    }
+    return { target: { provider, site, postingId: job.sourceRecordId, applicationUrl: posting.applicationUrl } };
   }
-  if (!isVerifiedLeverApplicationUrl(posting.applicationUrl, site, job.sourceRecordId)) {
-    return { reason: "The application URL is not the verified Lever /apply path for this provider ID." };
+
+  if (provider === "greenhouse") {
+    if (destination.kind !== "greenhouse" || !destination.siteIdentifier || !destination.postingIdentifier) {
+      return { reason: "The application URL is not a verified Greenhouse application route." };
+    }
+    const resolution = job.destinationResolution;
+    const destinationMatches = resolution?.status === "resolved" &&
+      resolution.actionable === true &&
+      resolution.ats === "Greenhouse" &&
+      resolution.destinationUrl === posting.applicationUrl;
+    const directGreenhouseSource = sourceId.startsWith("greenhouse:") &&
+      Boolean(job.sourceRecordId) &&
+      isVerifiedGreenhouseHostedUrl(posting.sourceUrl, sourceId.slice("greenhouse:".length), job.sourceRecordId ?? "");
+    if (!destinationMatches && !directGreenhouseSource) {
+      return { reason: "The Greenhouse destination is not independently verified for this posting." };
+    }
+    return {
+      target: {
+        provider,
+        site: destination.siteIdentifier,
+        postingId: destination.postingIdentifier,
+        applicationUrl: posting.applicationUrl,
+      },
+    };
   }
-  return {
-    target: {
-      site,
-      postingId: job.sourceRecordId,
-      applicationUrl: posting.applicationUrl,
-    },
-  };
+
+  if (provider === "rippling") {
+    if (destination.kind !== "rippling" || !destination.siteIdentifier || !destination.postingIdentifier) {
+      return { reason: "The application URL is not a verified Rippling application route." };
+    }
+    const resolution = job.destinationResolution;
+    const destinationMatches = resolution?.status === "resolved" &&
+      resolution.actionable === true &&
+      resolution.ats === "Rippling" &&
+      resolution.destinationUrl === posting.applicationUrl;
+    if (!destinationMatches) {
+      return { reason: "The Rippling destination is not independently verified for this posting." };
+    }
+    const formUrl = ripplingApplicationUrl(posting.applicationUrl);
+    if (!formUrl) return { reason: "The Rippling application form route could not be derived safely." };
+    return {
+      target: {
+        provider,
+        site: destination.siteIdentifier,
+        postingId: destination.postingIdentifier,
+        applicationUrl: formUrl,
+      },
+    };
+  }
+
+  return { reason: "No supported browser executor is configured for this application destination." };
 }
 
 /**
@@ -731,26 +1057,32 @@ function trustedTarget(request: ApplicationExecutionRequest): { target?: Trusted
  * grounded mapping, blockers, and the closed Submit lane.
  */
 export class LeverBrowserExecutor implements ApplicationExecutor {
-  public readonly id = "lever-browser-executor";
+  public readonly id: string;
   private readonly sessions = new Map<string, SessionState>();
   private readonly now: () => string;
 
   constructor(private readonly options: LeverBrowserExecutorOptions) {
     this.now = options.now ?? defaultNow;
+    this.id = options.provider === "auto" ? "application-browser-executor" :
+      options.provider === "greenhouse" ? "greenhouse-browser-executor" :
+        options.provider === "rippling" ? "rippling-browser-executor" : "lever-browser-executor";
   }
 
-  executionMode(_request: ApplicationExecutionRequest): ApplicationExecutorMode {
-    return "preparation_only";
+  executionMode(request: ApplicationExecutionRequest): ApplicationExecutorMode {
+    return this.options.allowAutomaticSubmission === true &&
+      request.campaign.submissionPolicy.authority === "automatic"
+      ? "submission_capable"
+      : "preparation_only";
   }
 
   supports(request: ApplicationExecutionRequest | CareerJob | JobPosting): boolean {
-    if ("careerJob" in request) return trustedTarget(request).target !== undefined;
+    if ("careerJob" in request) return trustedTarget(request, this.options.provider).target !== undefined;
     if ("job" in request) return trustedTarget({
       campaign: {} as ApplicationExecutionRequest["campaign"],
       careerJob: request,
       application: { job: request.job } as ApplicationExecutionRequest["application"],
       now: this.now(),
-    }).target !== undefined;
+    }, this.options.provider).target !== undefined;
     return false;
   }
 
@@ -764,7 +1096,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
     const observed = await this.inspectForm(request, startedAt, "executor");
     if (observed.inspection.status === "failed") {
       return failedResult(
-        observed.inspection.evidence.find((item) => item.startsWith("error:"))?.slice("error:".length) ?? "Lever form inspection failed.",
+        observed.inspection.evidence.find((item) => item.startsWith("error:"))?.slice("error:".length) ?? `${providerLabel(observed.target.provider)} form inspection failed.`,
         startedAt,
         this.now(),
         observed.inspection,
@@ -772,7 +1104,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
     }
     if (observed.inspection.status === "unsupported") {
       return unsupportedResult(
-        observed.inspection.evidence.find((item) => item.startsWith("unsupported:"))?.slice("unsupported:".length) ?? "Lever form is unsupported.",
+        observed.inspection.evidence.find((item) => item.startsWith("unsupported:"))?.slice("unsupported:".length) ?? `${providerLabel(observed.target.provider)} form is unsupported.`,
         startedAt,
         this.now(),
         observed.inspection.blockers[0],
@@ -813,7 +1145,15 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         continue;
       }
 
-      const decision = decisionForField(fieldDescriptor, request, resumePath);
+      if (this.options.allowedFieldClassifications && !this.options.allowedFieldClassifications.includes(fieldDescriptor.classification)) {
+        if (fieldDescriptor.required) blockers.push(formBlocker(fieldDescriptor,
+          "This field requires human input under the current preparation restrictions.",
+          blockerKind(fieldDescriptor.classification), "ATS_FORM", executorEvidenceLabel(observed.target.provider)));
+        unresolvedFields.add(fieldDescriptor.label);
+        continue;
+      }
+
+      const decision = decisionForField(fieldDescriptor, request, resumePath, executorEvidenceLabel(observed.target.provider));
       if (decision.blocker) {
         blockers.push(decision.blocker);
         unresolvedFields.add(fieldDescriptor.label);
@@ -828,7 +1168,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         if (fieldDescriptor.type === "file") {
           const path = valueAsString(decision.value);
           if (!path || (this.options.resumeFileExists && !(await this.options.resumeFileExists(path)))) {
-            const blocker = formBlocker(fieldDescriptor, "The configured resume artifact is not available at execution time.", "required_file_missing");
+            const blocker = formBlocker(fieldDescriptor, "The configured resume artifact is not available at execution time.", "required_file_missing", "ATS_FORM", executorEvidenceLabel(observed.target.provider));
             if (fieldDescriptor.required) blockers.push(blocker);
             unresolvedFields.add(fieldDescriptor.label);
             continue;
@@ -904,7 +1244,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       if (!meaningfulCurrentValue(value)) {
         const fieldDescriptor = descriptor(field);
         unresolvedFields.add(fieldDescriptor.label);
-        const missing = formBlocker(fieldDescriptor, "A required field is still empty after the safe fill pass.", blockerKind(fieldDescriptor.classification));
+        const missing = formBlocker(fieldDescriptor, "A required field is still empty after the safe fill pass.", blockerKind(fieldDescriptor.classification), "ATS_FORM", executorEvidenceLabel(observed.target.provider));
         dedupedBlockers.push(missing);
       }
     }
@@ -932,32 +1272,102 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         type: "unknown",
         required: true,
         classification: "unknown",
-      }, "The expected final Submit control was not found; the page may not be a complete Lever application form.", "unsupported_widget");
+      }, `The expected final Submit control was not found; the page may not be a complete ${providerLabel(observed.target.provider)} application form.`, "unsupported_widget", "POLICY", executorEvidenceLabel(observed.target.provider));
       return unsupportedResult("final Submit control was not detected", startedAt, this.now(), blocker, observed.inspection);
     }
 
     const currentUrl = await observed.session.currentUrl();
-    if (!sameLeverApplicationPage(currentUrl, observed.target)) {
+    if (!sameApplicationPage(currentUrl, observed.target)) {
       const blocker = boundaryBlocker({
         kind: "external_verification",
         question: "Verify the application page before review",
-        reason: "The browser page changed away from the verified Lever application route; no further action was taken.",
+        reason: `The browser page changed away from the verified ${providerLabel(observed.target.provider)} application route; no further action was taken.`,
         evidence: ["navigation:unexpected-page", "submit:not-clicked"],
-      });
-      return unsupportedResult("browser page no longer matches the verified Lever application route", startedAt, this.now(), blocker, observed.inspection);
+      }, executorEvidenceLabel(observed.target.provider));
+      return unsupportedResult(`browser page no longer matches the verified ${providerLabel(observed.target.provider)} application route`, startedAt, this.now(), blocker, observed.inspection);
     }
 
+    const finalBoundary = await observed.session.detectHumanBoundary();
+    if (finalBoundary) {
+      const blocker = boundaryBlocker(finalBoundary, executorEvidenceLabel(observed.target.provider));
+      const blockedInspection = inspection("needs_input", observed.inspection.fields, observed.inspection.startedAt, this.now(), {
+        fieldsFilled: [...fieldsFilled],
+        unresolvedFields: [...unresolvedFields, finalBoundary.question],
+        blockers: [blocker],
+        ...(resumeUsed ? { resumeUsed } : {}),
+        ...inspectionTelemetry(observed.inspection),
+        evidence: [...evidence, ...finalBoundary.evidence, "submit:not-clicked"],
+      });
+      return { state: "requires_human", blocker, blockers: [blocker], inspection: blockedInspection };
+    }
+
+    const submissionCapable = this.executionMode(request) === "submission_capable";
     const readyInspection = inspection("inspected", observed.inspection.fields, observed.inspection.startedAt, this.now(), {
       fieldsFilled: [...fieldsFilled],
       unresolvedFields: [...unresolvedFields],
       ...(resumeUsed ? { resumeUsed } : {}),
       ...inspectionTelemetry(observed.inspection),
-      evidence: [...evidence, "navigation:verified", "submit-control:detected", "submit:not-clicked", "submission:manual-only"],
+      evidence: submissionCapable
+        ? [...evidence, "navigation:verified", "submit-control:detected", "submission:automatic-enabled"]
+        : [...evidence, "navigation:verified", "submit-control:detected", "submit:not-clicked", "submission:manual-only"],
     });
+
+    if (submissionCapable) {
+      let submitted;
+      try {
+        submitted = await observed.session.submit();
+      } catch (error) {
+        return failedResult(
+          `The verified Submit control could not be activated: ${safeBrowserDiagnosticMessage(error, "browser submission failed")}`,
+          startedAt,
+          this.now(),
+          { ...readyInspection, status: "failed", updatedAt: this.now() },
+        );
+      }
+      if (!submitted.confirmed || !submitted.externalApplicationId) {
+        const blocker: CareerBlockerDraft = {
+          kind: "external_verification",
+          unit: "submission",
+          questionProvenance: "POLICY",
+          field: "submission-confirmation",
+          question: "Verify whether the application was submitted",
+          reason: submitted.clicked
+            ? "The verified Submit control was activated, but the employer confirmation could not be established deterministically. Do not submit again until the result is verified."
+            : "The browser did not produce a deterministic submission confirmation.",
+          evidence: [
+            "submit:confirmation-missing",
+            ...(submitted.clicked ? ["submit:clicked"] : ["submit:not-clicked"]),
+            submitted.evidence,
+          ],
+          resumeAfterHuman: false,
+        };
+        const blockedInspection = inspection("needs_input", readyInspection.fields, readyInspection.startedAt, this.now(), {
+          fieldsFilled: [...fieldsFilled],
+          unresolvedFields: ["submission-confirmation"],
+          blockers: [blocker],
+          ...(resumeUsed ? { resumeUsed } : {}),
+          ...inspectionTelemetry(readyInspection),
+          evidence: [...readyInspection.evidence, "submit:confirmation-missing"],
+        });
+        return { state: "requires_human", blocker, blockers: [blocker], inspection: blockedInspection };
+      }
+      return {
+        state: "submitted",
+        proof: {
+          mode: "external",
+          provider: providerLabel(observed.target.provider),
+          externalApplicationId: submitted.externalApplicationId,
+          submittedAt: this.now(),
+          evidence: submitted.evidence,
+        },
+        note: `${providerLabel(observed.target.provider)} confirmed the application submission.`,
+      };
+    }
+
     return {
       state: "ready_to_submit",
       inspection: { ...readyInspection, status: "inspected" },
-      note: "Lever form prepared. Final submission remains manual; the executor never activates Submit.",
+      note: `${providerLabel(observed.target.provider)} form prepared. Final submission remains manual; the executor never activates Submit.`,
     };
   }
 
@@ -983,12 +1393,12 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       state.navigated = true;
     }
     const currentUrl = await state.session.currentUrl();
-    if (!sameLeverApplicationPage(currentUrl, target)) {
+    if (!sameApplicationPage(currentUrl, target)) {
       const diagnostics = state.session.diagnostics?.();
       throw new BrowserExecutionDiagnosticError({
         stage: "navigation",
         reasonCode: "unsupported_page",
-        message: "The browser page is not the verified Lever application route.",
+        message: `The browser page is not the verified ${providerLabel(target.provider)} application route.`,
         ...(diagnostics?.boundaries ? { boundaries: diagnostics.boundaries } : {}),
         ...(diagnostics?.navigation ? {
           navigation: { ...diagnostics.navigation, outcome: "failed" },
@@ -1011,7 +1421,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
     let navigation: BrowserNavigationDiagnostics | undefined;
     let diagnostic: BrowserExecutionDiagnostic | undefined;
     let captcha: BrowserCaptchaDiagnostics | undefined;
-    const targetResult = trustedTarget(request);
+    const targetResult = trustedTarget(request, this.options.provider);
     if (!targetResult.target) {
       const completedBoundaries = phase === "preflight"
         ? { ...boundaries, preflightInspectionCompleted: true }
@@ -1019,15 +1429,21 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       const unsupportedDiagnostic: BrowserExecutionDiagnostic = {
         stage: inspectionStage,
         reasonCode: "unsupported_page",
-        message: safeBrowserDiagnosticMessage(targetResult.reason, "The Lever posting is not supported by the browser executor."),
+        message: safeBrowserDiagnosticMessage(targetResult.reason, "The application destination is not supported by the browser executor."),
         boundaries: completedBoundaries,
       };
       return {
-        target: { site: "unknown", postingId: "unknown", applicationUrl: "" },
-        session: { currentUrl: () => "", navigate: async () => undefined, inspectFields: async () => [], detectHumanBoundary: async () => null, hasSubmitControl: async () => false, close: async () => undefined },
+        target: {
+          provider: this.options.provider === "greenhouse" ? "greenhouse" :
+            this.options.provider === "rippling" ? "rippling" : "lever",
+          site: "unknown",
+          postingId: "unknown",
+          applicationUrl: "",
+        },
+        session: { currentUrl: () => "", navigate: async () => undefined, inspectFields: async () => [], detectHumanBoundary: async () => null, hasSubmitControl: async () => false, submit: async () => ({ clicked: false, confirmed: false, evidence: "submit:unavailable" }), close: async () => undefined },
         fields: [],
         inspection: inspection("unsupported", [], startedAt, this.now(), {
-          evidence: [`unsupported:${targetResult.reason ?? "untrusted Lever posting"}`],
+          evidence: [`unsupported:${targetResult.reason ?? "untrusted application destination"}`],
           durationMs: monotonicNow() - inspectionMonotonicStartedAt,
           domInspectionCount: 0,
           boundaries: completedBoundaries,
@@ -1084,15 +1500,15 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       mergeSessionDiagnostics(state.session);
       const descriptors = rawFields.map(descriptor);
       const baseEvidence = [
-        "executor:lever-browser",
-        "source:live/lever",
-        `lever-site:${target.site}`,
+        `executor:${executorEvidenceLabel(target.provider)}`,
+        `source:live/${target.provider}`,
+        `${target.provider === "greenhouse" ? "greenhouse-board" : "lever-site"}:${target.site}`,
         `provider-job-id:${target.postingId}`,
         "navigation:verified",
         ...(captcha ? captchaEvidence(captcha) : []),
       ];
       if (boundary) {
-        const blocker = boundaryBlocker(boundary);
+        const blocker = boundaryBlocker(boundary, executorEvidenceLabel(target.provider));
         return finish({
           target,
           session: state.session,
@@ -1107,11 +1523,11 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       if (descriptors.length === 0) {
         const blocker = formBlocker({
           id: "application-form",
-          label: "Lever application form",
+          label: `${providerLabel(target.provider)} application form`,
           type: "unknown",
           required: true,
           classification: "unknown",
-        }, "No supported application fields were found on the verified page.", "unknown_form_field");
+        }, "No supported application fields were found on the verified page.", "unknown_form_field", "POLICY", executorEvidenceLabel(target.provider));
         diagnostic = {
           stage: "controls_inspection",
           reasonCode: "unsupported_page",
@@ -1122,7 +1538,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
           session: state.session,
           fields: rawFields,
           inspection: inspection("unsupported", descriptors, startedAt, this.now(), {
-            unresolvedFields: ["Lever application form"],
+            unresolvedFields: [`${providerLabel(target.provider)} application form`],
             blockers: [blocker],
             evidence: [...baseEvidence, "unsupported:form-fields-not-found"],
           }),
@@ -1141,7 +1557,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         error,
         currentStage,
         "inspection_failed",
-        "Lever form inspection failed.",
+        `${providerLabel(target.provider)} form inspection failed.`,
         {
           boundaries,
           ...(navigation ? { navigation } : {}),
@@ -1150,17 +1566,17 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       diagnostic = derivedDiagnostic;
       boundaries = { ...boundaries, ...(derivedDiagnostic.boundaries ?? {}) };
       navigation = derivedDiagnostic.navigation ?? navigation;
-      const reason = derivedDiagnostic.message ?? safeErrorMessage(error, "Lever form inspection failed.");
+      const reason = derivedDiagnostic.message ?? safeErrorMessage(error, `${providerLabel(target.provider)} form inspection failed.`);
       const key = request.application.id || request.careerJob.id;
       const failedSession = this.sessions.get(key);
       this.sessions.delete(key);
       await failedSession?.session.close().catch(() => undefined);
       return finish({
         target,
-        session: { currentUrl: () => "", navigate: async () => undefined, inspectFields: async () => [], detectHumanBoundary: async () => null, hasSubmitControl: async () => false, close: async () => undefined },
+        session: { currentUrl: () => "", navigate: async () => undefined, inspectFields: async () => [], detectHumanBoundary: async () => null, hasSubmitControl: async () => false, submit: async () => ({ clicked: false, confirmed: false, evidence: "submit:unavailable" }), close: async () => undefined },
         fields: [],
         inspection: inspection("failed", [], startedAt, this.now(), {
-          evidence: ["executor:lever-browser", `error:${reason}`],
+          evidence: [`executor:${executorEvidenceLabel(target.provider)}`, `error:${reason}`],
           boundaries,
           ...(navigation ? { navigation } : {}),
           diagnostic,
