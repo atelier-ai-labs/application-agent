@@ -1,0 +1,14 @@
+{
+  "id": "03-submit-never-auto",
+  "kind": "submit_policy",
+  "description": "Human-in-the-loop submit policy: authority never must fail closed (never auto-submit).",
+  "graders": ["deterministic"],
+  "input": {
+    "authority": "never",
+    "requireExplicitApproval": true
+  },
+  "expected": {
+    "allowed": false,
+    "mustBlockOnAuthorityNever": true
+  }
+}
