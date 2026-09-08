@@ -25,20 +25,22 @@ EVALS_MODEL_GRADER=live npm run test:evals   # reserved; live client not wired y
 
 ```
 evals/
-  README.md                 ← you are here
-  run.ts                    ← CLI entry
-  runner.ts                 ← load fixtures → grade → SuiteReport
+  README.md                 <- you are here
+  run.ts                    <- CLI entry
+  runner.ts                 <- load fixtures -> grade -> SuiteReport
   types.ts
   graders/
-    deterministic.ts        ← classify / fit / field-fill / submit-never-auto
-    modelRubric.ts          ← groundedness + fit-vs-resume (mocked in CI)
+    deterministic.ts        <- classify / fit / field-fill / submit-never-auto
+    modelRubric.ts          <- groundedness + fit-vs-resume (mocked in CI)
   golden/
-    README.md               ← how to grow to ≥20 fixtures
+    README.md               <- how to grow to >=20 fixtures
     schema.ts
     fixtures/
       01-classify-lever-url.json
       02-fit-strong-cloud.json
       03-submit-never-auto.json
+      04-field-fill-policies.json
+      05-groundedness-mock.json
 ```
 
 ## How to add a golden task
@@ -65,7 +67,7 @@ When Nate opts in:
 
 1. In `.github/workflows/evals.yml`, remove `continue-on-error: true` (or set it to `false`).
 2. Add `EVALS_FAIL_ON_ERROR: "1"` to the eval step `env`.
-3. In GitHub **Settings → Branches → rulesets / protection**, mark the `evals` check as required.
+3. In GitHub **Settings -> Branches -> rulesets / protection**, mark the `evals` check as required.
 
 Until then, treat the workflow as a baseline signal only.
 
