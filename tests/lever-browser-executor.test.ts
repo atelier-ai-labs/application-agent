@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   LeverBrowserExecutor,
   classifyLeverApplicationField,
+  looksLikeInternationalDialingOptions,
   exampleCandidateProfile,
   isExecutionInspection,
   BrowserExecutionDiagnosticError,
@@ -1187,5 +1188,89 @@ describe("LeverBrowserExecutor", () => {
     expect(result.state).toBe("requires_human");
     expect(session.submitClicks).toBe(0);
     expect(result.state === "requires_human" && result.blocker.kind).toBe("salary");
+  });
+});
+
+
+describe("Rippling field classification regressions", () => {
+  const dialingOptions: ApplicationFieldOption[] = [
+    { label: "+247 AC - Ascension Island", value: "+247 AC - Ascension Island" },
+    { label: "+376 AD - Andorra", value: "+376 AD - Andorra" },
+    { label: "+971 AE - United Arab Emirates", value: "+971 AE - United Arab Emirates" },
+    { label: "+93 AF - Afghanistan", value: "+93 AF - Afghanistan" },
+    { label: "+1 AG - Antigua & Barbuda", value: "+1 AG - Antigua & Barbuda" },
+    { label: "+1 AI - Anguilla", value: "+1 AI - Anguilla" },
+    { label: "+355 AL - Albania", value: "+355 AL - Albania" },
+    { label: "+374 AM - Armenia", value: "+374 AM - Armenia" },
+    { label: "+1 US - United States", value: "+1 US - United States" },
+    { label: "+44 GB - United Kingdom", value: "+44 GB - United Kingdom" },
+  ];
+
+  it("classifies Location from question prompt when the DOM label is opaque", () => {
+    expect(classifyLeverApplicationField({
+      id: "field-12",
+      label: "textbox",
+      type: "text",
+      questionDescriptor: {
+        promptText: "Location",
+        sourceStrategy: "label_for",
+        confidence: "high",
+      },
+    })).toBe("location");
+  });
+
+  it("classifies Search selects with international dialing options as location", () => {
+    expect(looksLikeInternationalDialingOptions(dialingOptions)).toBe(true);
+    expect(classifyLeverApplicationField({
+      id: "field-34",
+      label: "Search",
+      type: "select",
+      options: dialingOptions,
+    })).toBe("location");
+  });
+
+  it("classifies opaque custom ids from the question prompt", () => {
+    expect(classifyLeverApplicationField({
+      id: "73RMCCC5P40",
+      label: "73RMCCC5P40",
+      type: "text",
+      questionDescriptor: {
+        promptText: "What is your desired annual compensation?",
+        sourceStrategy: "nearby_text",
+        confidence: "medium",
+      },
+    })).toBe("salary");
+  });
+
+  it("fills Rippling Location and phone-country controls from profile without submitting", async () => {
+    const location = new FakeField({
+      id: "field-12",
+      label: "textbox",
+      type: "text",
+      required: true,
+      questionDescriptor: {
+        promptText: "Location",
+        sourceStrategy: "label_for",
+        confidence: "high",
+      },
+    });
+    const phoneCountry = new FakeField({
+      id: "field-34",
+      label: "Search",
+      type: "select",
+      required: true,
+      options: dialingOptions,
+    });
+    const email = new FakeField({ id: "email", label: "Email", type: "email", required: true });
+    const session = new FakeSession([email, location, phoneCountry]);
+    const result = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      now: () => capturedAt,
+    }).execute(request());
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(session.submitClicks).toBe(0);
+    expect(location.current).toBe(exampleCandidateProfile.identity.location ?? exampleCandidateProfile.location);
+    expect(String(phoneCountry.current)).toContain("United States");
   });
 });
