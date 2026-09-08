@@ -386,9 +386,15 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     }
     const envelopeId = stringValue(envelope.envelope_id, 256);
     if (envelopeId && this.socket) this.socket.send(JSON.stringify({ envelope_id: envelopeId }));
-    if (envelope.type === "hello") return;
+    const envelopeType = stringValue(envelope.type, 64);
+    if (envelopeType === "hello") return;
     const payload = responsePayload(envelope.payload);
     if (!payload) {
+      if (envelopeType === "disconnect") {
+        const reason = stringValue(envelope.reason, 64) ?? "unknown";
+        this.diagnosticLogger.info(`received Socket Mode disconnect (${reason})`);
+        return;
+      }
       this.diagnosticLogger.warn("ignored: Socket Mode envelope had no payload");
       return;
     }

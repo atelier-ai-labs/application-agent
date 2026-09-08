@@ -933,4 +933,20 @@ describe("Slack human-attention adapter", () => {
     expect(sent).toEqual([JSON.stringify({ envelope_id: "envelope-1" })]);
     adapter.stop();
   });
+
+  it("treats Slack disconnect control envelopes as normal lifecycle traffic", async () => {
+    const diagnostics = diagnosticCapture();
+    const adapter = new SlackNotificationAdapter({
+      config,
+      diagnosticLogger: diagnostics.logger,
+    });
+
+    await adapter.handleSocketEnvelope(JSON.stringify({
+      type: "disconnect",
+      reason: "refresh_requested",
+    }));
+
+    expect(diagnostics.warnings).toEqual([]);
+    expect(diagnostics.infos).toContain("received Socket Mode disconnect (refresh_requested)");
+  });
 });
