@@ -1,9 +1,8 @@
 /**
  * Pure Rippling DOM helpers for field-prompt extraction and remount recovery.
  *
- * The ancestor-prompt walk inside playwrightLeverBrowserSession.inspectFields
- * (evaluateAll) must stay browser-serializable, so that copy is inlined there.
- * Keep extractRipplingAncestorPrompt / looksLike* in sync with that walk.
+ * The browser callback collects serializable candidates, then the shared
+ * candidate selector below applies the prompt rules outside evaluateAll.
  */
 
 const CONTROL_SELECTOR = "input, textarea, select, [role='combobox']";
@@ -27,6 +26,22 @@ function textFrom(element: Element | null | undefined, maximum = 240): string | 
   return compact ? compact.slice(0, maximum) : undefined;
 }
 
+export interface RipplingPromptCandidate {
+  text?: string;
+  containsControl: boolean;
+}
+
+/** Select the first safe prompt from the serializable browser-side candidates. */
+export function extractRipplingPromptFromCandidates(
+  candidates: readonly RipplingPromptCandidate[],
+): string | undefined {
+  for (const candidate of candidates) {
+    if (candidate.containsControl || !looksLikePromptText(candidate.text)) continue;
+    return candidate.text.replace(/\s*[✱*]\s*$/, "").trim();
+  }
+  return undefined;
+}
+
 /**
  * Walk a few ancestors for a preceding sibling that looks like a Rippling
  * custom-question prompt (e.g. div.paddingX--16) without containing another
@@ -34,33 +49,36 @@ function textFrom(element: Element | null | undefined, maximum = 240): string | 
  * Keep in sync with the evaluateAll walk in playwrightLeverBrowserSession.
  */
 export function extractRipplingAncestorPrompt(control: Element): string | undefined {
+  const candidates: RipplingPromptCandidate[] = [];
   let cursor: Element | null = control;
   for (let depth = 0; depth < 6 && cursor; depth += 1) {
     const previous = cursor.previousElementSibling;
-    if (previous && !previous.querySelector(CONTROL_SELECTOR)) {
-      const candidate = textFrom(previous);
-      if (looksLikePromptText(candidate)) {
-        return candidate.replace(/\s*[✱*]\s*$/, "").trim();
-      }
+    if (previous) {
+      candidates.push({
+        text: textFrom(previous),
+        containsControl: Boolean(previous.querySelector(CONTROL_SELECTOR)),
+      });
     }
     const parent: Element | null = cursor.parentElement;
     if (parent) {
       for (const child of Array.from(parent.children) as Element[]) {
         if (child.contains(control)) break;
-        if (child.querySelector(CONTROL_SELECTOR)) continue;
-        const candidate = textFrom(child);
-        if (looksLikePromptText(candidate)) {
-          return candidate.replace(/\s*[✱*]\s*$/, "").trim();
-        }
+        candidates.push({
+          text: textFrom(child),
+          containsControl: Boolean(child.querySelector(CONTROL_SELECTOR)),
+        });
       }
     }
     cursor = parent;
   }
-  return undefined;
+  return extractRipplingPromptFromCandidates(candidates);
 }
 
 /** Manhattan distance uniqueness margin for Rippling Search remount recovery. */
 export const SEARCH_NEAR_PHONE_MARGIN_PX = 24;
+
+/** Do not bind a recovered Search control to a distant, unrelated field. */
+export const SEARCH_NEAR_PHONE_MAX_DISTANCE_PX = 240;
 
 /**
  * Return the index of the uniquely nearest point to `anchor`, or null when
@@ -70,6 +88,7 @@ export function pickNearestUniqueByDistance(
   anchor: { x: number; y: number },
   points: readonly { x: number; y: number }[],
   marginPx: number,
+  maxDistancePx = Number.POSITIVE_INFINITY,
 ): number | null {
   if (points.length === 0) return null;
   const ranked = points
@@ -80,6 +99,7 @@ export function pickNearestUniqueByDistance(
     .sort((left, right) => left.distance - right.distance || left.index - right.index);
   const best = ranked[0]!;
   const runnerUp = ranked[1];
+  if (best.distance > maxDistancePx) return null;
   if (runnerUp && runnerUp.distance - best.distance < marginPx) {
     return null;
   }

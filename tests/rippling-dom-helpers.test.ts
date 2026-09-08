@@ -2,10 +2,12 @@
 import { describe, expect, it } from "vitest";
 import {
   extractRipplingAncestorPrompt,
+  extractRipplingPromptFromCandidates,
   looksLikeOpaqueToken,
   looksLikePromptText,
   pickNearestUniqueByDistance,
   SEARCH_NEAR_PHONE_MARGIN_PX,
+  SEARCH_NEAR_PHONE_MAX_DISTANCE_PX,
 } from "../application-agent/automation/ripplingDomHelpers";
 
 function mount(html: string): HTMLElement {
@@ -67,6 +69,17 @@ describe("extractRipplingAncestorPrompt", () => {
     `);
     expect(extractRipplingAncestorPrompt(document.getElementById("opaqueCCCC03")!)).toBeUndefined();
   });
+
+  it("applies the same prompt rules to serialized browser candidates", () => {
+    expect(extractRipplingPromptFromCandidates([
+      { text: "Search", containsControl: false },
+      { text: "What is your expected salary? ✱", containsControl: false },
+    ])).toBe("What is your expected salary?");
+    expect(extractRipplingPromptFromCandidates([
+      { text: "Previous question?", containsControl: true },
+      { text: "opaqueAAAA01", containsControl: false },
+    ])).toBeUndefined();
+  });
 });
 
 describe("pickNearestUniqueByDistance", () => {
@@ -93,5 +106,14 @@ describe("pickNearestUniqueByDistance", () => {
 
   it("returns null for an empty candidate list", () => {
     expect(pickNearestUniqueByDistance({ x: 0, y: 0 }, [], margin)).toBeNull();
+  });
+
+  it("returns null when the nearest candidate is too far from the phone field", () => {
+    expect(pickNearestUniqueByDistance(
+      { x: 0, y: 0 },
+      [{ x: SEARCH_NEAR_PHONE_MAX_DISTANCE_PX + 1, y: 0 }],
+      margin,
+      SEARCH_NEAR_PHONE_MAX_DISTANCE_PX,
+    )).toBeNull();
   });
 });

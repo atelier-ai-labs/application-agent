@@ -19,9 +19,13 @@ import {
 } from "../src/domain/executor";
 import { looksLikeInternationalDialingOptions } from "../src/domain/leverBrowserExecutor";
 import {
+  extractRipplingPromptFromCandidates,
+  looksLikeOpaqueToken,
   pickNearestUniqueByDistance,
   SEARCH_NEAR_PHONE_MARGIN_PX,
+  SEARCH_NEAR_PHONE_MAX_DISTANCE_PX,
 } from "./ripplingDomHelpers";
+import type { RipplingPromptCandidate } from "./ripplingDomHelpers";
 
 export interface PlaywrightLeverBrowserOptions {
   headless?: boolean;
@@ -43,6 +47,7 @@ interface InspectedRawField {
   section?: string;
   groupName?: string;
   questionEvidence?: LeverQuestionAssociationEvidence;
+  ripplingPromptCandidates?: readonly RipplingPromptCandidate[];
 }
 
 export interface LeverQuestionAssociationEvidence {
@@ -387,23 +392,28 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
     // Prefer a Search control near the phone field when multiple exist.
     // Fail closed unless the nearest candidate is uniquely best by a clear margin.
     const phone = this.page.locator('input[placeholder="Phone number"], input[id*="phone" i]');
-    if (await phone.count() > 0) {
-      const phoneBox = await phone.first().boundingBox().catch(() => null);
-      if (phoneBox) {
-        const candidates: { locator: Locator; point: { x: number; y: number } }[] = [];
-        for (let index = 0; index < count; index += 1) {
-          const candidate = searches.nth(index);
-          const box = await candidate.boundingBox().catch(() => null);
-          if (!box) continue;
-          candidates.push({ locator: candidate, point: { x: box.x, y: box.y } });
-        }
-        const picked = pickNearestUniqueByDistance(
-          { x: phoneBox.x, y: phoneBox.y },
-          candidates.map((entry) => entry.point),
-          SEARCH_NEAR_PHONE_MARGIN_PX,
-        );
-        if (picked !== null) return candidates[picked]!.locator;
+    const phonePoints: { x: number; y: number }[] = [];
+    for (let index = 0; index < await phone.count(); index += 1) {
+      const box = await phone.nth(index).boundingBox().catch(() => null);
+      if (box) phonePoints.push({ x: box.x, y: box.y });
+    }
+    // Multiple phone anchors are ambiguous: do not assume the first phone
+    // field owns the recovered Search control.
+    if (phonePoints.length === 1) {
+      const candidates: { locator: Locator; point: { x: number; y: number } }[] = [];
+      for (let index = 0; index < count; index += 1) {
+        const candidate = searches.nth(index);
+        const box = await candidate.boundingBox().catch(() => null);
+        if (!box) continue;
+        candidates.push({ locator: candidate, point: { x: box.x, y: box.y } });
       }
+      const picked = pickNearestUniqueByDistance(
+        phonePoints[0],
+        candidates.map((entry) => entry.point),
+        SEARCH_NEAR_PHONE_MARGIN_PX,
+        SEARCH_NEAR_PHONE_MAX_DISTANCE_PX,
+      );
+      if (picked !== null) return candidates[picked]!.locator;
     }
     throw new Error(
       count === 0
@@ -943,56 +953,36 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       // another form control (so we do not steal the previous question).
       // Keep in sync with extractRipplingAncestorPrompt / looksLike* in
       // ripplingDomHelpers.ts (evaluateAll cannot import modules).
-      const looksLikeOpaqueToken = (value: string): boolean =>
-        /^[A-Za-z0-9_-]{8,}$/.test(value) && !/\s/.test(value);
-      const looksLikePromptText = (value: string | undefined): value is string => {
-        if (!value) return false;
-        const trimmed = value.replace(/\s*[✱*]\s*$/, "").trim();
-        if (trimmed.length < 2 || trimmed.length > 240) return false;
-        if (looksLikeOpaqueToken(trimmed)) return false;
-        if (/^(?:search|select(?:\.\.\.)?|textbox|toggle|menu)$/i.test(trimmed)) return false;
-        if (/^total \d+ file selected$/i.test(trimmed)) return false;
-        return /[A-Za-z]/.test(trimmed);
-      };
       const controlSelector = "input, textarea, select, [role='combobox']";
-      let ancestorPromptText: string | undefined;
+      const ancestorPromptCandidates: RipplingPromptCandidate[] = [];
       let cursor: Element | null = control;
-      for (let depth = 0; depth < 6 && cursor && !ancestorPromptText; depth += 1) {
+      for (let depth = 0; depth < 6 && cursor; depth += 1) {
         const previous = cursor.previousElementSibling;
-        if (previous && !previous.querySelector(controlSelector)) {
-          const candidate = textFrom(previous);
-          if (looksLikePromptText(candidate)) {
-            ancestorPromptText = candidate.replace(/\s*[✱*]\s*$/, "").trim();
-            break;
-          }
+        if (previous) {
+          ancestorPromptCandidates.push({
+            text: textFrom(previous),
+            containsControl: Boolean(previous.querySelector(controlSelector)),
+          });
         }
         const parent: Element | null = cursor.parentElement;
         if (parent) {
           for (const child of Array.from(parent.children) as Element[]) {
             if (child.contains(control)) break;
-            if (child.querySelector(controlSelector)) continue;
-            const candidate = textFrom(child);
-            if (looksLikePromptText(candidate)) {
-              ancestorPromptText = candidate.replace(/\s*[✱*]\s*$/, "").trim();
-              break;
-            }
+            ancestorPromptCandidates.push({
+              text: textFrom(child),
+              containsControl: Boolean(child.querySelector(controlSelector)),
+            });
           }
         }
         cursor = parent;
       }
-      const ripplingAncestorPrompt = !legend && !ariaLabelledByText &&
-        questionContainerPrompts.length === 0 && ancestorPromptText
-        ? ancestorPromptText
-        : undefined;
       const questionEvidence = {
         ...(legend ? { fieldsetLegend: legend } : {}),
         ...(ariaLabelledByText ? { ariaLabelledByText } : {}),
         ...((ariaLabelledByText || ariaLabel) ? { accessibleName: ariaLabelledByText ?? ariaLabel } : {}),
         ...(questionContainerPrompts.length > 0
           ? { questionContainerPrompts }
-          : ripplingAncestorPrompt
-            ? { questionContainerPrompts: [ripplingAncestorPrompt] }
-            : {}),
+          : {}),
         ...(adjacentPromptText ? { nearbyPromptText: adjacentPromptText } : {}),
         ...(sectionTitle ? { sectionTitle } : {}),
         ...(nearbyInstructionText ? { nearbyInstructionText } : {}),
@@ -1005,10 +995,6 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
         control.id.trim() ||
         `Field ${index + 1}`
       );
-      // Prefer the human prompt over opaque Rippling custom-question tokens.
-      const label = looksLikeOpaqueToken(rawLabel) && ancestorPromptText
-        ? ancestorPromptText
-        : rawLabel;
       const rawType = control instanceof HTMLInputElement
         ? control.type.toLowerCase()
         : control instanceof HTMLTextAreaElement
@@ -1088,7 +1074,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       return [{
         index,
         id,
-        label,
+        label: rawLabel,
         type,
         required: isFirstRadioInGroup && (control.required || control.getAttribute("aria-required") === "true"),
         ...(stableSelector ? { stableSelector } : {}),
@@ -1099,12 +1085,35 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
           ? { groupName: control.name }
           : {}),
         ...(Object.keys(questionEvidence).length > 0 ? { questionEvidence } : {}),
+        ...(ancestorPromptCandidates.length > 0 ? { ripplingPromptCandidates: ancestorPromptCandidates } : {}),
       }];
     }));
 
+    const normalizedRaw = raw.map((item) => {
+      const ancestorPromptText = extractRipplingPromptFromCandidates(item.ripplingPromptCandidates ?? []);
+      const questionEvidence = !item.questionEvidence?.fieldsetLegend &&
+        !item.questionEvidence?.ariaLabelledByText &&
+        (item.questionEvidence?.questionContainerPrompts?.length ?? 0) === 0 &&
+        ancestorPromptText
+        ? {
+            ...(item.questionEvidence ?? {}),
+            questionContainerPrompts: [ancestorPromptText],
+          }
+        : item.questionEvidence;
+      const normalizedItem = { ...item };
+      delete normalizedItem.ripplingPromptCandidates;
+      return {
+        ...normalizedItem,
+        label: looksLikeOpaqueToken(item.label) && ancestorPromptText
+          ? ancestorPromptText
+          : item.label,
+        ...(questionEvidence ? { questionEvidence } : {}),
+      };
+    });
+
     const fields: LeverBrowserField[] = [];
     const idOccurrences = new Map<string, number>();
-    for (const item of raw) {
+    for (const item of normalizedRaw) {
       const occurrence = idOccurrences.get(item.id) ?? 0;
       idOccurrences.set(item.id, occurrence + 1);
       const uniqueItem = occurrence === 0
