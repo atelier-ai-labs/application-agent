@@ -164,6 +164,8 @@ export interface JobIntakeInput {
   applicationUrl?: string;
   companyHint?: string;
   titleHint?: string;
+  /** Trusted structured compensation, when the source already supplied it. */
+  compensation?: JobCompensation;
   isExample?: boolean;
 }
 
