@@ -218,7 +218,7 @@ export function isPreferredNameField(
 export function looksLikeInternationalDialingOptions(
   options: readonly ApplicationFieldOption[] | undefined,
 ): boolean {
-  if (!options || options.length < 8) return false;
+  if (!options || options.length < 5) return false;
   let dialing = 0;
   for (const option of options) {
     const sample = `${option.label} ${option.value}`.trim();

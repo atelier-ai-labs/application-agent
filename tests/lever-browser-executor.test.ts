@@ -1229,6 +1229,25 @@ describe("Rippling field classification regressions", () => {
     })).toBe("location");
   });
 
+  it("classifies truncated Rippling dialing lists with only 7 sampled options", () => {
+    const truncated = dialingOptions.slice(0, 7);
+    expect(truncated).toHaveLength(7);
+    expect(looksLikeInternationalDialingOptions(truncated)).toBe(true);
+    expect(classifyLeverApplicationField({
+      id: "field-34",
+      label: "Search",
+      type: "select",
+      options: truncated,
+    })).toBe("location");
+    expect(looksLikeInternationalDialingOptions([
+      { label: "She/her/hers", value: "She/her/hers" },
+      { label: "He/him/his", value: "He/him/his" },
+      { label: "They/them/theirs", value: "They/them/theirs" },
+      { label: "Ze/hir/hir", value: "Ze/hir/hir" },
+      { label: "Prefer not to say", value: "Prefer not to say" },
+    ])).toBe(false);
+  });
+
   it("classifies opaque custom ids from the question prompt", () => {
     expect(classifyLeverApplicationField({
       id: "73RMCCC5P40",
