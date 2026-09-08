@@ -18,6 +18,10 @@ import {
   safeBrowserDiagnosticMessage,
 } from "../src/domain/executor";
 import { looksLikeInternationalDialingOptions } from "../src/domain/leverBrowserExecutor";
+import {
+  pickNearestUniqueByDistance,
+  SEARCH_NEAR_PHONE_MARGIN_PX,
+} from "./ripplingDomHelpers";
 
 export interface PlaywrightLeverBrowserOptions {
   headless?: boolean;
@@ -381,19 +385,24 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
     const count = await searches.count();
     if (count === 1) return searches.first();
     // Prefer a Search control near the phone field when multiple exist.
+    // Fail closed unless the nearest candidate is uniquely best by a clear margin.
     const phone = this.page.locator('input[placeholder="Phone number"], input[id*="phone" i]');
     if (await phone.count() > 0) {
       const phoneBox = await phone.first().boundingBox().catch(() => null);
       if (phoneBox) {
-        let best: { locator: Locator; distance: number } | undefined;
+        const candidates: { locator: Locator; point: { x: number; y: number } }[] = [];
         for (let index = 0; index < count; index += 1) {
           const candidate = searches.nth(index);
           const box = await candidate.boundingBox().catch(() => null);
           if (!box) continue;
-          const distance = Math.abs(box.y - phoneBox.y) + Math.abs(box.x - phoneBox.x);
-          if (!best || distance < best.distance) best = { locator: candidate, distance };
+          candidates.push({ locator: candidate, point: { x: box.x, y: box.y } });
         }
-        if (best) return best.locator;
+        const picked = pickNearestUniqueByDistance(
+          { x: phoneBox.x, y: phoneBox.y },
+          candidates.map((entry) => entry.point),
+          SEARCH_NEAR_PHONE_MARGIN_PX,
+        );
+        if (picked !== null) return candidates[picked]!.locator;
       }
     }
     throw new Error(
@@ -932,6 +941,8 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       // div.paddingX--16 / div.css-1w8xq0). Walk up a few levels and accept the
       // first preceding node that looks like a prompt and does not contain
       // another form control (so we do not steal the previous question).
+      // Keep in sync with extractRipplingAncestorPrompt / looksLike* in
+      // ripplingDomHelpers.ts (evaluateAll cannot import modules).
       const looksLikeOpaqueToken = (value: string): boolean =>
         /^[A-Za-z0-9_-]{8,}$/.test(value) && !/\s/.test(value);
       const looksLikePromptText = (value: string | undefined): value is string => {
@@ -955,9 +966,9 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
             break;
           }
         }
-        const parent = cursor.parentElement;
+        const parent: Element | null = cursor.parentElement;
         if (parent) {
-          for (const child of Array.from(parent.children)) {
+          for (const child of Array.from(parent.children) as Element[]) {
             if (child.contains(control)) break;
             if (child.querySelector(controlSelector)) continue;
             const candidate = textFrom(child);
