@@ -1,0 +1,16 @@
+{
+  "id": "05-groundedness-mock",
+  "kind": "groundedness",
+  "description": "Mock rubric: draft stays grounded in Alex Example profile facts and does not invent skills.",
+  "graders": ["model_rubric"],
+  "input": {
+    "draftText": "Alex Example built AWS and Kubernetes workflows at Example Labs for Example Cloud Systems Cloud Platform Engineer role.",
+    "profileFacts": ["Alex Example", "AWS", "Kubernetes", "Example Labs"],
+    "jobTitle": "Cloud Platform Engineer",
+    "jobCompany": "Example Cloud Systems"
+  },
+  "expected": {
+    "minScore": 0.75,
+    "mustNotInventSkills": ["Rust", "SAP", "Cobol"]
+  }
+}
