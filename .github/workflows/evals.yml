@@ -1,0 +1,41 @@
+name: evals
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Soft gate: report baseline without failing the required merge path.
+# To make blocking later: remove continue-on-error, set EVALS_FAIL_ON_ERROR=1,
+# and require this check in branch protection. See evals/README.md.
+jobs:
+  evals:
+    name: evals harness (soft)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run evals suite (offline, mocked model grader)
+        env:
+          # Keep soft: do not fail the step on task failures yet.
+          # EVALS_FAIL_ON_ERROR: "1"
+          EVALS_MODEL_GRADER: mock
+        run: npm run test:evals
+
+      - name: Reminder — soft gate
+        if: always()
+        run: |
+          echo "evals job is non-blocking (continue-on-error: true)."
+          echo "Flip to blocking: see evals/README.md § Flip to blocking later."
