@@ -923,20 +923,70 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       const instructionElement = questionContainer?.querySelector('.application-label .description, [data-qa="description"]');
       const nearbyInstructionText = textFrom(instructionElement, 160);
       const adjacentPrompt = control.previousElementSibling;
-      const nearbyPromptText = adjacentPrompt &&
+      const adjacentPromptText = adjacentPrompt &&
         adjacentPrompt.matches('[data-qa="question"], [data-qa="question-text"], .question-prompt')
         ? textFrom(adjacentPrompt)
+        : undefined;
+      // Rippling custom questions often expose opaque name/id labels while the
+      // real prompt sits on a preceding sibling of an ancestor (for example
+      // div.paddingX--16 / div.css-1w8xq0). Walk up a few levels and accept the
+      // first preceding node that looks like a prompt and does not contain
+      // another form control (so we do not steal the previous question).
+      const looksLikeOpaqueToken = (value: string): boolean =>
+        /^[A-Za-z0-9_-]{8,}$/.test(value) && !/\s/.test(value);
+      const looksLikePromptText = (value: string | undefined): value is string => {
+        if (!value) return false;
+        const trimmed = value.replace(/\s*[✱*]\s*$/, "").trim();
+        if (trimmed.length < 2 || trimmed.length > 240) return false;
+        if (looksLikeOpaqueToken(trimmed)) return false;
+        if (/^(?:search|select(?:\.\.\.)?|textbox|toggle|menu)$/i.test(trimmed)) return false;
+        if (/^total \d+ file selected$/i.test(trimmed)) return false;
+        return /[A-Za-z]/.test(trimmed);
+      };
+      const controlSelector = "input, textarea, select, [role='combobox']";
+      let ancestorPromptText: string | undefined;
+      let cursor: Element | null = control;
+      for (let depth = 0; depth < 6 && cursor && !ancestorPromptText; depth += 1) {
+        const previous = cursor.previousElementSibling;
+        if (previous && !previous.querySelector(controlSelector)) {
+          const candidate = textFrom(previous);
+          if (looksLikePromptText(candidate)) {
+            ancestorPromptText = candidate.replace(/\s*[✱*]\s*$/, "").trim();
+            break;
+          }
+        }
+        const parent = cursor.parentElement;
+        if (parent) {
+          for (const child of Array.from(parent.children)) {
+            if (child.contains(control)) break;
+            if (child.querySelector(controlSelector)) continue;
+            const candidate = textFrom(child);
+            if (looksLikePromptText(candidate)) {
+              ancestorPromptText = candidate.replace(/\s*[✱*]\s*$/, "").trim();
+              break;
+            }
+          }
+        }
+        cursor = parent;
+      }
+      const ripplingAncestorPrompt = !legend && !ariaLabelledByText &&
+        questionContainerPrompts.length === 0 && ancestorPromptText
+        ? ancestorPromptText
         : undefined;
       const questionEvidence = {
         ...(legend ? { fieldsetLegend: legend } : {}),
         ...(ariaLabelledByText ? { ariaLabelledByText } : {}),
         ...((ariaLabelledByText || ariaLabel) ? { accessibleName: ariaLabelledByText ?? ariaLabel } : {}),
-        ...(questionContainerPrompts.length > 0 ? { questionContainerPrompts } : {}),
-        ...(nearbyPromptText ? { nearbyPromptText } : {}),
+        ...(questionContainerPrompts.length > 0
+          ? { questionContainerPrompts }
+          : ripplingAncestorPrompt
+            ? { questionContainerPrompts: [ripplingAncestorPrompt] }
+            : {}),
+        ...(adjacentPromptText ? { nearbyPromptText: adjacentPromptText } : {}),
         ...(sectionTitle ? { sectionTitle } : {}),
         ...(nearbyInstructionText ? { nearbyInstructionText } : {}),
       };
-      const label = (
+      const rawLabel = (
         associated?.textContent?.trim() ||
         control.getAttribute("aria-label")?.trim() ||
         control.getAttribute("placeholder")?.trim() ||
@@ -944,6 +994,10 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
         control.id.trim() ||
         `Field ${index + 1}`
       );
+      // Prefer the human prompt over opaque Rippling custom-question tokens.
+      const label = looksLikeOpaqueToken(rawLabel) && ancestorPromptText
+        ? ancestorPromptText
+        : rawLabel;
       const rawType = control instanceof HTMLInputElement
         ? control.type.toLowerCase()
         : control instanceof HTMLTextAreaElement
