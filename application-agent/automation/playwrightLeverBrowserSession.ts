@@ -322,10 +322,14 @@ export function greenhouseOptionMatches(
     (optionValue !== null && normalize(optionValue) === normalizedDesired) ||
     normalizedText.startsWith(`${normalizedDesired}+`) ||
     normalizedText.startsWith(`${normalizedDesired} +`) ||
-    // Rippling dialing lists: "+1 US - United States"
+    // Rippling dialing lists: "+1 US - United States" and committed "+1 US"
     normalizedText.endsWith(` - ${normalizedDesired}`) ||
     normalizedText.endsWith(`-${normalizedDesired}`) ||
-    normalizedText.includes(` - ${normalizedDesired}`);
+    normalizedText.includes(` - ${normalizedDesired}`) ||
+    (
+      (normalizedDesired === "united states" || normalizedDesired === "us" || normalizedDesired === "usa") &&
+      /^\+\d+\s+us\b/.test(normalizedText)
+    );
 }
 
 class PlaywrightLeverBrowserField implements LeverBrowserField {
@@ -366,14 +370,46 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
     return this.page.locator(this.raw.stableSelector);
   }
 
+  /** Rippling remounts can invalidate id selectors mid-prep; recover Search comboboxes. */
+  private async resolveSelectLocator(): Promise<Locator> {
+    const primary = this.locator();
+    if (await primary.count() > 0) return primary.first();
+    if (!looksLikeInternationalDialingOptions(this.options) && this.label !== "Search") {
+      return primary;
+    }
+    const searches = this.page.locator('input[placeholder="Search"][role="combobox"]');
+    const count = await searches.count();
+    if (count === 1) return searches.first();
+    // Prefer a Search control near the phone field when multiple exist.
+    const phone = this.page.locator('input[placeholder="Phone number"], input[id*="phone" i]');
+    if (await phone.count() > 0) {
+      const phoneBox = await phone.first().boundingBox().catch(() => null);
+      if (phoneBox) {
+        let best: { locator: Locator; distance: number } | undefined;
+        for (let index = 0; index < count; index += 1) {
+          const candidate = searches.nth(index);
+          const box = await candidate.boundingBox().catch(() => null);
+          if (!box) continue;
+          const distance = Math.abs(box.y - phoneBox.y) + Math.abs(box.x - phoneBox.x);
+          if (!best || distance < best.distance) best = { locator: candidate, distance };
+        }
+        if (best) return best.locator;
+      }
+    }
+    return count > 0 ? searches.first() : primary;
+  }
+
   async fill(value: string): Promise<void> {
     await this.locator().fill(value);
   }
 
   async select(value: string): Promise<void> {
     if (this.type === "select") {
-      const locator = this.locator();
-      const tagName = await locator.evaluate((element) => element.tagName.toLowerCase());
+      const locator = await this.resolveSelectLocator();
+      if (await locator.count() === 0) {
+        throw new Error(`The select control ${this.id} was not found in the DOM.`);
+      }
+      const tagName = await locator.evaluate((element) => element.tagName.toLowerCase(), undefined, { timeout: 5_000 });
       if (tagName === "select") {
         await locator.selectOption(value);
         return;
@@ -432,7 +468,16 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
           if (attempt < 19) await this.page.waitForTimeout(50);
         }
       }
-      await locator.press("Enter");
+      if (matchedOption && allowTypeahead) {
+        const visibleMatch = this.page.getByRole("option", { name: matchedOption.label, exact: true }).first();
+        if (await visibleMatch.count() > 0 && await visibleFormControl(visibleMatch)) {
+          await visibleMatch.click();
+        } else {
+          await locator.press("Enter");
+        }
+      } else {
+        await locator.press("Enter");
+      }
       const expectedValue = matchedOption?.value ?? value;
       const isCommitted = async (): Promise<boolean> => {
         const selected = await this.readValue();
@@ -444,9 +489,10 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
         // the uniquely filtered full country label. Accept that representation
         // only when it is the exact suffix of the option we selected.
         // Rippling lists put the dialing code at the start ("+1 US - United States").
-        const selectedDialingCode = selected.trim().match(/^\+\d+$/)?.[0];
+        const selectedDialingCode = selected.trim().match(/^\+\d+/)?.[0];
         const expectedDialingCode = expectedValue.trim().match(/^\+\d+/)?.[0]
-          ?? expectedValue.trim().match(/\+\d+$/)?.[0];
+          ?? expectedValue.trim().match(/\+\d+$/)?.[0]
+          ?? (greenhouseOptionMatches(selected, selected, value) ? selected.trim().match(/^\+\d+/)?.[0] : undefined);
         return Boolean(selectedDialingCode && expectedDialingCode && selectedDialingCode === expectedDialingCode);
       };
       for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -523,8 +569,16 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
     await this.locator().setInputFiles(path);
   }
 
-  private async readCustomSelection(): Promise<string | null> {
-    const candidate = await this.locator().evaluate((element) => {
+  private async readCustomSelection(locator?: Locator): Promise<string | null> {
+    const target = locator ?? await this.resolveSelectLocator();
+    if (await target.count() === 0) return null;
+    const inputValue = await target.inputValue({ timeout: 2_000 }).catch(() => "");
+    if (inputValue.trim()) {
+      const matchedFromInput = this.options?.find((option) =>
+        greenhouseOptionMatches(option.label, option.value, inputValue));
+      return matchedFromInput?.value ?? inputValue.trim();
+    }
+    const candidate = await target.evaluate((element) => {
       const root = element.closest(".select__container") ?? element.parentElement;
       const selectedValue = root?.querySelector(".select__single-value")?.textContent;
       const ariaValue = element.getAttribute("aria-valuetext");
@@ -532,7 +586,7 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
       return [selectedValue, ariaValue, dataValue]
         .map((value) => value?.replace(/\s+/g, " ").trim() ?? "")
         .find(Boolean) ?? null;
-    }).catch(() => null);
+    }, undefined, { timeout: 2_000 }).catch(() => null);
     if (!candidate) return null;
     const matchedOption = this.options?.find((option) =>
       greenhouseOptionMatches(option.label, option.value, candidate));
@@ -557,8 +611,12 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
       return null;
     }
     if (this.type === "select") {
-      const tagName = await this.locator().evaluate((element) => element.tagName.toLowerCase());
-      if (tagName !== "select") return this.readCustomSelection();
+      const locator = await this.resolveSelectLocator();
+      if (await locator.count() === 0) return null;
+      const tagName = await locator.evaluate((element) => element.tagName.toLowerCase(), undefined, { timeout: 2_000 }).catch(() => "input");
+      if (tagName !== "select") return this.readCustomSelection(locator);
+      const nativeValue = await locator.inputValue({ timeout: 2_000 }).catch(() => "");
+      return nativeValue.trim() ? nativeValue : null;
     }
     const value = await this.locator().inputValue();
     return value.trim() ? value : null;
