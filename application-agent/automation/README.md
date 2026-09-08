@@ -1,4 +1,4 @@
-# Lever browser execution boundary
+# ATS browser execution boundary
 
 This directory contains the Node-only browser host for the existing
 `ApplicationExecutor` seam. It is intentionally outside the Vite client
@@ -8,13 +8,13 @@ bundled into the public HQ application.
 ## What is implemented
 
 - `PlaywrightLeverBrowserSessionFactory` launches an ephemeral Chromium context.
-- `PlaywrightLeverBrowserSession` navigates to the already-verified Lever
-  `/apply` URL, inspects visible simple form controls, and exposes deterministic
-  fill/select/check/upload operations.
-- `createPlaywrightLeverBrowserExecutor()` wires that session to the
-  browser-neutral `LeverBrowserExecutor`.
+- `PlaywrightLeverBrowserSession` navigates to an already-verified Lever,
+  Greenhouse, Rippling, or Workday application route, inspects visible simple
+  form controls, and exposes deterministic fill/select/check/upload operations.
+- `createPlaywrightLeverBrowserExecutor()` wires that session to the existing
+  browser-neutral executor; the class name is retained for compatibility.
 
-The domain executor validates live Lever provenance again immediately before
+The domain executor validates live provider provenance again immediately before
 navigation. It maps only verified profile facts, explicitly resolved answers,
 approved grounded drafts, and an injected local resume artifact. It can pause
 for login/MFA/CAPTCHA, unknown fields, policy-sensitive questions, or missing
@@ -59,8 +59,8 @@ not expose arbitrary navigation, selectors, JavaScript, or typing endpoints.
 
 The client sends the current validated campaign, career job, application
 packet, and profile. The host revalidates all of them, requires a private/local
-profile, requires live actionable Lever provenance, and navigates only to the
-verified Lever `/apply` path. A frontend cannot provide a filesystem path. If a
+profile, requires live actionable provider provenance, and navigates only to the
+verified application route. A frontend cannot provide a filesystem path. If a
 resume upload is needed, configure an existing local artifact with
 `ATELIER_RESUME_ROOT` and one of the family-specific path variables in
 `.env.local` for the Node process, or use the ignored local manifest described

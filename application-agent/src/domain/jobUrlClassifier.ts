@@ -186,3 +186,64 @@ export function isVerifiedRipplingApplicationUrl(
     : classification.siteIdentifier?.toLowerCase() === organization.trim().toLowerCase() &&
       classification.postingIdentifier === postingId.trim();
 }
+
+function isAshbyPath(value: string | undefined, suffix?: "application"): boolean {
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    const classification = classifyJobUrl(url.toString());
+    if (classification.kind !== "ashby") return false;
+    const segments = pathSegments(url);
+    return Boolean(segments && (suffix === undefined
+      ? segments.length === 2
+      : segments.length === 3 && segments[2]?.toLowerCase() === suffix));
+  } catch {
+    return false;
+  }
+}
+
+export function isVerifiedAshbyHostedUrl(
+  value: string | undefined,
+  organization: string,
+  postingId: string,
+): boolean {
+  if (!value || !organization.trim() || !postingId.trim()) return false;
+  const classification = classifyJobUrl(value);
+  return classification.kind === "ashby" &&
+    classification.siteIdentifier?.toLowerCase() === organization.trim().toLowerCase() &&
+    classification.postingIdentifier === postingId.trim() &&
+    isAshbyPath(classification.canonicalUrl ?? value);
+}
+
+export function isVerifiedAshbyApplicationUrl(
+  value: string | undefined,
+  organization?: string,
+  postingId?: string,
+): boolean {
+  const classification = classifyJobUrl(value ?? "");
+  if (classification.kind !== "ashby" || !isAshbyPath(value, "application")) return false;
+  return (organization === undefined || classification.siteIdentifier?.toLowerCase() === organization.trim().toLowerCase()) &&
+    (postingId === undefined || classification.postingIdentifier === postingId.trim());
+}
+
+/**
+ * Workday application flows keep the tenant hostname while adding one or more
+ * interactive steps below the public job route. Accept only a job route that
+ * reaches an explicit `/apply` segment; a tenant homepage or public posting
+ * is not an application destination.
+ */
+export function isVerifiedWorkdayApplicationUrl(value: string | undefined, tenant?: string): boolean {
+  const classification = classifyJobUrl(value ?? "");
+  if (classification.kind !== "workday" || !classification.canonicalUrl) return false;
+  if (tenant && classification.siteIdentifier?.toLowerCase() !== tenant.trim().toLowerCase()) return false;
+  try {
+    const url = new URL(classification.canonicalUrl);
+    const segments = pathSegments(url)?.map((segment) => segment.toLowerCase());
+    if (!segments) return false;
+    const jobIndex = segments.indexOf("job");
+    const applyIndex = segments.indexOf("apply");
+    return jobIndex >= 0 && applyIndex > jobIndex;
+  } catch {
+    return false;
+  }
+}

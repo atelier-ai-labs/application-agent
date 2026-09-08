@@ -30,6 +30,46 @@ Required qualifications
 `,
 };
 
+const selectedLeverPosting: JobIntakeInput = {
+  companyHint: "Patrick J. McGovern Foundation",
+  titleHint: "Jr DevOps Engineer",
+  sourceUrl: "https://jobs.lever.co/mcgovern/885d7a1a-16f6-4326-9d7c-da7404dfd1f5",
+  applicationUrl: "https://jobs.lever.co/mcgovern/885d7a1a-16f6-4326-9d7c-da7404dfd1f5/apply",
+  rawText: `Patrick J. McGovern Foundation
+Jr DevOps Engineer
+Location: Remote
+Employment type: Full-time
+
+Support cloud infrastructure, automation, CI/CD, containers, and observability
+for AI and data products.
+
+Required qualifications
+- AWS
+- Python
+- Terraform
+- Docker
+`,
+};
+
+const selectedAshbyPosting: JobIntakeInput = {
+  companyHint: "Mastra",
+  titleHint: "Platform Engineer",
+  sourceUrl: "https://jobs.ashbyhq.com/Mastra/3b06208b-34fe-4dda-b409-ee3fd9305cc3",
+  applicationUrl: "https://jobs.ashbyhq.com/Mastra/3b06208b-34fe-4dda-b409-ee3fd9305cc3/application",
+  rawText: `Mastra
+Platform Engineer
+Location: Remote - AMER time zones
+Employment type: Full-time
+
+Build and operate production platform systems using TypeScript, Node.js,
+Postgres, Redis, ClickHouse, Google Cloud, and Railway.
+
+Required qualifications
+- Production platform engineering experience
+- TypeScript and Node.js
+`,
+};
+
 const campaignInput: CreateCampaignInput = {
   name: "Synthetic selected-posting campaign",
   goal: "Evaluate one public posting with the existing policy.",
@@ -86,5 +126,67 @@ describe("curated selected-posting intake", () => {
     expect(second.id).toBe(first.id);
     expect(second.destinationResolution).toEqual(first.destinationResolution);
     expect(service.listJobs(campaign.id)).toHaveLength(1);
+  });
+
+  it("accepts a verified Lever posting from the daily hunt through the same curated path", async () => {
+    const applicationRepository = new InMemoryApplicationRepository();
+    const careerRepository = new InMemoryCareerRepository();
+    const service = new CareerAgentService(exampleCandidateProfile, {
+      applicationService: createApplicationService(
+        exampleCandidateProfile,
+        applicationRepository,
+        new DeterministicModelClient(),
+      ),
+      careerRepository,
+      executor: new UnavailableApplicationExecutor(),
+    }, {
+      now: () => capturedAt,
+      createId: (prefix) => `${prefix}-lever-synthetic`,
+    });
+    const campaign = service.createCampaign(campaignInput);
+    service.activateCampaign(campaign.id);
+
+    const job = await service.processCuratedJob(campaign.id, selectedLeverPosting);
+
+    expect(job.sourceId).toBe("curated-live");
+    expect(job.sourceRecordId).toBe("885d7a1a-16f6-4326-9d7c-da7404dfd1f5");
+    expect(job.job.ats).toBe("Lever");
+    expect(job.destinationResolution).toMatchObject({
+      status: "resolved",
+      destinationUrl: selectedLeverPosting.applicationUrl,
+      ats: "Lever",
+      actionable: true,
+    });
+  });
+
+  it("accepts a verified Ashby posting from the daily hunt through the same curated path", async () => {
+    const applicationRepository = new InMemoryApplicationRepository();
+    const careerRepository = new InMemoryCareerRepository();
+    const service = new CareerAgentService(exampleCandidateProfile, {
+      applicationService: createApplicationService(
+        exampleCandidateProfile,
+        applicationRepository,
+        new DeterministicModelClient(),
+      ),
+      careerRepository,
+      executor: new UnavailableApplicationExecutor(),
+    }, {
+      now: () => capturedAt,
+      createId: (prefix) => `${prefix}-ashby-synthetic`,
+    });
+    const campaign = service.createCampaign(campaignInput);
+    service.activateCampaign(campaign.id);
+
+    const job = await service.processCuratedJob(campaign.id, selectedAshbyPosting);
+
+    expect(job.sourceId).toBe("curated-live");
+    expect(job.sourceRecordId).toBe("Mastra:3b06208b-34fe-4dda-b409-ee3fd9305cc3");
+    expect(job.job.ats).toBe("Ashby");
+    expect(job.destinationResolution).toMatchObject({
+      status: "resolved",
+      destinationUrl: selectedAshbyPosting.applicationUrl,
+      ats: "Ashby",
+      actionable: true,
+    });
   });
 });

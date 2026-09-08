@@ -82,7 +82,7 @@ import {
   type ApplicationExecutionRequest,
   type ApplicationExecutorResult,
 } from "../domain/executor";
-import { JobScout, jobDedupeKeys, jobKeysMatch, type ScoutedJob } from "../domain/scout";
+import { JobScout, canonicalJobUrl, jobDedupeKeys, jobKeysMatch, type ScoutedJob } from "../domain/scout";
 import {
   normalizeJobSearchIntent,
   searchCriteriaFromJobSearchIntent,
@@ -98,6 +98,14 @@ import {
 import { isAppliedEvidence, isSubmissionProof } from "../domain/validation";
 import { normalizeJobPosting } from "../domain/job";
 import { classifyJobUrl } from "../domain/jobUrlClassifier";
+import {
+  isVerifiedAshbyApplicationUrl,
+  isVerifiedAshbyHostedUrl,
+} from "../domain/jobUrlClassifier";
+import {
+  isVerifiedLeverApplicationUrl,
+  isVerifiedLeverHostedUrl,
+} from "../domain/leverJobSource";
 
 let fallbackId = 0;
 
@@ -185,7 +193,7 @@ const DEFAULT_SEARCH_CRITERIA: SearchCriteria = {
 const DEFAULT_FIT_POLICY: FitPolicy = {
   strong: "pursue",
   good: "pursue",
-  stretch: "hold",
+  stretch: "pursue",
   weak: "reject",
 };
 
@@ -676,9 +684,9 @@ export class CareerAgentService {
 
   /**
    * Process one user-selected public posting through the same campaign path as
-   * discovered work. This is intentionally bounded to a verified Rippling
-   * posting so a daily-hunt link can be evaluated without adding a crawler or
-   * mutating the campaign's search intent.
+   * discovered work. This is intentionally bounded to verified Lever,
+   * Rippling, or Ashby postings so a daily-hunt link can be evaluated without
+   * adding a crawler or mutating the campaign's search intent.
    */
   async processCuratedJob(campaignId: string, input: JobIntakeInput): Promise<CareerJob> {
     const campaign = this.getCampaign(campaignId);
@@ -689,16 +697,34 @@ export class CareerAgentService {
       throw new Error("A selected posting needs both its public source URL and application URL.");
     }
     const classification = classifyJobUrl(normalizedPosting.applicationUrl);
-    if (classification.kind !== "rippling" || !classification.siteIdentifier || !classification.postingIdentifier || !classification.canonicalUrl) {
-      throw new Error("This first curated path supports a verified Rippling application URL only.");
+    if (!classification.siteIdentifier || !classification.postingIdentifier || !classification.canonicalUrl ||
+      !["rippling", "lever", "ashby"].includes(classification.kind)) {
+      throw new Error("This curated path supports a verified Lever, Rippling, or Ashby application URL only.");
+    }
+
+    const sourceUrl = canonicalJobUrl(normalizedPosting.sourceUrl);
+    const applicationUrl = classification.canonicalUrl;
+    if (!sourceUrl) throw new Error("A selected posting needs a valid posting/source URL.");
+    if (classification.kind === "lever" &&
+      (!isVerifiedLeverHostedUrl(sourceUrl, classification.siteIdentifier, classification.postingIdentifier) ||
+        !isVerifiedLeverApplicationUrl(applicationUrl, classification.siteIdentifier, classification.postingIdentifier))) {
+      throw new Error("The selected Lever posting and application URLs do not match the same verified posting.");
+    }
+    if (classification.kind === "ashby" &&
+      (!isVerifiedAshbyHostedUrl(sourceUrl, classification.siteIdentifier, classification.postingIdentifier) ||
+        !isVerifiedAshbyApplicationUrl(applicationUrl, classification.siteIdentifier, classification.postingIdentifier))) {
+      throw new Error("The selected Ashby posting and application URLs do not match the same verified posting.");
     }
 
     const job: JobPosting = {
       ...normalizedPosting,
-      applicationUrl: classification.canonicalUrl,
-      ats: "Rippling",
+      sourceUrl,
+      applicationUrl,
+      ats: classification.kind === "lever" ? "Lever" : classification.kind === "ashby" ? "Ashby" : "Rippling",
     };
-    const sourceRecordId = `${classification.siteIdentifier}:${classification.postingIdentifier}`;
+    const sourceRecordId = classification.kind === "lever"
+      ? classification.postingIdentifier
+      : `${classification.siteIdentifier}:${classification.postingIdentifier}`;
     const discoveredAt = this.now();
     const sourceId = CURATED_JOB_SOURCE_ID;
     const sourceMode = "live" as const;
@@ -727,7 +753,7 @@ export class CareerAgentService {
       status: "resolved",
       attemptedAt: discoveredAt,
       destinationUrl: job.applicationUrl,
-      ats: "Rippling",
+      ats: classification.kind === "lever" ? "Lever" : classification.kind === "ashby" ? "Ashby" : "Rippling",
       actionable: true,
       provenance: "recognized_ats_evidence",
       evidence: ["curated:explicit-public-posting", ...classification.evidence],
@@ -745,6 +771,28 @@ export class CareerAgentService {
     if (!created) throw new Error("The selected posting was not persisted by the campaign service.");
 
     return this.saveJob({ ...created, destinationResolution, updatedAt: this.now() });
+  }
+
+  /** Re-evaluate one held job under the current policy; fit itself is never recomputed here. */
+  async pursueHeldJob(campaignId: string, jobId: string): Promise<CareerJob> {
+    const campaign = this.getCampaign(campaignId);
+    const job = this.getJob(jobId);
+    if (job.campaignId !== campaignId) throw new Error("That job does not belong to the selected campaign.");
+    if (job.status !== "held" || !job.fit) return job;
+    if (applyHardFilters(job.job, campaign.searchCriteria).decision !== "pass") return job;
+    if (decidePursuit(job.fit, campaign.fitPolicy).decision !== "pursue") return job;
+    if (!campaign.applicationPolicy.autoPrepare || this.applicationCapReached(campaign, this.now())) return job;
+
+    const actionable = await this.resolveDestinationForJob(job);
+    if (this.destinationResolver && actionable.destinationResolution?.status !== "resolved") return actionable;
+    const outcome = await this.prepareAndMaybeExecute(campaign, {
+      ...actionable,
+      status: "preparing",
+      applicationStartedAt: this.now(),
+      decisionReason: undefined,
+      updatedAt: this.now(),
+    });
+    return outcome.careerJob ?? this.getJob(job.id);
   }
 
   listEvents(campaignId: string): readonly CareerEvent[] {
@@ -1126,6 +1174,33 @@ export class CareerAgentService {
     const updated = { ...campaign, status: "active" as const, updatedAt: this.now() };
     this.careerRepository.saveCampaign(updated);
     this.appendEvent(campaignId, "campaign.started");
+    return updated;
+  }
+
+  /** Update pursuit decisions without changing fit scoring or search intent. */
+  updateFitPolicy(campaignId: string, patch: Partial<FitPolicy>): Campaign {
+    const campaign = this.getCampaign(campaignId);
+    const nextPolicy: FitPolicy = { ...campaign.fitPolicy, ...patch };
+    if (!isPursuitDecision(nextPolicy.strong) ||
+      !isPursuitDecision(nextPolicy.good) ||
+      !isPursuitDecision(nextPolicy.stretch) ||
+      !isPursuitDecision(nextPolicy.weak)) {
+      throw new Error("Campaign fit policy contains an unsupported pursuit decision.");
+    }
+    const updated = { ...campaign, fitPolicy: nextPolicy, updatedAt: this.now() };
+    this.careerRepository.saveCampaign(updated);
+    return updated;
+  }
+
+  /** Update submission authority as a durable safety setting. */
+  updateSubmissionPolicy(campaignId: string, patch: Partial<SubmissionPolicy>): Campaign {
+    const campaign = this.getCampaign(campaignId);
+    const nextPolicy: SubmissionPolicy = { ...campaign.submissionPolicy, ...patch };
+    if (!isSubmissionAuthority(nextPolicy.authority)) {
+      throw new Error("Campaign submission policy contains an unsupported authority.");
+    }
+    const updated = { ...campaign, submissionPolicy: nextPolicy, updatedAt: this.now() };
+    this.careerRepository.saveCampaign(updated);
     return updated;
   }
 
@@ -2073,6 +2148,10 @@ export class CareerAgentService {
         ? "greenhouse-browser-executor"
         : job.destinationResolution?.ats === "Rippling"
           ? "rippling-browser-executor"
+          : job.destinationResolution?.ats === "Ashby"
+            ? "ashby-browser-executor"
+          : job.destinationResolution?.ats === "Workday"
+            ? "workday-browser-executor"
           : "lever-browser-executor";
       this.appendEvent(campaign.id, "application.execution_host_started", {
         ...careerEventMetadata(marked),
@@ -2578,7 +2657,7 @@ export class CareerAgentService {
     initialJob: CareerJob,
     trace?: ExecutionTraceBuilder,
     parentNodeId?: string,
-  ): Promise<ProcessOutcome> {
+  ): Promise<ProcessOutcome & { careerJob?: CareerJob }> {
     let careerJob = this.saveJob(initialJob);
     let application: Application | null = null;
     const preparationNodeId = `preparation.total.${careerJob.id}`;

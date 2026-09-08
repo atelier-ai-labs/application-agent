@@ -272,7 +272,10 @@ export function verifyPreparedApplication(
     ));
   }
 
-  if (fit?.unsupportedRequiredQualifications.length) {
+  // A preparation-only browser may inspect and prepare a stretch posting even
+  // when fit flags unsupported requirements. The fit result remains unchanged;
+  // submission-capable execution still requires this policy blocker to clear.
+  if (fit?.unsupportedRequiredQualifications.length && !allowPreparationOnly) {
     blockers.push(blocker(
       "unknown_fact",
       "Unsupported required qualifications",

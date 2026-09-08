@@ -1320,4 +1320,129 @@ describe("Rippling field classification regressions", () => {
       : String(phoneCountry.current));
     expect(String(phoneCountry.current)).toMatch(/United States|US/i);
   });
+
+  it("supports a verified Workday application destination through the existing browser policy", async () => {
+    const workdayUrl = "https://homedepot.wd5.myworkdayjobs.com/en-US/CareerDepot/job/TEXAS---VIRTUAL---TX01/Software-Engineer-II--REMOTE-_Req191434/apply";
+    const optionalField = new FakeField({ id: "optional-note", label: "Optional note", type: "text" });
+    const session = new FakeSession([optionalField]);
+    const base = request();
+    const workdayJob = careerJob({
+      sourceId: "himalayas-live",
+      sourceRecordId: "home-depot-workday-job",
+      destinationResolution: {
+        status: "resolved",
+        attemptedAt: capturedAt,
+        destinationUrl: workdayUrl,
+        ats: "Workday",
+        actionable: true,
+        provenance: "official_employer_evidence",
+        evidence: ["official Workday destination"],
+      },
+      job: {
+        ...base.careerJob.job,
+        company: "HOME DEPOT U.S.A., INC.",
+        title: "Software Engineer II (REMOTE)",
+        sourceUrl: "https://himalayas.app/companies/home-depot-u-s-a-inc/jobs/software-engineer-ii",
+        applicationUrl: workdayUrl,
+      },
+    });
+    const workdayRequest = request({
+      careerJob: workdayJob,
+      application: application({ job: workdayJob.job }),
+    });
+    const executor = new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      provider: "auto",
+    });
+
+    expect(executor.supports(workdayRequest)).toBe(true);
+    const result = await executor.execute(workdayRequest);
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(session.submitClicks).toBe(0);
+  });
+
+  it("supports a directly correlated curated Lever posting through the existing browser policy", async () => {
+    const postingId = "885d7a1a-16f6-4326-9d7c-da7404dfd1f5";
+    const sourceUrl = `https://jobs.lever.co/mcgovern/${postingId}`;
+    const applicationUrl = `${sourceUrl}/apply`;
+    const session = new FakeSession([new FakeField({ id: "optional-note", label: "Optional note", type: "text" })]);
+    const base = request();
+    const leverJob = careerJob({
+      sourceId: "curated-live",
+      sourceRecordId: postingId,
+      destinationResolution: {
+        status: "resolved",
+        attemptedAt: capturedAt,
+        destinationUrl: applicationUrl,
+        ats: "Lever",
+        actionable: true,
+        provenance: "recognized_ats_evidence",
+        evidence: ["curated:explicit-public-posting"],
+      },
+      job: {
+        ...base.careerJob.job,
+        company: "Patrick J. McGovern Foundation",
+        title: "Jr DevOps Engineer",
+        sourceUrl,
+        applicationUrl,
+      },
+    });
+    const leverRequest = request({
+      careerJob: leverJob,
+      application: application({ job: leverJob.job }),
+    });
+    const executor = new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      provider: "auto",
+    });
+
+    expect(executor.supports(leverRequest)).toBe(true);
+    const result = await executor.execute(leverRequest);
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(session.submitClicks).toBe(0);
+  });
+
+  it("supports a directly correlated curated Ashby posting through the existing browser policy", async () => {
+    const postingId = "3b06208b-34fe-4dda-b409-ee3fd9305cc3";
+    const sourceUrl = `https://jobs.ashbyhq.com/Mastra/${postingId}`;
+    const applicationUrl = `${sourceUrl}/application`;
+    const session = new FakeSession([new FakeField({ id: "optional-note", label: "Optional note", type: "text" })]);
+    const base = request();
+    const ashbyJob = careerJob({
+      sourceId: "curated-live",
+      sourceRecordId: `Mastra:${postingId}`,
+      destinationResolution: {
+        status: "resolved",
+        attemptedAt: capturedAt,
+        destinationUrl: applicationUrl,
+        ats: "Ashby",
+        actionable: true,
+        provenance: "recognized_ats_evidence",
+        evidence: ["curated:explicit-public-posting"],
+      },
+      job: {
+        ...base.careerJob.job,
+        company: "Mastra",
+        title: "Platform Engineer",
+        sourceUrl,
+        applicationUrl,
+      },
+    });
+    const ashbyRequest = request({
+      careerJob: ashbyJob,
+      application: application({ job: ashbyJob.job }),
+    });
+    const executor = new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      provider: "auto",
+    });
+
+    expect(executor.supports(ashbyRequest)).toBe(true);
+    const result = await executor.execute(ashbyRequest);
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(session.submitClicks).toBe(0);
+  });
 });

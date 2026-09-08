@@ -430,7 +430,7 @@ function CampaignWorkspace({
             <p>
               This campaign requests current postings from its configured live sources. No employer was
               contacted by this browser surface; it never writes to the tracker or submits an application.
-              Actionable Lever, Greenhouse, or Rippling packets
+              Actionable Lever, Greenhouse, Rippling, Ashby, or Workday packets
               can be prepared through the separately started local Node browser host, which always stops
               before final submission; an explicit successful-submission confirmation may then sync the
               Applied record through that trusted host.
@@ -990,8 +990,21 @@ export function BrowserExecutionControls({
     job.destinationResolution.ats === "Rippling" &&
     job.destinationResolution.actionable === true &&
     job.destinationResolution.destinationUrl === job.job.applicationUrl;
+  const isVerifiedLeverDestination = job.destinationResolution?.status === "resolved" &&
+    job.destinationResolution.ats === "Lever" &&
+    job.destinationResolution.actionable === true &&
+    job.destinationResolution.destinationUrl === job.job.applicationUrl;
+  const isVerifiedWorkdayDestination = job.destinationResolution?.status === "resolved" &&
+    job.destinationResolution.ats === "Workday" &&
+    job.destinationResolution.actionable === true &&
+    job.destinationResolution.destinationUrl === job.job.applicationUrl;
+  const isVerifiedAshbyDestination = job.destinationResolution?.status === "resolved" &&
+    job.destinationResolution.ats === "Ashby" &&
+    job.destinationResolution.actionable === true &&
+    job.destinationResolution.destinationUrl === job.job.applicationUrl;
   const isSupportedBrowserDestination = job.sourceId.startsWith("lever:") || job.sourceId.startsWith("greenhouse:") ||
-    isVerifiedGreenhouseDestination || isVerifiedRipplingDestination;
+    isVerifiedGreenhouseDestination || isVerifiedRipplingDestination ||
+    isVerifiedLeverDestination || isVerifiedAshbyDestination || isVerifiedWorkdayDestination;
   if (!job.applicationId || job.actionability !== "actionable" || !job.job.applicationUrl || !isSupportedBrowserDestination) return null;
 
   const execution = job.execution;

@@ -10,9 +10,12 @@ import {
 } from "../../src/domain/greenhouseJobSource";
 import {
   classifyJobUrl,
+  isVerifiedAshbyHostedUrl,
+  isVerifiedAshbyApplicationUrl,
   isVerifiedRipplingHostedUrl,
   isVerifiedRipplingApplicationUrl,
   ripplingApplicationUrl,
+  isVerifiedWorkdayApplicationUrl,
 } from "../../src/domain/jobUrlClassifier";
 import { isExecutionHostRequest } from "../../src/domain/executionHostValidation";
 
@@ -95,6 +98,31 @@ export function trustedExecutionRequestReason(value: unknown): string | undefine
     return undefined;
   }
 
+  if (applicationClassification.kind === "lever" &&
+    applicationClassification.siteIdentifier &&
+    applicationClassification.postingIdentifier &&
+    isVerifiedLeverHostedUrl(
+      careerJob.job.sourceUrl,
+      applicationClassification.siteIdentifier,
+      applicationClassification.postingIdentifier,
+    ) &&
+    isVerifiedLeverApplicationUrl(
+      careerJob.job.applicationUrl,
+      applicationClassification.siteIdentifier,
+      applicationClassification.postingIdentifier,
+    )) {
+    const resolution = careerJob.destinationResolution;
+    const destinationMatches = resolution?.status === "resolved" &&
+      resolution.actionable === true &&
+      resolution.ats === "Lever" &&
+      resolution.destinationUrl === careerJob.job.applicationUrl;
+    const directLeverSource = nonEmpty(careerJob.sourceRecordId) === applicationClassification.postingIdentifier;
+    if (!destinationMatches && !directLeverSource) {
+      return "The Lever destination is not independently verified for this posting.";
+    }
+    return undefined;
+  }
+
   if (applicationClassification.kind === "greenhouse" &&
     applicationClassification.siteIdentifier && applicationClassification.postingIdentifier) {
     const resolution = careerJob.destinationResolution;
@@ -141,6 +169,46 @@ export function trustedExecutionRequestReason(value: unknown): string | undefine
       );
     if (!destinationMatches && !directRipplingSource) {
       return "The Rippling destination is not independently verified for this posting.";
+    }
+    return undefined;
+  }
+
+  if (applicationClassification.kind === "ashby" &&
+    applicationClassification.siteIdentifier &&
+    applicationClassification.postingIdentifier &&
+    isVerifiedAshbyHostedUrl(
+      careerJob.job.sourceUrl,
+      applicationClassification.siteIdentifier,
+      applicationClassification.postingIdentifier,
+    ) &&
+    isVerifiedAshbyApplicationUrl(
+      careerJob.job.applicationUrl,
+      applicationClassification.siteIdentifier,
+      applicationClassification.postingIdentifier,
+    )) {
+    const resolution = careerJob.destinationResolution;
+    const destinationMatches = resolution?.status === "resolved" &&
+      resolution.actionable === true &&
+      resolution.ats === "Ashby" &&
+      resolution.destinationUrl === careerJob.job.applicationUrl;
+    const directAshbySource = nonEmpty(careerJob.sourceRecordId) ===
+      `${applicationClassification.siteIdentifier}:${applicationClassification.postingIdentifier}`;
+    if (!destinationMatches && !directAshbySource) {
+      return "The Ashby destination is not independently verified for this posting.";
+    }
+    return undefined;
+  }
+
+  if (applicationClassification.kind === "workday" &&
+    applicationClassification.siteIdentifier &&
+    isVerifiedWorkdayApplicationUrl(careerJob.job.applicationUrl, applicationClassification.siteIdentifier)) {
+    const resolution = careerJob.destinationResolution;
+    const destinationMatches = resolution?.status === "resolved" &&
+      resolution.actionable === true &&
+      resolution.ats === "Workday" &&
+      resolution.destinationUrl === careerJob.job.applicationUrl;
+    if (!destinationMatches) {
+      return "The Workday destination is not independently verified for this posting.";
     }
     return undefined;
   }

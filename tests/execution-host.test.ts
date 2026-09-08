@@ -291,6 +291,39 @@ describe("trusted local execution host", () => {
     expect(trustedExecutionRequestReason(request)).toBeUndefined();
   });
 
+  it("trusts a verified Workday destination from bounded employer evidence", async () => {
+    const fixtureValue = await fixture("workday-destination");
+    const workdayUrl = "https://homedepot.wd5.myworkdayjobs.com/en-US/CareerDepot/job/TEXAS---VIRTUAL---TX01/Software-Engineer-II--REMOTE-_Req191434/apply";
+    const workdayJob = {
+      ...fixtureValue.careerJob,
+      sourceId: "himalayas-live",
+      sourceRecordId: "home-depot-workday-guid",
+      destinationResolution: {
+        status: "resolved" as const,
+        attemptedAt: capturedAt,
+        destinationUrl: workdayUrl,
+        ats: "Workday" as const,
+        actionable: true,
+        provenance: "official_employer_evidence" as const,
+        evidence: ["official employer Workday destination"],
+      },
+      job: {
+        ...fixtureValue.careerJob.job,
+        company: "HOME DEPOT U.S.A., INC.",
+        title: "Software Engineer II (REMOTE)",
+        sourceUrl: "https://himalayas.app/companies/home-depot-u-s-a-inc/jobs/software-engineer-ii",
+        applicationUrl: workdayUrl,
+      },
+    };
+    const request: ExecutionHostRequest = {
+      ...fixtureValue.request,
+      careerJob: workdayJob,
+      application: { ...fixtureValue.application, job: workdayJob.job },
+    };
+
+    expect(trustedExecutionRequestReason(request)).toBeUndefined();
+  });
+
   it("trusts a verified curated Rippling destination and keeps it on the supported path", async () => {
     const fixtureValue = await fixture("rippling-destination");
     const ripplingUrl = "https://ats.rippling.com/fullthrottle1/jobs/rippling-posting-123";
@@ -343,6 +376,76 @@ describe("trusted local execution host", () => {
       ...fixtureValue.request,
       careerJob: ripplingJob,
       application: { ...fixtureValue.application, job: ripplingJob.job },
+    };
+
+    expect(trustedExecutionRequestReason(request)).toBeUndefined();
+  });
+
+  it("trusts a directly correlated curated Lever posting through the existing host", async () => {
+    const fixtureValue = await fixture("curated-lever");
+    const postingId = "885d7a1a-16f6-4326-9d7c-da7404dfd1f5";
+    const sourceUrl = `https://jobs.lever.co/mcgovern/${postingId}`;
+    const applicationUrl = `${sourceUrl}/apply`;
+    const leverJob = {
+      ...fixtureValue.careerJob,
+      sourceId: "curated-live",
+      sourceRecordId: postingId,
+      destinationResolution: {
+        status: "resolved" as const,
+        attemptedAt: capturedAt,
+        destinationUrl: applicationUrl,
+        ats: "Lever" as const,
+        actionable: true,
+        provenance: "recognized_ats_evidence" as const,
+        evidence: ["curated:explicit-public-posting"],
+      },
+      job: {
+        ...fixtureValue.careerJob.job,
+        company: "Patrick J. McGovern Foundation",
+        title: "Jr DevOps Engineer",
+        sourceUrl,
+        applicationUrl,
+      },
+    };
+    const request: ExecutionHostRequest = {
+      ...fixtureValue.request,
+      careerJob: leverJob,
+      application: { ...fixtureValue.application, job: leverJob.job },
+    };
+
+    expect(trustedExecutionRequestReason(request)).toBeUndefined();
+  });
+
+  it("trusts a directly correlated curated Ashby posting through the existing host", async () => {
+    const fixtureValue = await fixture("curated-lever");
+    const postingId = "3b06208b-34fe-4dda-b409-ee3fd9305cc3";
+    const sourceUrl = `https://jobs.ashbyhq.com/Mastra/${postingId}`;
+    const applicationUrl = `${sourceUrl}/application`;
+    const ashbyJob = {
+      ...fixtureValue.careerJob,
+      sourceId: "curated-live",
+      sourceRecordId: `Mastra:${postingId}`,
+      destinationResolution: {
+        status: "resolved" as const,
+        attemptedAt: capturedAt,
+        destinationUrl: applicationUrl,
+        ats: "Ashby" as const,
+        actionable: true,
+        provenance: "recognized_ats_evidence" as const,
+        evidence: ["curated:explicit-public-posting"],
+      },
+      job: {
+        ...fixtureValue.careerJob.job,
+        company: "Mastra",
+        title: "Platform Engineer",
+        sourceUrl,
+        applicationUrl,
+      },
+    };
+    const request: ExecutionHostRequest = {
+      ...fixtureValue.request,
+      careerJob: ashbyJob,
+      application: { ...fixtureValue.application, job: ashbyJob.job },
     };
 
     expect(trustedExecutionRequestReason(request)).toBeUndefined();

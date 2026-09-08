@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyJobUrl,
+  isVerifiedAshbyApplicationUrl,
+  isVerifiedAshbyHostedUrl,
   isVerifiedRipplingHostedUrl,
   isVerifiedRipplingApplicationUrl,
+  isVerifiedWorkdayApplicationUrl,
   ripplingApplicationUrl,
 } from "../application-agent/src";
 
@@ -75,6 +78,28 @@ describe("deterministic job URL classifier", () => {
     });
     expect(classifyJobUrl("https://acme.wd5.myworkdayjobs.com/en-US/Acme/job/Platform-Engineer").kind).toBe("workday");
     expect(classifyJobUrl("https://example.com/careers/greenhouse-platform-engineer").kind).toBe("custom");
+  });
+
+  it("distinguishes a verified Ashby posting page from its application route", () => {
+    const posting = "https://jobs.ashbyhq.com/Mastra/3b06208b-34fe-4dda-b409-ee3fd9305cc3";
+    const application = `${posting}/application`;
+    expect(isVerifiedAshbyHostedUrl(posting, "Mastra", "3b06208b-34fe-4dda-b409-ee3fd9305cc3")).toBe(true);
+    expect(isVerifiedAshbyApplicationUrl(application, "Mastra", "3b06208b-34fe-4dda-b409-ee3fd9305cc3")).toBe(true);
+    expect(isVerifiedAshbyHostedUrl(application, "Mastra", "3b06208b-34fe-4dda-b409-ee3fd9305cc3")).toBe(false);
+    expect(isVerifiedAshbyApplicationUrl(posting, "Mastra", "3b06208b-34fe-4dda-b409-ee3fd9305cc3")).toBe(false);
+    expect(isVerifiedAshbyApplicationUrl(`${posting}/application/other`, "Mastra", "3b06208b-34fe-4dda-b409-ee3fd9305cc3")).toBe(false);
+  });
+
+  it("accepts only a Workday job application route, including interactive steps", () => {
+    const applyUrl = "https://homedepot.wd5.myworkdayjobs.com/en-US/CareerDepot/job/TEXAS---VIRTUAL---TX01/Software-Engineer-II--REMOTE-_Req191434/apply";
+    const manualUrl = `${applyUrl}/applyManually`;
+    expect(isVerifiedWorkdayApplicationUrl(applyUrl, "homedepot.wd5")).toBe(true);
+    expect(isVerifiedWorkdayApplicationUrl(manualUrl, "homedepot.wd5")).toBe(true);
+    expect(isVerifiedWorkdayApplicationUrl(
+      "https://homedepot.wd5.myworkdayjobs.com/en-US/CareerDepot/job/TEXAS---VIRTUAL---TX01/Software-Engineer-II--REMOTE-_Req191434",
+      "homedepot.wd5",
+    )).toBe(false);
+    expect(isVerifiedWorkdayApplicationUrl(applyUrl, "other-tenant")).toBe(false);
   });
 
   it("returns custom for valid unknown career pages and unknown for invalid URLs", () => {

@@ -47,16 +47,19 @@ import {
 } from "./greenhouseJobSource";
 import {
   classifyJobUrl,
+  isVerifiedAshbyHostedUrl,
+  isVerifiedAshbyApplicationUrl,
   isVerifiedRipplingHostedUrl,
   isVerifiedRipplingApplicationUrl,
   ripplingApplicationUrl,
+  isVerifiedWorkdayApplicationUrl,
 } from "./jobUrlClassifier";
 import { monotonicNow } from "./executionTrace";
 
 export interface LeverBrowserExecutorOptions {
   sessionFactory: LeverBrowserSessionFactory;
   /** Defaults to Lever for backwards compatibility; auto accepts verified ATS destinations. */
-  provider?: "lever" | "greenhouse" | "rippling" | "auto";
+  provider?: "lever" | "greenhouse" | "rippling" | "ashby" | "workday" | "auto";
   /** Local/private resume artifacts keyed by the selected family. Never persisted by the domain. */
   resumePaths?: Partial<Record<ResumeFamilyId, string>>;
   /** The concrete host may check a path before the browser attempts upload. */
@@ -74,9 +77,9 @@ interface SessionState {
 }
 
 interface TrustedTarget {
-  provider: "lever" | "greenhouse" | "rippling";
+  provider: "lever" | "greenhouse" | "rippling" | "ashby" | "workday";
   site: string;
-  postingId: string;
+  postingId?: string;
   applicationUrl: string;
 }
 
@@ -988,12 +991,16 @@ function meaningfulCurrentValue(value: string | boolean | null | undefined): boo
 function providerLabel(provider: TrustedTarget["provider"]): string {
   if (provider === "greenhouse") return "Greenhouse";
   if (provider === "rippling") return "Rippling";
+  if (provider === "ashby") return "Ashby";
+  if (provider === "workday") return "Workday";
   return "Lever";
 }
 
 function executorEvidenceLabel(provider: TrustedTarget["provider"]): string {
   if (provider === "greenhouse") return "greenhouse-browser";
   if (provider === "rippling") return "rippling-browser";
+  if (provider === "ashby") return "ashby-browser";
+  if (provider === "workday") return "workday-browser";
   return "lever-browser";
 }
 
@@ -1001,7 +1008,7 @@ function sameApplicationPage(value: string, target: TrustedTarget): boolean {
   try {
     const url = new URL(value);
     if (target.provider === "greenhouse") {
-      return url.protocol === "https:" && isVerifiedGreenhouseApplicationUrl(url.toString(), target.site, target.postingId);
+      return url.protocol === "https:" && isVerifiedGreenhouseApplicationUrl(url.toString(), target.site, target.postingId ?? "");
     }
     if (target.provider === "rippling") {
       return url.protocol === "https:" && isVerifiedRipplingApplicationUrl(url.toString()) &&
@@ -1009,7 +1016,17 @@ function sameApplicationPage(value: string, target: TrustedTarget): boolean {
         classifyJobUrl(url.toString()).postingIdentifier === target.postingId &&
         url.pathname.endsWith("/apply");
     }
-    return url.protocol === "https:" && isVerifiedLeverApplicationUrl(url.toString(), target.site, target.postingId);
+    if (target.provider === "ashby") {
+      return url.protocol === "https:" && isVerifiedAshbyApplicationUrl(
+        url.toString(),
+        target.site,
+        target.postingId,
+      );
+    }
+    if (target.provider === "workday") {
+      return url.protocol === "https:" && isVerifiedWorkdayApplicationUrl(url.toString(), target.site);
+    }
+    return url.protocol === "https:" && isVerifiedLeverApplicationUrl(url.toString(), target.site, target.postingId ?? "");
   } catch {
     return false;
   }
@@ -1038,28 +1055,55 @@ function trustedTarget(
   const destination = classifyJobUrl(posting.applicationUrl);
   const provider = configuredProvider === "auto"
     ? sourceId.startsWith("lever:") ? "lever" :
+      destination.kind === "lever" ? "lever" :
       destination.kind === "greenhouse" ? "greenhouse" :
-        destination.kind === "rippling" ? "rippling" : undefined
+      destination.kind === "rippling" ? "rippling" :
+      destination.kind === "ashby" ? "ashby" :
+          destination.kind === "workday" ? "workday" : undefined
     : configuredProvider;
 
   if (provider === "lever") {
-    if (!sourceId.startsWith("lever:")) return { reason: "Only verified Lever postings are supported by this executor." };
-    if (!job.sourceRecordId) return { reason: "The Lever provider posting ID is missing." };
-    const rawSite = sourceId.slice("lever:".length).trim();
-    if (!rawSite) return { reason: "The Lever SITE identifier is missing from source provenance." };
-    let site: string;
-    try {
-      site = leverSourceId(rawSite).slice("lever:".length);
-    } catch {
-      return { reason: "The Lever SITE identifier is invalid." };
+    if (sourceId.startsWith("lever:")) {
+      if (!job.sourceRecordId) return { reason: "The Lever provider posting ID is missing." };
+      const rawSite = sourceId.slice("lever:".length).trim();
+      if (!rawSite) return { reason: "The Lever SITE identifier is missing from source provenance." };
+      let site: string;
+      try {
+        site = leverSourceId(rawSite).slice("lever:".length);
+      } catch {
+        return { reason: "The Lever SITE identifier is invalid." };
+      }
+      if (!isVerifiedLeverHostedUrl(posting.sourceUrl, site, job.sourceRecordId)) {
+        return { reason: "The posting URL is not the verified Lever hosted page for this provider ID." };
+      }
+      if (!isVerifiedLeverApplicationUrl(posting.applicationUrl, site, job.sourceRecordId)) {
+        return { reason: "The application URL is not the verified Lever /apply path for this provider ID." };
+      }
+      return { target: { provider, site, postingId: job.sourceRecordId, applicationUrl: posting.applicationUrl } };
     }
-    if (!isVerifiedLeverHostedUrl(posting.sourceUrl, site, job.sourceRecordId)) {
-      return { reason: "The posting URL is not the verified Lever hosted page for this provider ID." };
+    if (destination.kind !== "lever" || !destination.siteIdentifier || !destination.postingIdentifier ||
+      !isVerifiedLeverHostedUrl(posting.sourceUrl, destination.siteIdentifier, destination.postingIdentifier) ||
+      !isVerifiedLeverApplicationUrl(posting.applicationUrl, destination.siteIdentifier, destination.postingIdentifier)) {
+      return { reason: "The application does not have a verified Lever posting and application pair." };
     }
-    if (!isVerifiedLeverApplicationUrl(posting.applicationUrl, site, job.sourceRecordId)) {
-      return { reason: "The application URL is not the verified Lever /apply path for this provider ID." };
+    const resolution = job.destinationResolution;
+    const destinationMatches = resolution?.status === "resolved" &&
+      resolution.actionable === true &&
+      resolution.ats === "Lever" &&
+      resolution.destinationUrl === posting.applicationUrl;
+    const directLeverSource = Boolean(job.sourceRecordId) &&
+      job.sourceRecordId === destination.postingIdentifier;
+    if (!destinationMatches && !directLeverSource) {
+      return { reason: "The Lever destination is not independently verified for this posting." };
     }
-    return { target: { provider, site, postingId: job.sourceRecordId, applicationUrl: posting.applicationUrl } };
+    return {
+      target: {
+        provider,
+        site: destination.siteIdentifier,
+        postingId: destination.postingIdentifier,
+        applicationUrl: posting.applicationUrl,
+      },
+    };
   }
 
   if (provider === "greenhouse") {
@@ -1117,6 +1161,63 @@ function trustedTarget(
     };
   }
 
+  if (provider === "ashby") {
+    if (destination.kind !== "ashby" || !destination.siteIdentifier || !destination.postingIdentifier) {
+      return { reason: "The application URL is not a verified Ashby application route." };
+    }
+    if (!isVerifiedAshbyHostedUrl(
+      posting.sourceUrl,
+      destination.siteIdentifier,
+      destination.postingIdentifier,
+    ) || !isVerifiedAshbyApplicationUrl(
+      posting.applicationUrl,
+      destination.siteIdentifier,
+      destination.postingIdentifier,
+    )) {
+      return { reason: "The posting and application URLs are not a verified Ashby pair." };
+    }
+    const resolution = job.destinationResolution;
+    const destinationMatches = resolution?.status === "resolved" &&
+      resolution.actionable === true &&
+      resolution.ats === "Ashby" &&
+      resolution.destinationUrl === posting.applicationUrl;
+    const directAshbySource = Boolean(job.sourceRecordId) &&
+      job.sourceRecordId === `${destination.siteIdentifier}:${destination.postingIdentifier}`;
+    if (!destinationMatches && !directAshbySource) {
+      return { reason: "The Ashby destination is not independently verified for this posting." };
+    }
+    return {
+      target: {
+        provider,
+        site: destination.siteIdentifier,
+        postingId: destination.postingIdentifier,
+        applicationUrl: posting.applicationUrl,
+      },
+    };
+  }
+
+  if (provider === "workday") {
+    if (destination.kind !== "workday" || !destination.siteIdentifier ||
+      !isVerifiedWorkdayApplicationUrl(posting.applicationUrl, destination.siteIdentifier)) {
+      return { reason: "The application URL is not a verified Workday application route." };
+    }
+    const resolution = job.destinationResolution;
+    const destinationMatches = resolution?.status === "resolved" &&
+      resolution.actionable === true &&
+      resolution.ats === "Workday" &&
+      resolution.destinationUrl === posting.applicationUrl;
+    if (!destinationMatches) {
+      return { reason: "The Workday destination is not independently verified for this posting." };
+    }
+    return {
+      target: {
+        provider,
+        site: destination.siteIdentifier,
+        applicationUrl: posting.applicationUrl,
+      },
+    };
+  }
+
   return { reason: "No supported browser executor is configured for this application destination." };
 }
 
@@ -1134,7 +1235,9 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
     this.now = options.now ?? defaultNow;
     this.id = options.provider === "auto" ? "application-browser-executor" :
       options.provider === "greenhouse" ? "greenhouse-browser-executor" :
-        options.provider === "rippling" ? "rippling-browser-executor" : "lever-browser-executor";
+        options.provider === "rippling" ? "rippling-browser-executor" :
+          options.provider === "ashby" ? "ashby-browser-executor" :
+          options.provider === "workday" ? "workday-browser-executor" : "lever-browser-executor";
   }
 
   executionMode(request: ApplicationExecutionRequest): ApplicationExecutorMode {
@@ -1504,9 +1607,10 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       return {
         target: {
           provider: this.options.provider === "greenhouse" ? "greenhouse" :
-            this.options.provider === "rippling" ? "rippling" : "lever",
+            this.options.provider === "rippling" ? "rippling" :
+              this.options.provider === "ashby" ? "ashby" :
+              this.options.provider === "workday" ? "workday" : "lever",
           site: "unknown",
-          postingId: "unknown",
           applicationUrl: "",
         },
         session: { currentUrl: () => "", navigate: async () => undefined, inspectFields: async () => [], detectHumanBoundary: async () => null, hasSubmitControl: async () => false, submit: async () => ({ clicked: false, confirmed: false, evidence: "submit:unavailable" }), close: async () => undefined },
@@ -1571,8 +1675,8 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       const baseEvidence = [
         `executor:${executorEvidenceLabel(target.provider)}`,
         `source:live/${target.provider}`,
-        `${target.provider === "greenhouse" ? "greenhouse-board" : target.provider === "rippling" ? "rippling-org" : "lever-site"}:${target.site}`,
-        `provider-job-id:${target.postingId}`,
+        `${target.provider === "greenhouse" ? "greenhouse-board" : target.provider === "rippling" ? "rippling-org" : target.provider === "ashby" ? "ashby-org" : target.provider === "workday" ? "workday-tenant" : "lever-site"}:${target.site}`,
+        ...(target.postingId ? [`provider-job-id:${target.postingId}`] : []),
         "navigation:verified",
         ...(captcha ? captchaEvidence(captcha) : []),
       ];

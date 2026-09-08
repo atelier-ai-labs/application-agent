@@ -357,6 +357,46 @@ describe("Autonomous Career Agent domain seams", () => {
     await expect(applicationService.submitApplication(application.id, { approved: true, approvedAt: capturedAt })).rejects.toThrow("submission is disabled");
   });
 
+  it("allows preparation-only inspection of stretch qualifications but keeps automatic execution blocked", async () => {
+    const profile = fullyAuthorizedTestProfile();
+    const applicationRepository = new InMemoryApplicationRepository();
+    const applicationService = new ApplicationService(applicationRepository, profile, undefined, runtime());
+    const stretchPosting = posting("Example Cloud Systems", "Cloud Platform Engineer", ["AWS", "Ruby"], "stretch-preparation-1");
+    const knownFit = assessFit({ ...stretchPosting, requiredSkills: ["AWS", "Ruby"] }, profile);
+    const application = await applicationService.prepareFromNormalizedJob(stretchPosting, true, knownFit);
+    expect(application.fit?.classification).toBe("stretch");
+    expect(application.fit?.unsupportedRequiredQualifications).toEqual(["Ruby"]);
+    expect(application.status).toBe("ready_for_review");
+
+    const { service } = makeService({ profile });
+    const preparationCampaign = service.createCampaign(campaignInput({
+      submissionPolicy: { authority: "never", requireExplicitApproval: false },
+    }));
+    const preparationGate = verifyPreparedApplication(
+      application,
+      preparationCampaign.applicationPolicy,
+      preparationCampaign.submissionPolicy,
+      preparationCampaign,
+      new Set(),
+      true,
+    );
+    expect(preparationGate.allowed).toBe(true);
+    expect(preparationGate.blockers).toEqual([]);
+
+    const automaticCampaign = {
+      ...preparationCampaign,
+      submissionPolicy: { authority: "automatic" as const, requireExplicitApproval: false },
+    };
+    const automaticGate = verifyPreparedApplication(
+      application,
+      automaticCampaign.applicationPolicy,
+      automaticCampaign.submissionPolicy,
+      automaticCampaign,
+    );
+    expect(automaticGate.allowed).toBe(false);
+    expect(automaticGate.blockers.some((blocker) => blocker.kind === "unknown_fact")).toBe(true);
+  });
+
   it("persists explicit automatic-submission authorization without changing search or fit policy", () => {
     const { service } = makeService({ profile: fullyAuthorizedTestProfile() });
     const campaign = service.createCampaign(campaignInput({

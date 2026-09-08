@@ -489,7 +489,8 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
       job.sourceMode === "live" &&
       job.actionability === "actionable" &&
       (job.sourceId.startsWith("lever:") || job.sourceId.startsWith("greenhouse:") ||
-        job.destinationResolution?.ats === "Greenhouse" || job.destinationResolution?.ats === "Rippling") &&
+        job.destinationResolution?.ats === "Lever" || job.destinationResolution?.ats === "Greenhouse" || job.destinationResolution?.ats === "Rippling" ||
+        job.destinationResolution?.ats === "Ashby" || job.destinationResolution?.ats === "Workday") &&
       (job.status === "needs_input" || job.status === "preparing" || job.status === "ready_to_submit") &&
       !(job.execution?.mode === "real_local" && job.execution.hostExecutionId) &&
       Boolean(job.applicationId),
