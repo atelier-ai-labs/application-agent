@@ -8,7 +8,12 @@ import {
   isVerifiedGreenhouseApplicationUrl,
   isVerifiedGreenhouseHostedUrl,
 } from "../../src/domain/greenhouseJobSource";
-import { classifyJobUrl, isVerifiedRipplingApplicationUrl } from "../../src/domain/jobUrlClassifier";
+import {
+  classifyJobUrl,
+  isVerifiedRipplingHostedUrl,
+  isVerifiedRipplingApplicationUrl,
+  ripplingApplicationUrl,
+} from "../../src/domain/jobUrlClassifier";
 import { isExecutionHostRequest } from "../../src/domain/executionHostValidation";
 
 function nonEmpty(value: string | undefined): string | undefined {
@@ -116,13 +121,25 @@ export function trustedExecutionRequestReason(value: unknown): string | undefine
   if (applicationClassification.kind === "rippling" &&
     applicationClassification.siteIdentifier &&
     applicationClassification.postingIdentifier &&
-    isVerifiedRipplingApplicationUrl(careerJob.job.applicationUrl)) {
+    isVerifiedRipplingApplicationUrl(
+      careerJob.job.applicationUrl,
+      applicationClassification.siteIdentifier,
+      applicationClassification.postingIdentifier,
+    )) {
     const resolution = careerJob.destinationResolution;
     const destinationMatches = resolution?.status === "resolved" &&
       resolution.actionable === true &&
       resolution.ats === "Rippling" &&
-      resolution.destinationUrl === careerJob.job.applicationUrl;
-    if (!destinationMatches) {
+      (resolution.destinationUrl === careerJob.job.applicationUrl ||
+        ripplingApplicationUrl(resolution.destinationUrl) === ripplingApplicationUrl(careerJob.job.applicationUrl));
+    const directRipplingSource = Boolean(careerJob.sourceRecordId) &&
+      careerJob.sourceRecordId === `${applicationClassification.siteIdentifier}:${applicationClassification.postingIdentifier}` &&
+      isVerifiedRipplingHostedUrl(
+        careerJob.job.sourceUrl,
+        applicationClassification.siteIdentifier,
+        applicationClassification.postingIdentifier,
+      );
+    if (!destinationMatches && !directRipplingSource) {
       return "The Rippling destination is not independently verified for this posting.";
     }
     return undefined;

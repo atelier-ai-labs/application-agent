@@ -47,6 +47,7 @@ import {
 } from "./greenhouseJobSource";
 import {
   classifyJobUrl,
+  isVerifiedRipplingHostedUrl,
   isVerifiedRipplingApplicationUrl,
   ripplingApplicationUrl,
 } from "./jobUrlClassifier";
@@ -1034,8 +1035,11 @@ function trustedTarget(
       resolution.ats === "Rippling" &&
       (resolution.destinationUrl === posting.applicationUrl ||
         ripplingApplicationUrl(resolution.destinationUrl) === ripplingApplicationUrl(posting.applicationUrl));
-    const directRipplingApplication = isVerifiedRipplingApplicationUrl(posting.applicationUrl) ||
-      Boolean(ripplingApplicationUrl(posting.applicationUrl));
+    const directRipplingSource = Boolean(job.sourceRecordId) &&
+      job.sourceRecordId === `${destination.siteIdentifier}:${destination.postingIdentifier}` &&
+      isVerifiedRipplingHostedUrl(posting.sourceUrl, destination.siteIdentifier, destination.postingIdentifier);
+    const directRipplingApplication = directRipplingSource &&
+      isVerifiedRipplingApplicationUrl(posting.applicationUrl, destination.siteIdentifier, destination.postingIdentifier);
     if (!destinationMatches && !directRipplingApplication) {
       return { reason: "The Rippling destination is not independently verified for this posting." };
     }

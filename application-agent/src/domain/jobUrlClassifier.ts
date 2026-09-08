@@ -41,6 +41,13 @@ function stripLocalePrefix(segments: string[]): string[] {
   return LOCALE_PATH_PREFIX.test(segments[0]) ? segments.slice(1) : segments;
 }
 
+function isRipplingRoute(segments: readonly string[]): boolean {
+  return (segments.length === 3 || (segments.length === 4 && segments[3].toLowerCase() === "apply")) &&
+    segments[0].length > 0 &&
+    segments[1].toLowerCase() === "jobs" &&
+    segments[2].length > 0;
+}
+
 function normalizedHost(url: URL): string {
   return url.hostname.toLowerCase().replace(/\.$/, "");
 }
@@ -93,12 +100,10 @@ export function classifyJobUrl(value: string): JobUrlClassification {
     };
   }
 
-  const ripplingSegments = stripLocalePrefix(segments);
-  if (RIPPLING_HOSTS.has(host) &&
-    (ripplingSegments.length === 3 || (ripplingSegments.length === 4 && ripplingSegments[3].toLowerCase() === "apply")) &&
-    ripplingSegments[0].length > 0 &&
-    ripplingSegments[1].toLowerCase() === "jobs" &&
-    ripplingSegments[2].length > 0) {
+  // Prefer the unstripped route when it is already valid. This avoids treating
+  // a legitimate two-letter organization slug such as /us/jobs/<id> as a locale.
+  const ripplingSegments = isRipplingRoute(segments) ? segments : stripLocalePrefix(segments);
+  if (RIPPLING_HOSTS.has(host) && isRipplingRoute(ripplingSegments)) {
     const localeStripped = ripplingSegments.length !== segments.length;
     return {
       kind: "rippling",
@@ -149,6 +154,35 @@ export function ripplingApplicationUrl(value: string | undefined): string | unde
     : `${classification.canonicalUrl}/apply`;
 }
 
-export function isVerifiedRipplingApplicationUrl(value: string | undefined): boolean {
-  return classifyJobUrl(value ?? "").kind === "rippling" && Boolean(ripplingApplicationUrl(value));
+export function isVerifiedRipplingHostedUrl(
+  value: string | undefined,
+  organization: string,
+  postingId: string,
+): boolean {
+  if (!value || !organization.trim() || !postingId.trim()) return false;
+  const classification = classifyJobUrl(value);
+  if (classification.kind !== "rippling" ||
+    classification.siteIdentifier?.toLowerCase() !== organization.trim().toLowerCase() ||
+    classification.postingIdentifier !== postingId.trim()) return false;
+  try {
+    const url = new URL(classification.canonicalUrl ?? value);
+    const segments = pathSegments(url);
+    const normalizedSegments = segments && (isRipplingRoute(segments) ? segments : stripLocalePrefix(segments));
+    return Boolean(normalizedSegments && normalizedSegments.length === 3 && isRipplingRoute(normalizedSegments));
+  } catch {
+    return false;
+  }
+}
+
+export function isVerifiedRipplingApplicationUrl(
+  value: string | undefined,
+  organization?: string,
+  postingId?: string,
+): boolean {
+  const classification = classifyJobUrl(value ?? "");
+  if (classification.kind !== "rippling" || !ripplingApplicationUrl(value)) return false;
+  return organization === undefined || postingId === undefined
+    ? true
+    : classification.siteIdentifier?.toLowerCase() === organization.trim().toLowerCase() &&
+      classification.postingIdentifier === postingId.trim();
 }

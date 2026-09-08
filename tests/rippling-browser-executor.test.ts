@@ -297,4 +297,33 @@ describe("Rippling browser routing", () => {
     expect(session.submitClicks).toBe(0);
     expect(["ready_to_submit", "requires_human"]).toContain(result.state);
   });
+
+  it("rejects a direct Rippling URL when the source posting identity is not correlated", () => {
+    const session = new FakeSession([]);
+    const executor = new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      provider: "auto",
+      now: () => capturedAt,
+    });
+    const base = request(job());
+    const unverifiedCareerJob = {
+      ...base.careerJob,
+      destinationResolution: undefined,
+      sourceRecordId: "different-org:different-posting",
+      job: {
+        ...base.careerJob.job,
+        applicationUrl: formUrl,
+      },
+    };
+    const unverifiedRequest = {
+      ...base,
+      careerJob: unverifiedCareerJob,
+      application: {
+        ...base.application,
+        job: unverifiedCareerJob.job,
+      },
+    };
+
+    expect(executor.supports(unverifiedRequest)).toBe(false);
+  });
 });
