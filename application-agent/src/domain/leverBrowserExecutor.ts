@@ -214,25 +214,71 @@ export function isPreferredNameField(
   return /\bpreferred(?: first| given)? name\b/.test(text);
 }
 
+/** Rippling/Greenhouse phone-country widgets expose many "+<code> … Country" options. */
+export function looksLikeInternationalDialingOptions(
+  options: readonly ApplicationFieldOption[] | undefined,
+): boolean {
+  if (!options || options.length < 5) return false;
+  let dialing = 0;
+  for (const option of options) {
+    const sample = `${option.label} ${option.value}`.trim();
+    if (/^\+\d{1,4}\b/.test(sample) || (/\b\+\d{1,4}\b/.test(sample) && /[A-Z]{2}\s*-/.test(sample))) {
+      dialing += 1;
+    }
+  }
+  return dialing / options.length >= 0.6;
+}
+
+function optionMatchesCountryLabel(label: string, country: string): boolean {
+  const nLabel = normalized(label);
+  const nCountry = normalized(country);
+  if (!nLabel || !nCountry) return false;
+  if (nLabel === nCountry) return true;
+  if (nLabel.startsWith(`${nCountry}+`) || nLabel.startsWith(`${nCountry} +`)) return true;
+  if (nLabel.endsWith(` - ${nCountry}`) || nLabel.endsWith(`-${nCountry}`) || nLabel.endsWith(` ${nCountry}`)) return true;
+  if (nLabel.includes(` - ${nCountry}`)) return true;
+  return false;
+}
+
+function isAmbiguousYesNoControl(
+  field: Pick<LeverBrowserField, "label" | "type">,
+): boolean {
+  if (field.type !== "radio") return false;
+  const label = normalized(field.label);
+  return label === "yes" || label === "no";
+}
+
 export function classifyLeverApplicationField(
-  field: Pick<LeverBrowserField, "id" | "label" | "section" | "type">,
+  field: Pick<LeverBrowserField, "id" | "label" | "section" | "type"> & {
+    options?: readonly ApplicationFieldOption[];
+    questionDescriptor?: LeverBrowserField["questionDescriptor"];
+  },
 ): ApplicationFieldClassification {
-  const text = fieldText(field);
+  // Prefer inspected prompt/accessible text over opaque DOM labels (Rippling
+  // often exposes "Search" / "textbox" / random ids as the control label).
+  // Exception: unlabeled Yes/No radios keep control-only text so nearby
+  // work-auth/legal prompts stay unknown_form_field human gates.
+  const text = isAmbiguousYesNoControl(field) ? fieldText(field) : inspectedPromptText(field);
   const factField = profileFactField(field);
+  if (looksLikeInternationalDialingOptions(field.options)) return "location";
   if (hasPhrase(text, /resume|cv|curriculum vitae/)) return "resume_upload";
   if (hasPhrase(text, /demographic|gender identity|race|ethnicity|veteran|disability|voluntary self/)) return "demographic";
-  if (hasPhrase(text, /legal|attest|certif(?:y|ication)|agree to|authorize|terms|accurate and complete/)) return "legal_attestation";
+  if (hasPhrase(text, /\blegal\b|attest|certif(?:y|ication)|agree to|authorize|terms|accurate and complete|sign your name for acknowledgement/)) return "legal_attestation";
   if (hasPhrase(text, /work authorization|authorized to work|legally authorized|right to work|eligible to work/)) return "work_authorization";
   if (hasPhrase(text, /sponsor|visa|immigration status/)) return "sponsorship";
-  if (hasPhrase(text, /salary|compensation|pay expectation|desired pay/)) return "salary";
+  if (hasPhrase(text, /salary|compensation|pay expectation|desired pay|desired annual compensation/)) return "salary";
   if (hasPhrase(text, /relocat/)) return "relocation";
   if (hasPhrase(text, /travel/)) return "travel";
   if (hasPhrase(text, /education|degree|university|college|school|major|study/)) return "education";
   if (hasPhrase(text, /why|interest|motivat|cover letter|tell us|anything else|additional information/)) return "free_text";
   if (factField) return factField;
   if (hasPhrase(text, /employ|employer|company|work history|job history|position held|job title|occupation|start date|end date/)) return "employment_history";
-  if (hasPhrase(text, /location|city|state|country|address|postal|zip/)) return "location";
+  if (hasPhrase(text, /location|city|state|country|address|postal|zip|phone country|dialing code|country code/)) return "location";
   if (hasPhrase(text, /first name|given name|last name|family name|surname|full name|email|e-mail|phone|telephone|mobile|linkedin|portfolio|website/)) return "contact";
+  // Opaque widget labels with a real question prompt are treated by prompt semantics above;
+  // remaining long free-response prompts stay free_text rather than unknown.
+  const prompt = field.questionDescriptor?.promptText?.trim();
+  if (!isAmbiguousYesNoControl(field) && prompt && prompt.length >= 24 && /[?]/.test(prompt)) return "free_text";
   if (field.type === "textarea") return "free_text";
   return "unknown";
 }
@@ -665,7 +711,11 @@ function explicitValueForField(
   if (isPreferredNameField(field)) return { explicit: false };
   // Preparation may contain a full location answer. Country/state controls
   // need the grounded component, not the full city/state string.
-  if (field.classification === "location" && hasPhrase(fieldText(field), /\b(?:country|states?)\b/)) {
+  if (field.classification === "location" && looksLikeInternationalDialingOptions(field.options)) {
+    // Dialing-code country lists need the grounded country component, not a full city string.
+    return { explicit: false };
+  }
+  if (field.classification === "location" && hasPhrase(inspectedPromptText(field), /\b(?:country|states?)\b/)) {
     return { explicit: false };
   }
   // Prepared education/employment summaries are not field-level answers. Let
@@ -714,7 +764,7 @@ function profileValueForField(
     return name.full;
   }
   if (field.classification === "location") {
-    if (hasPhrase(text, /\bcountry\b/)) {
+    if (looksLikeInternationalDialingOptions(field.options) || hasPhrase(inspectedPromptText(field), /\bcountry\b|phone country|dialing code|country code/) || hasPhrase(text, /\bcountry\b/)) {
       return groundedCountryFromLocation(profile.identity.location ?? profile.location);
     }
     if (hasPhrase(text, /listed states we hire in/)) {
@@ -788,15 +838,27 @@ function optionValue(
     : [];
   const option = field.options.find((candidate) => {
     const labels = [normalized(candidate.value), normalized(candidate.label)];
+    const rawLabels = [candidate.value, candidate.label];
     return desiredAliases.some((alias) => labels.includes(alias)) ||
       // Greenhouse's phone-country control appends the dialing code to the
       // grounded country name (for example, "United States +1"). Preserve
       // exact option selection while accepting that display form.
       labels.some((label) => desiredAliases.some((alias) =>
         label.startsWith(`${alias}+`) || label.startsWith(`${alias} +`))) ||
+      // Rippling dialing lists look like "+1 US - United States".
+      rawLabels.some((label) => desiredAliases.some((alias) => optionMatchesCountryLabel(label, alias))) ||
       booleanAliases.some((alias) => labels.includes(alias));
   });
-  return option?.value;
+  if (option?.value) return option.value;
+  // Rippling phone-country Search widgets often expose only a virtualized
+  // slice of dialing options during inspection. When the grounded country is
+  // missing from that sample, return it as a typeahead query so the browser
+  // session can filter and commit the real option.
+  if (looksLikeInternationalDialingOptions(field.options)) {
+    const query = valueAsString(value);
+    return query || undefined;
+  }
+  return undefined;
 }
 
 function checkboxValue(value: AnswerValue | undefined): boolean | undefined {

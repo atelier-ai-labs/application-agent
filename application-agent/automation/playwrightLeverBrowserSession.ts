@@ -17,6 +17,15 @@ import {
   BrowserExecutionDiagnosticError,
   safeBrowserDiagnosticMessage,
 } from "../src/domain/executor";
+import { looksLikeInternationalDialingOptions } from "../src/domain/leverBrowserExecutor";
+import {
+  extractRipplingPromptFromCandidates,
+  looksLikeOpaqueToken,
+  pickNearestUniqueByDistance,
+  SEARCH_NEAR_PHONE_MARGIN_PX,
+  SEARCH_NEAR_PHONE_MAX_DISTANCE_PX,
+} from "./ripplingDomHelpers";
+import type { RipplingPromptCandidate } from "./ripplingDomHelpers";
 
 export interface PlaywrightLeverBrowserOptions {
   headless?: boolean;
@@ -38,6 +47,7 @@ interface InspectedRawField {
   section?: string;
   groupName?: string;
   questionEvidence?: LeverQuestionAssociationEvidence;
+  ripplingPromptCandidates?: readonly RipplingPromptCandidate[];
 }
 
 export interface LeverQuestionAssociationEvidence {
@@ -316,10 +326,19 @@ export function greenhouseOptionMatches(
   const normalize = (value: string): string => value.trim().toLowerCase().replace(/\s+/g, " ");
   const normalizedText = normalize(optionText);
   const normalizedDesired = normalize(desired);
+  if (!normalizedDesired) return false;
   return normalizedText === normalizedDesired ||
     (optionValue !== null && normalize(optionValue) === normalizedDesired) ||
     normalizedText.startsWith(`${normalizedDesired}+`) ||
-    normalizedText.startsWith(`${normalizedDesired} +`);
+    normalizedText.startsWith(`${normalizedDesired} +`) ||
+    // Rippling dialing lists: "+1 US - United States" and committed "+1 US"
+    normalizedText.endsWith(` - ${normalizedDesired}`) ||
+    normalizedText.endsWith(`-${normalizedDesired}`) ||
+    normalizedText.includes(` - ${normalizedDesired}`) ||
+    (
+      (normalizedDesired === "united states" || normalizedDesired === "us" || normalizedDesired === "usa") &&
+      /^\+\d+\s+us\b/.test(normalizedText)
+    );
 }
 
 class PlaywrightLeverBrowserField implements LeverBrowserField {
@@ -360,14 +379,60 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
     return this.page.locator(this.raw.stableSelector);
   }
 
+  /** Rippling remounts can invalidate id selectors mid-prep; recover Search comboboxes. */
+  private async resolveSelectLocator(): Promise<Locator> {
+    const primary = this.locator();
+    if (await primary.count() > 0) return primary.first();
+    if (!looksLikeInternationalDialingOptions(this.options) && this.label !== "Search") {
+      return primary;
+    }
+    const searches = this.page.locator('input[placeholder="Search"][role="combobox"]');
+    const count = await searches.count();
+    if (count === 1) return searches.first();
+    // Prefer a Search control near the phone field when multiple exist.
+    // Fail closed unless the nearest candidate is uniquely best by a clear margin.
+    const phone = this.page.locator('input[placeholder="Phone number"], input[id*="phone" i]');
+    const phonePoints: { x: number; y: number }[] = [];
+    for (let index = 0; index < await phone.count(); index += 1) {
+      const box = await phone.nth(index).boundingBox().catch(() => null);
+      if (box) phonePoints.push({ x: box.x, y: box.y });
+    }
+    // Multiple phone anchors are ambiguous: do not assume the first phone
+    // field owns the recovered Search control.
+    if (phonePoints.length === 1) {
+      const candidates: { locator: Locator; point: { x: number; y: number } }[] = [];
+      for (let index = 0; index < count; index += 1) {
+        const candidate = searches.nth(index);
+        const box = await candidate.boundingBox().catch(() => null);
+        if (!box) continue;
+        candidates.push({ locator: candidate, point: { x: box.x, y: box.y } });
+      }
+      const picked = pickNearestUniqueByDistance(
+        phonePoints[0],
+        candidates.map((entry) => entry.point),
+        SEARCH_NEAR_PHONE_MARGIN_PX,
+        SEARCH_NEAR_PHONE_MAX_DISTANCE_PX,
+      );
+      if (picked !== null) return candidates[picked]!.locator;
+    }
+    throw new Error(
+      count === 0
+        ? `The select control ${this.id} could not be re-identified after a page update.`
+        : `The select control ${this.id} could not be uniquely re-identified after a page update.`,
+    );
+  }
+
   async fill(value: string): Promise<void> {
     await this.locator().fill(value);
   }
 
   async select(value: string): Promise<void> {
     if (this.type === "select") {
-      const locator = this.locator();
-      const tagName = await locator.evaluate((element) => element.tagName.toLowerCase());
+      const locator = await this.resolveSelectLocator();
+      if (await locator.count() === 0) {
+        throw new Error(`The select control ${this.id} was not found in the DOM.`);
+      }
+      const tagName = await locator.evaluate((element) => element.tagName.toLowerCase(), undefined, { timeout: 5_000 });
       if (tagName === "select") {
         await locator.selectOption(value);
         return;
@@ -396,24 +461,61 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
       // Greenhouse deployment: the menu can close without committing the
       // controlled value. Select through the widget's keyboard path, then
       // verify the committed single-value state before returning.
-      const matchedOption = this.options?.find((option) =>
+      let matchedOption = this.options?.find((option) =>
         greenhouseOptionMatches(option.label, option.value, value));
-      if (this.options && !matchedOption) {
+      const allowTypeahead = Boolean(
+        this.options &&
+        !matchedOption &&
+        looksLikeInternationalDialingOptions(this.options),
+      );
+      if (this.options && !matchedOption && !allowTypeahead) {
         throw new Error(`The select option ${value} was not found.`);
       }
-      await locator.fill(matchedOption?.label ?? value);
-      await locator.press("Enter");
+      const typeaheadQuery = matchedOption?.label ?? value;
+      await locator.fill(typeaheadQuery);
+      // For truncated Rippling dialing samples, wait for the filtered list and
+      // bind the first exact country match before committing with Enter.
+      if (allowTypeahead || !matchedOption) {
+        const filtered = this.page.locator('[role="option"], .select__option');
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          const count = await filtered.count();
+          for (let index = 0; index < count; index += 1) {
+            const option = filtered.nth(index);
+            if (!(await visibleFormControl(option))) continue;
+            const label = (await option.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+            if (!label || !greenhouseOptionMatches(label, label, value)) continue;
+            matchedOption = { label, value: label };
+            break;
+          }
+          if (matchedOption) break;
+          if (attempt < 19) await this.page.waitForTimeout(50);
+        }
+      }
+      if (matchedOption && allowTypeahead) {
+        const visibleMatch = this.page.getByRole("option", { name: matchedOption.label, exact: true }).first();
+        if (await visibleMatch.count() > 0 && await visibleFormControl(visibleMatch)) {
+          await visibleMatch.click();
+        } else {
+          await locator.press("Enter");
+        }
+      } else {
+        await locator.press("Enter");
+      }
       const expectedValue = matchedOption?.value ?? value;
       const isCommitted = async (): Promise<boolean> => {
         const selected = await this.readValue();
         if (typeof selected !== "string") return false;
         if (selected === expectedValue || greenhouseOptionMatches(selected, selected, expectedValue)) return true;
+        if (greenhouseOptionMatches(selected, selected, value)) return true;
         // The Greenhouse phone-country control displays only the dialing code
         // after commit (for example, "+1") even though the selected option was
         // the uniquely filtered full country label. Accept that representation
         // only when it is the exact suffix of the option we selected.
-        const selectedDialingCode = selected.trim().match(/^\+\d+$/)?.[0];
-        const expectedDialingCode = expectedValue.trim().match(/\+\d+$/)?.[0];
+        // Rippling lists put the dialing code at the start ("+1 US - United States").
+        const selectedDialingCode = selected.trim().match(/^\+\d+/)?.[0];
+        const expectedDialingCode = expectedValue.trim().match(/^\+\d+/)?.[0]
+          ?? expectedValue.trim().match(/\+\d+$/)?.[0]
+          ?? (greenhouseOptionMatches(selected, selected, value) ? selected.trim().match(/^\+\d+/)?.[0] : undefined);
         return Boolean(selectedDialingCode && expectedDialingCode && selectedDialingCode === expectedDialingCode);
       };
       for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -490,8 +592,16 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
     await this.locator().setInputFiles(path);
   }
 
-  private async readCustomSelection(): Promise<string | null> {
-    const candidate = await this.locator().evaluate((element) => {
+  private async readCustomSelection(locator?: Locator): Promise<string | null> {
+    const target = locator ?? await this.resolveSelectLocator();
+    if (await target.count() === 0) return null;
+    const inputValue = await target.inputValue({ timeout: 2_000 }).catch(() => "");
+    if (inputValue.trim()) {
+      const matchedFromInput = this.options?.find((option) =>
+        greenhouseOptionMatches(option.label, option.value, inputValue));
+      return matchedFromInput?.value ?? inputValue.trim();
+    }
+    const candidate = await target.evaluate((element) => {
       const root = element.closest(".select__container") ?? element.parentElement;
       const selectedValue = root?.querySelector(".select__single-value")?.textContent;
       const ariaValue = element.getAttribute("aria-valuetext");
@@ -499,7 +609,7 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
       return [selectedValue, ariaValue, dataValue]
         .map((value) => value?.replace(/\s+/g, " ").trim() ?? "")
         .find(Boolean) ?? null;
-    }).catch(() => null);
+    }, undefined, { timeout: 2_000 }).catch(() => null);
     if (!candidate) return null;
     const matchedOption = this.options?.find((option) =>
       greenhouseOptionMatches(option.label, option.value, candidate));
@@ -524,8 +634,12 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
       return null;
     }
     if (this.type === "select") {
-      const tagName = await this.locator().evaluate((element) => element.tagName.toLowerCase());
-      if (tagName !== "select") return this.readCustomSelection();
+      const locator = await this.resolveSelectLocator();
+      if (await locator.count() === 0) return null;
+      const tagName = await locator.evaluate((element) => element.tagName.toLowerCase(), undefined, { timeout: 2_000 }).catch(() => "input");
+      if (tagName !== "select") return this.readCustomSelection(locator);
+      const nativeValue = await locator.inputValue({ timeout: 2_000 }).catch(() => "");
+      return nativeValue.trim() ? nativeValue : null;
     }
     const value = await this.locator().inputValue();
     return value.trim() ? value : null;
@@ -828,20 +942,52 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       const instructionElement = questionContainer?.querySelector('.application-label .description, [data-qa="description"]');
       const nearbyInstructionText = textFrom(instructionElement, 160);
       const adjacentPrompt = control.previousElementSibling;
-      const nearbyPromptText = adjacentPrompt &&
+      const adjacentPromptText = adjacentPrompt &&
         adjacentPrompt.matches('[data-qa="question"], [data-qa="question-text"], .question-prompt')
         ? textFrom(adjacentPrompt)
         : undefined;
+      // Rippling custom questions often expose opaque name/id labels while the
+      // real prompt sits on a preceding sibling of an ancestor (for example
+      // div.paddingX--16 / div.css-1w8xq0). Walk up a few levels and accept the
+      // first preceding node that looks like a prompt and does not contain
+      // another form control (so we do not steal the previous question).
+      // Keep in sync with extractRipplingAncestorPrompt / looksLike* in
+      // ripplingDomHelpers.ts (evaluateAll cannot import modules).
+      const controlSelector = "input, textarea, select, [role='combobox']";
+      const ancestorPromptCandidates: RipplingPromptCandidate[] = [];
+      let cursor: Element | null = control;
+      for (let depth = 0; depth < 6 && cursor; depth += 1) {
+        const previous = cursor.previousElementSibling;
+        if (previous) {
+          ancestorPromptCandidates.push({
+            text: textFrom(previous),
+            containsControl: Boolean(previous.querySelector(controlSelector)),
+          });
+        }
+        const parent: Element | null = cursor.parentElement;
+        if (parent) {
+          for (const child of Array.from(parent.children) as Element[]) {
+            if (child.contains(control)) break;
+            ancestorPromptCandidates.push({
+              text: textFrom(child),
+              containsControl: Boolean(child.querySelector(controlSelector)),
+            });
+          }
+        }
+        cursor = parent;
+      }
       const questionEvidence = {
         ...(legend ? { fieldsetLegend: legend } : {}),
         ...(ariaLabelledByText ? { ariaLabelledByText } : {}),
         ...((ariaLabelledByText || ariaLabel) ? { accessibleName: ariaLabelledByText ?? ariaLabel } : {}),
-        ...(questionContainerPrompts.length > 0 ? { questionContainerPrompts } : {}),
-        ...(nearbyPromptText ? { nearbyPromptText } : {}),
+        ...(questionContainerPrompts.length > 0
+          ? { questionContainerPrompts }
+          : {}),
+        ...(adjacentPromptText ? { nearbyPromptText: adjacentPromptText } : {}),
         ...(sectionTitle ? { sectionTitle } : {}),
         ...(nearbyInstructionText ? { nearbyInstructionText } : {}),
       };
-      const label = (
+      const rawLabel = (
         associated?.textContent?.trim() ||
         control.getAttribute("aria-label")?.trim() ||
         control.getAttribute("placeholder")?.trim() ||
@@ -928,7 +1074,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       return [{
         index,
         id,
-        label,
+        label: rawLabel,
         type,
         required: isFirstRadioInGroup && (control.required || control.getAttribute("aria-required") === "true"),
         ...(stableSelector ? { stableSelector } : {}),
@@ -939,12 +1085,35 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
           ? { groupName: control.name }
           : {}),
         ...(Object.keys(questionEvidence).length > 0 ? { questionEvidence } : {}),
+        ...(ancestorPromptCandidates.length > 0 ? { ripplingPromptCandidates: ancestorPromptCandidates } : {}),
       }];
     }));
 
+    const normalizedRaw = raw.map((item) => {
+      const ancestorPromptText = extractRipplingPromptFromCandidates(item.ripplingPromptCandidates ?? []);
+      const questionEvidence = !item.questionEvidence?.fieldsetLegend &&
+        !item.questionEvidence?.ariaLabelledByText &&
+        (item.questionEvidence?.questionContainerPrompts?.length ?? 0) === 0 &&
+        ancestorPromptText
+        ? {
+            ...(item.questionEvidence ?? {}),
+            questionContainerPrompts: [ancestorPromptText],
+          }
+        : item.questionEvidence;
+      const normalizedItem = { ...item };
+      delete normalizedItem.ripplingPromptCandidates;
+      return {
+        ...normalizedItem,
+        label: looksLikeOpaqueToken(item.label) && ancestorPromptText
+          ? ancestorPromptText
+          : item.label,
+        ...(questionEvidence ? { questionEvidence } : {}),
+      };
+    });
+
     const fields: LeverBrowserField[] = [];
     const idOccurrences = new Map<string, number>();
-    for (const item of raw) {
+    for (const item of normalizedRaw) {
       const occurrence = idOccurrences.get(item.id) ?? 0;
       idOccurrences.set(item.id, occurrence + 1);
       const uniqueItem = occurrence === 0
