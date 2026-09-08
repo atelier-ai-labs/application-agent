@@ -259,4 +259,71 @@ describe("Rippling browser routing", () => {
     expect(result.blocker.evidence).toContain("executor:rippling-browser");
     expect(session.submitClicks).toBe(0);
   });
+
+  it("supports a direct verified Rippling application URL without destinationResolution", async () => {
+    const firstName = new FakeField({ id: "first-name", label: "First name", type: "text", required: true });
+    const session = new FakeSession([firstName]);
+    const factory = new FakeSessionFactory(session);
+    const executor = new LeverBrowserExecutor({
+      sessionFactory: factory,
+      provider: "auto",
+      now: () => capturedAt,
+    });
+
+    const base = request(job());
+    const careerJob = {
+      ...base.careerJob,
+      destinationResolution: undefined,
+      job: {
+        ...base.careerJob.job,
+        applicationUrl: formUrl,
+        sourceUrl: postingUrl,
+      },
+    };
+    const directRequest = {
+      ...base,
+      careerJob,
+      application: {
+        ...base.application,
+        job: careerJob.job,
+      },
+    };
+
+    expect(executor.supports(directRequest)).toBe(true);
+    const result = await executor.execute(directRequest);
+    expect(factory.opens).toBe(1);
+    expect(session.current).toBe(formUrl);
+    expect(firstName.fillCalls).toBe(1);
+    expect(session.submitClicks).toBe(0);
+    expect(["ready_to_submit", "requires_human"]).toContain(result.state);
+  });
+
+  it("rejects a direct Rippling URL when the source posting identity is not correlated", () => {
+    const session = new FakeSession([]);
+    const executor = new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      provider: "auto",
+      now: () => capturedAt,
+    });
+    const base = request(job());
+    const unverifiedCareerJob = {
+      ...base.careerJob,
+      destinationResolution: undefined,
+      sourceRecordId: "different-org:different-posting",
+      job: {
+        ...base.careerJob.job,
+        applicationUrl: formUrl,
+      },
+    };
+    const unverifiedRequest = {
+      ...base,
+      careerJob: unverifiedCareerJob,
+      application: {
+        ...base.application,
+        job: unverifiedCareerJob.job,
+      },
+    };
+
+    expect(executor.supports(unverifiedRequest)).toBe(false);
+  });
 });

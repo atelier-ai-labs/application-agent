@@ -47,6 +47,7 @@ import {
 } from "./greenhouseJobSource";
 import {
   classifyJobUrl,
+  isVerifiedRipplingHostedUrl,
   isVerifiedRipplingApplicationUrl,
   ripplingApplicationUrl,
 } from "./jobUrlClassifier";
@@ -1032,8 +1033,14 @@ function trustedTarget(
     const destinationMatches = resolution?.status === "resolved" &&
       resolution.actionable === true &&
       resolution.ats === "Rippling" &&
-      resolution.destinationUrl === posting.applicationUrl;
-    if (!destinationMatches) {
+      (resolution.destinationUrl === posting.applicationUrl ||
+        ripplingApplicationUrl(resolution.destinationUrl) === ripplingApplicationUrl(posting.applicationUrl));
+    const directRipplingSource = Boolean(job.sourceRecordId) &&
+      job.sourceRecordId === `${destination.siteIdentifier}:${destination.postingIdentifier}` &&
+      isVerifiedRipplingHostedUrl(posting.sourceUrl, destination.siteIdentifier, destination.postingIdentifier);
+    const directRipplingApplication = directRipplingSource &&
+      isVerifiedRipplingApplicationUrl(posting.applicationUrl, destination.siteIdentifier, destination.postingIdentifier);
+    if (!destinationMatches && !directRipplingApplication) {
       return { reason: "The Rippling destination is not independently verified for this posting." };
     }
     const formUrl = ripplingApplicationUrl(posting.applicationUrl);
@@ -1502,7 +1509,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       const baseEvidence = [
         `executor:${executorEvidenceLabel(target.provider)}`,
         `source:live/${target.provider}`,
-        `${target.provider === "greenhouse" ? "greenhouse-board" : "lever-site"}:${target.site}`,
+        `${target.provider === "greenhouse" ? "greenhouse-board" : target.provider === "rippling" ? "rippling-org" : "lever-site"}:${target.site}`,
         `provider-job-id:${target.postingId}`,
         "navigation:verified",
         ...(captcha ? captchaEvidence(captcha) : []),

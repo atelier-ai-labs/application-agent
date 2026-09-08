@@ -323,6 +323,53 @@ describe("trusted local execution host", () => {
     expect(trustedExecutionRequestReason(request)).toBeUndefined();
   });
 
+  it("trusts a directly correlated Rippling posting without destination resolution", async () => {
+    const fixtureValue = await fixture("rippling-direct-source");
+    const ripplingUrl = "https://ats.rippling.com/fullthrottle1/jobs/rippling-posting-123";
+    const ripplingJob = {
+      ...fixtureValue.careerJob,
+      sourceId: "curated-live",
+      sourceRecordId: "fullthrottle1:rippling-posting-123",
+      destinationResolution: undefined,
+      job: {
+        ...fixtureValue.careerJob.job,
+        company: "FullThrottle.ai",
+        title: "AI Platform Engineer",
+        sourceUrl: ripplingUrl,
+        applicationUrl: ripplingUrl,
+      },
+    };
+    const request: ExecutionHostRequest = {
+      ...fixtureValue.request,
+      careerJob: ripplingJob,
+      application: { ...fixtureValue.application, job: ripplingJob.job },
+    };
+
+    expect(trustedExecutionRequestReason(request)).toBeUndefined();
+  });
+
+  it("rejects a valid Rippling URL without a correlated source posting", async () => {
+    const fixtureValue = await fixture("rippling-unverified-direct");
+    const ripplingJob = {
+      ...fixtureValue.careerJob,
+      sourceId: "curated-live",
+      sourceRecordId: "different-org:different-posting",
+      destinationResolution: undefined,
+      job: {
+        ...fixtureValue.careerJob.job,
+        sourceUrl: "https://ats.rippling.com/fullthrottle1/jobs/rippling-posting-123",
+        applicationUrl: "https://ats.rippling.com/fullthrottle1/jobs/rippling-posting-123",
+      },
+    };
+    const request: ExecutionHostRequest = {
+      ...fixtureValue.request,
+      careerJob: ripplingJob,
+      application: { ...fixtureValue.application, job: ripplingJob.job },
+    };
+
+    expect(trustedExecutionRequestReason(request)).toContain("not independently verified");
+  });
+
   it("keeps the browser handle server-side and resumes the same session", async () => {
     const executor = new BlockingPreparationExecutor();
     const { request } = await fixture("same-session", executor);
