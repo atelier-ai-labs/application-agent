@@ -204,6 +204,11 @@ function stringValue(value: unknown, maximum: number): string | undefined {
     : undefined;
 }
 
+function slackErrorCode(value: unknown): string | undefined {
+  const code = stringValue(value, 96);
+  return code && /^[A-Za-z0-9_-]+$/.test(code) ? code : undefined;
+}
+
 /**
  * Server-only Slack adapter. It publishes small Block Kit messages and accepts
  * only Socket Mode button actions or thread replies from the configured
@@ -624,7 +629,10 @@ export class SlackNotificationAdapter implements NotificationAdapter {
       throw new Error(`Slack ${method} returned malformed JSON.`);
     }
     const result = responsePayload(data) as SlackApiResponse | undefined;
-    if (!result?.ok) throw new Error(`Slack ${method} was not accepted.`);
+    if (!result?.ok) {
+      const errorCode = slackErrorCode(result?.error);
+      throw new Error(`Slack ${method} was not accepted${errorCode ? ` (${errorCode})` : ""}.`);
+    }
     return clone(result);
   }
 }

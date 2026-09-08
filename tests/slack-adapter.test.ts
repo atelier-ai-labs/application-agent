@@ -155,6 +155,22 @@ describe("Slack human-attention adapter", () => {
     }
   });
 
+  it("reports only a sanitized Slack API error code without exposing the token", async () => {
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: false, error: "invalid_auth" }),
+      } as Response),
+    });
+
+    const failure = await adapter.start().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe("Slack apps.connections.open was not accepted (invalid_auth).");
+    expect((failure as Error).message).not.toContain(config.appToken);
+  });
+
   it("publishes a compact button message without internal blocker IDs", async () => {
     const requests: Array<{ url: string; body?: string }> = [];
     const adapter = new SlackNotificationAdapter({
