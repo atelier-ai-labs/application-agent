@@ -1292,4 +1292,32 @@ describe("Rippling field classification regressions", () => {
     expect(location.current).toBe(exampleCandidateProfile.identity.location ?? exampleCandidateProfile.location);
     expect(String(phoneCountry.current)).toContain("United States");
   });
+
+  it("typeahead-fills phone-country when the truncated dialing sample omits the grounded country", async () => {
+    const truncated = dialingOptions.filter((option) => !/United States/i.test(option.label));
+    expect(truncated.some((option) => /United States/i.test(option.label))).toBe(false);
+    expect(looksLikeInternationalDialingOptions(truncated)).toBe(true);
+
+    const phoneCountry = new FakeField({
+      id: "field-34",
+      label: "Search",
+      type: "select",
+      required: true,
+      options: truncated,
+    });
+    const email = new FakeField({ id: "email", label: "Email", type: "email", required: true });
+    const session = new FakeSession([email, phoneCountry]);
+    const result = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      now: () => capturedAt,
+    }).execute(request());
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(session.submitClicks).toBe(0);
+    expect(phoneCountry.selectCalls).toBe(1);
+    expect(String(phoneCountry.current)).toBe(exampleCandidateProfile.identity.location?.split(",").at(-1)?.trim() === "US"
+      ? "United States"
+      : String(phoneCountry.current));
+    expect(String(phoneCountry.current)).toMatch(/United States|US/i);
+  });
 });

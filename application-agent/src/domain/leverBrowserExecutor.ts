@@ -849,7 +849,16 @@ function optionValue(
       rawLabels.some((label) => desiredAliases.some((alias) => optionMatchesCountryLabel(label, alias))) ||
       booleanAliases.some((alias) => labels.includes(alias));
   });
-  return option?.value;
+  if (option?.value) return option.value;
+  // Rippling phone-country Search widgets often expose only a virtualized
+  // slice of dialing options during inspection. When the grounded country is
+  // missing from that sample, return it as a typeahead query so the browser
+  // session can filter and commit the real option.
+  if (looksLikeInternationalDialingOptions(field.options)) {
+    const query = valueAsString(value);
+    return query || undefined;
+  }
+  return undefined;
 }
 
 function checkboxValue(value: AnswerValue | undefined): boolean | undefined {

@@ -17,6 +17,7 @@ import {
   BrowserExecutionDiagnosticError,
   safeBrowserDiagnosticMessage,
 } from "../src/domain/executor";
+import { looksLikeInternationalDialingOptions } from "../src/domain/leverBrowserExecutor";
 
 export interface PlaywrightLeverBrowserOptions {
   headless?: boolean;
@@ -316,10 +317,15 @@ export function greenhouseOptionMatches(
   const normalize = (value: string): string => value.trim().toLowerCase().replace(/\s+/g, " ");
   const normalizedText = normalize(optionText);
   const normalizedDesired = normalize(desired);
+  if (!normalizedDesired) return false;
   return normalizedText === normalizedDesired ||
     (optionValue !== null && normalize(optionValue) === normalizedDesired) ||
     normalizedText.startsWith(`${normalizedDesired}+`) ||
-    normalizedText.startsWith(`${normalizedDesired} +`);
+    normalizedText.startsWith(`${normalizedDesired} +`) ||
+    // Rippling dialing lists: "+1 US - United States"
+    normalizedText.endsWith(` - ${normalizedDesired}`) ||
+    normalizedText.endsWith(`-${normalizedDesired}`) ||
+    normalizedText.includes(` - ${normalizedDesired}`);
 }
 
 class PlaywrightLeverBrowserField implements LeverBrowserField {
@@ -396,24 +402,51 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
       // Greenhouse deployment: the menu can close without committing the
       // controlled value. Select through the widget's keyboard path, then
       // verify the committed single-value state before returning.
-      const matchedOption = this.options?.find((option) =>
+      let matchedOption = this.options?.find((option) =>
         greenhouseOptionMatches(option.label, option.value, value));
-      if (this.options && !matchedOption) {
+      const allowTypeahead = Boolean(
+        this.options &&
+        !matchedOption &&
+        looksLikeInternationalDialingOptions(this.options),
+      );
+      if (this.options && !matchedOption && !allowTypeahead) {
         throw new Error(`The select option ${value} was not found.`);
       }
-      await locator.fill(matchedOption?.label ?? value);
+      const typeaheadQuery = matchedOption?.label ?? value;
+      await locator.fill(typeaheadQuery);
+      // For truncated Rippling dialing samples, wait for the filtered list and
+      // bind the first exact country match before committing with Enter.
+      if (allowTypeahead || !matchedOption) {
+        const filtered = this.page.locator('[role="option"], .select__option');
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          const count = await filtered.count();
+          for (let index = 0; index < count; index += 1) {
+            const option = filtered.nth(index);
+            if (!(await visibleFormControl(option))) continue;
+            const label = (await option.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+            if (!label || !greenhouseOptionMatches(label, label, value)) continue;
+            matchedOption = { label, value: label };
+            break;
+          }
+          if (matchedOption) break;
+          if (attempt < 19) await this.page.waitForTimeout(50);
+        }
+      }
       await locator.press("Enter");
       const expectedValue = matchedOption?.value ?? value;
       const isCommitted = async (): Promise<boolean> => {
         const selected = await this.readValue();
         if (typeof selected !== "string") return false;
         if (selected === expectedValue || greenhouseOptionMatches(selected, selected, expectedValue)) return true;
+        if (greenhouseOptionMatches(selected, selected, value)) return true;
         // The Greenhouse phone-country control displays only the dialing code
         // after commit (for example, "+1") even though the selected option was
         // the uniquely filtered full country label. Accept that representation
         // only when it is the exact suffix of the option we selected.
+        // Rippling lists put the dialing code at the start ("+1 US - United States").
         const selectedDialingCode = selected.trim().match(/^\+\d+$/)?.[0];
-        const expectedDialingCode = expectedValue.trim().match(/\+\d+$/)?.[0];
+        const expectedDialingCode = expectedValue.trim().match(/^\+\d+/)?.[0]
+          ?? expectedValue.trim().match(/\+\d+$/)?.[0];
         return Boolean(selectedDialingCode && expectedDialingCode && selectedDialingCode === expectedDialingCode);
       };
       for (let attempt = 0; attempt < 20; attempt += 1) {
