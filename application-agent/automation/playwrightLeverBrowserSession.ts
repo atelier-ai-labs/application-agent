@@ -396,7 +396,11 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
         if (best) return best.locator;
       }
     }
-    return count > 0 ? searches.first() : primary;
+    throw new Error(
+      count === 0
+        ? `The select control ${this.id} could not be re-identified after a page update.`
+        : `The select control ${this.id} could not be uniquely re-identified after a page update.`,
+    );
   }
 
   async fill(value: string): Promise<void> {

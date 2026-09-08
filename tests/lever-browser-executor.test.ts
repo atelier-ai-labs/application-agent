@@ -1213,7 +1213,7 @@ describe("Rippling field classification regressions", () => {
       type: "text",
       questionDescriptor: {
         promptText: "Location",
-        sourceStrategy: "label_for",
+        sourceStrategy: "question_container",
         confidence: "high",
       },
     })).toBe("location");
@@ -1269,7 +1269,7 @@ describe("Rippling field classification regressions", () => {
       required: true,
       questionDescriptor: {
         promptText: "Location",
-        sourceStrategy: "label_for",
+        sourceStrategy: "question_container",
         confidence: "high",
       },
     });
