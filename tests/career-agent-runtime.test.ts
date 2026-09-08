@@ -152,6 +152,69 @@ class ReadyExecutor implements ApplicationExecutor {
   }
 }
 
+const ripplingSalaryPrompt = "What is your desired annual compensation?";
+
+function ripplingSalaryBlocker(): CareerBlockerDraft {
+  return {
+    kind: "salary",
+    unit: "submission",
+    questionProvenance: "ATS_FORM",
+    field: "field-59",
+    question: ripplingSalaryPrompt,
+    reason: "No verified profile fact or explicitly resolved answer is available.",
+    evidence: [
+      "executor:rippling-browser",
+      "field-id:field-59",
+      "field-type:text",
+      `field-label:${ripplingSalaryPrompt}`,
+      "field-required:true",
+      "classification:salary",
+      "field-source-selector:dom-id:field-59",
+      `question-prompt:${ripplingSalaryPrompt}`,
+      "question-source:question_container",
+      "question-confidence:high",
+    ],
+    resumeAfterHuman: true,
+  };
+}
+
+class RipplingSalaryExecutor implements ApplicationExecutor {
+  readonly id = "rippling-browser";
+  calls = 0;
+
+  executionMode(): "preparation_only" {
+    return "preparation_only";
+  }
+
+  async execute(): Promise<ApplicationExecutorResult> {
+    this.calls += 1;
+    const current = ripplingSalaryBlocker();
+    return {
+      state: "requires_human",
+      blocker: current,
+      blockers: [current],
+      inspection: {
+        ...inspection("needs_input", [current]),
+        fields: [{
+          id: "field-59",
+          label: ripplingSalaryPrompt,
+          type: "text",
+          required: true,
+          classification: "salary",
+          questionDescriptor: {
+            promptText: ripplingSalaryPrompt,
+            sourceStrategy: "question_container",
+            confidence: "high",
+          },
+        }],
+        fieldsFilled: ["field-8", "field-12", "field-16", "field-34", "field-31", "field-42"],
+        unresolvedFields: [ripplingSalaryPrompt],
+        evidence: ["executor:rippling-browser", "submit:not-clicked", "submission:manual-only"],
+      },
+    };
+  }
+}
+
 function runtimeClock() {
   let tick = 0;
   let sequence = 0;
@@ -814,4 +877,44 @@ describe("background Career Agent runtime", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
+
+  it("publishes a Rippling salary ATS blocker as Slack needs_input attention without submitting", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "atelier-career-runtime-"));
+    try {
+      const statePath = join(directory, "state.json");
+      const adapter = new InMemoryNotificationAdapter();
+      const executor = new RipplingSalaryExecutor();
+      const runtime = new BackgroundCareerAgentRuntimeImpl(runtimeOptions(statePath, executor, adapter));
+      const campaign = runtime.createCampaign(campaignInput());
+      runtime.service.activateCampaign(campaign.id);
+      await runtime.runCampaign(campaign.id);
+
+      const job = runtime.service.listJobs(campaign.id)[0];
+      expect(executor.calls).toBe(1);
+      expect(job.status).toBe("needs_input");
+      expect(job.blockers).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          kind: "salary",
+          status: "open",
+          question: ripplingSalaryPrompt,
+        }),
+      ]));
+      expect(adapter.publishedEvents).toHaveLength(1);
+      expect(adapter.publishedEvents[0]).toMatchObject({
+        type: "needs_input",
+        blockerType: "salary",
+        questionProvenance: "ATS_FORM",
+        title: "Career Agent needs input",
+        question: {
+          prompt: ripplingSalaryPrompt,
+          kind: "free_text",
+        },
+      });
+      expect(runtime.service.listEvents(campaign.id).some((candidate) => candidate.type === "application.applied")).toBe(false);
+      await runtime.stop();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
 });
