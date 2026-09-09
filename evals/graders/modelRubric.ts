@@ -3,6 +3,9 @@
  *
  * Default (CI / offline): deterministic mock — no network LLM calls.
  * Opt into a live scorer later with EVALS_MODEL_GRADER=live (not wired yet).
+ *
+ * Fail-audit: mock MUST be able to FAIL (see evals/golden/negative/).
+ * Do not return always-pass stubs for unhandled kinds — return null (skip).
  */
 
 import { assessFit } from "../../application-agent/src/domain/fit";
@@ -10,7 +13,6 @@ import type {
   AssessFitTask,
   GoldenTask,
   GroundednessTask,
-  PassKTask,
 } from "../golden/schema";
 import type { GraderResult } from "../types";
 
@@ -49,7 +51,8 @@ export function mockGradeGroundedness(task: GroundednessTask): GraderResult {
   );
   const inventPenalty = invented ? 0.5 : 0;
   const score = Number(Math.max(0, Math.min(1, factScore - inventPenalty)).toFixed(3));
-  const passed = score >= task.expected.minScore && !invented;
+  // Invented employers / years / skills always fail — never soft-pass on fact overlap alone.
+  const passed = !invented && score >= task.expected.minScore;
 
   return {
     grader: "model_rubric",
@@ -73,17 +76,6 @@ export function mockGradeFitRubric(task: AssessFitTask): GraderResult {
     passed,
     score,
     detail: `classification=${fit.classification}; recommendation=${fit.applicationRecommendation}; family=${fit.recommendedResumeFamily}`,
-  };
-}
-
-/** Pass^k: note that mock rubric is deterministic here (variance reserved for live). */
-export function mockGradePassK(task: PassKTask): GraderResult {
-  return {
-    grader: "model_rubric",
-    name: "pass_k_variance_note",
-    passed: true,
-    score: 1,
-    detail: `mock mode: deterministic nested grader is stable across k=${task.input.k}; live rubric variance not measured.`,
   };
 }
 
@@ -114,20 +106,18 @@ export async function runModelRubricGrader(
     case "assess_fit":
       return mockGradeFitRubric(task);
     case "pass_k":
-      return mockGradePassK(task);
+      // HARDENED: previously always-pass `pass_k_variance_note` (score=1).
+      // Deterministic pass_k already asserts stability; skip rubric so it cannot mask fails.
+      return null;
     case "classify_url":
     case "field_fill":
     case "submit_policy":
     case "field_classify":
     case "rippling_dom":
     case "blocker_policy":
-      return {
-        grader: "model_rubric",
-        name: `${task.kind}_rubric_skipped`,
-        passed: true,
-        score: 1,
-        detail: "No model rubric defined for this kind; treated as N/A pass.",
-      };
+      // HARDENED: previously always-pass `*_rubric_skipped` (score=1 / N/A pass).
+      // No model rubric for these kinds — skip instead of fake-pass.
+      return null;
     default: {
       const _exhaustive: never = task;
       return _exhaustive;
