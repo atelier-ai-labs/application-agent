@@ -27,7 +27,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run evals suite (offline, mocked model grader)
+      - name: Run evals suite — positives (offline, mocked model grader)
         env:
           # Keep soft: do not fail the step on task failures yet.
           # EVALS_FAIL_ON_ERROR: "1"
@@ -43,16 +43,35 @@ jobs:
             echo "evals/baseline.json missing after suite run"
           fi
 
-      - name: Upload baseline artifact
+      - name: Fail-audit negatives (must FAIL grading)
+        if: always()
+        env:
+          EVALS_MODEL_GRADER: mock
+        run: npm run test:evals:negatives
+
+      - name: Echo negative baseline summary
+        if: always()
+        run: |
+          if [ -f evals/negative-baseline.json ]; then
+            node -e "const b=require('./evals/negative-baseline.json'); console.log('negatives:', b.summaryLine);"
+          else
+            echo "evals/negative-baseline.json missing after fail-audit"
+          fi
+
+      - name: Upload baseline artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: evals-baseline
-          path: evals/baseline.json
+          path: |
+            evals/baseline.json
+            evals/negative-baseline.json
+            evals/FAIL_AUDIT.md
           if-no-files-found: warn
 
       - name: Reminder — soft gate
         if: always()
         run: |
           echo "evals job is non-blocking (continue-on-error: true)."
+          echo "Positives soft-report; negatives assert known-bad FAIL (exit 1 if a negative PASSES)."
           echo "Flip to blocking: see evals/README.md § Flip to blocking later."
