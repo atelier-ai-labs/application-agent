@@ -1,0 +1,28 @@
+{
+  "id": "07-rippling-location-field",
+  "kind": "field_classify",
+  "description": "Rippling location / city-state field classifies as location.",
+  "graders": [
+    "deterministic"
+  ],
+  "input": {
+    "fields": [
+      {
+        "id": "current-location",
+        "label": "Current location",
+        "type": "text",
+        "section": "Contact",
+        "questionDescriptor": {
+          "promptText": "What city and state are you located in?",
+          "sourceStrategy": "question_container",
+          "confidence": "high"
+        }
+      }
+    ]
+  },
+  "expected": {
+    "classifications": {
+      "current-location": "location"
+    }
+  }
+}

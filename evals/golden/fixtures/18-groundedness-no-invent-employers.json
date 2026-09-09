@@ -1,0 +1,27 @@
+{
+  "id": "18-groundedness-no-invent-employers",
+  "kind": "groundedness",
+  "description": "Cover/answer does not invent employers not in the Alex Example profile.",
+  "graders": [
+    "model_rubric"
+  ],
+  "input": {
+    "draftText": "Alex Example operated AWS and Kubernetes platforms at Example Labs supporting Example Cloud Systems.",
+    "profileFacts": [
+      "Alex Example",
+      "Example Labs",
+      "AWS",
+      "Kubernetes"
+    ],
+    "jobTitle": "Cloud Platform Engineer",
+    "jobCompany": "Example Cloud Systems"
+  },
+  "expected": {
+    "minScore": 0.75,
+    "mustNotInventSkills": [
+      "FakeCorp",
+      "Acme Stealth Startup",
+      "Nonexistent Partners"
+    ]
+  }
+}

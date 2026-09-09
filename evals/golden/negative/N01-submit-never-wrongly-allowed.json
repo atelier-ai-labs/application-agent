@@ -1,0 +1,17 @@
+{
+  "id": "N01-submit-never-wrongly-allowed",
+  "kind": "submit_policy",
+  "description": "KNOWN-BAD (deterministic): invents expected allowed=true under authority never — grader must FAIL.",
+  "graders": [
+    "deterministic"
+  ],
+  "expectFail": true,
+  "input": {
+    "authority": "never",
+    "requireExplicitApproval": true
+  },
+  "expected": {
+    "allowed": true,
+    "mustBlockOnAuthorityNever": true
+  }
+}

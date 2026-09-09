@@ -1,0 +1,82 @@
+{
+  "id": "15-greenhouse-lever-prepare-field-map",
+  "kind": "field_classify",
+  "description": "Greenhouse/Lever prepare happy-path field map for common contact and history fields.",
+  "graders": [
+    "deterministic"
+  ],
+  "input": {
+    "fields": [
+      {
+        "id": "full-name",
+        "label": "Full name",
+        "type": "text",
+        "questionDescriptor": {
+          "promptText": "Full name",
+          "sourceStrategy": "aria_labelledby",
+          "confidence": "high"
+        }
+      },
+      {
+        "id": "email",
+        "label": "Email",
+        "type": "text",
+        "questionDescriptor": {
+          "promptText": "Email",
+          "sourceStrategy": "aria_labelledby",
+          "confidence": "high"
+        }
+      },
+      {
+        "id": "phone",
+        "label": "Phone",
+        "type": "text",
+        "questionDescriptor": {
+          "promptText": "Phone number",
+          "sourceStrategy": "aria_labelledby",
+          "confidence": "high"
+        }
+      },
+      {
+        "id": "resume",
+        "label": "Resume/CV",
+        "type": "file",
+        "questionDescriptor": {
+          "promptText": "Upload your resume",
+          "sourceStrategy": "question_container",
+          "confidence": "high"
+        }
+      },
+      {
+        "id": "edu",
+        "label": "Education",
+        "type": "text",
+        "questionDescriptor": {
+          "promptText": "Highest degree and university",
+          "sourceStrategy": "question_container",
+          "confidence": "high"
+        }
+      },
+      {
+        "id": "emp",
+        "label": "Work history",
+        "type": "textarea",
+        "questionDescriptor": {
+          "promptText": "Most recent employer and job title",
+          "sourceStrategy": "question_container",
+          "confidence": "high"
+        }
+      }
+    ]
+  },
+  "expected": {
+    "classifications": {
+      "full-name": "contact",
+      "email": "contact",
+      "phone": "contact",
+      "resume": "resume_upload",
+      "edu": "education",
+      "emp": "employment_history"
+    }
+  }
+}

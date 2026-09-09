@@ -1,0 +1,27 @@
+{
+  "id": "11-legal-attestation-classification",
+  "kind": "field_classify",
+  "description": "Legal/attestation field classifies as legal_attestation (human gate).",
+  "graders": [
+    "deterministic"
+  ],
+  "input": {
+    "fields": [
+      {
+        "id": "legal-ack",
+        "label": "Acknowledgement",
+        "type": "checkbox",
+        "questionDescriptor": {
+          "promptText": "I certify that the information provided is accurate and complete",
+          "sourceStrategy": "fieldset_legend",
+          "confidence": "high"
+        }
+      }
+    ]
+  },
+  "expected": {
+    "classifications": {
+      "legal-ack": "legal_attestation"
+    }
+  }
+}

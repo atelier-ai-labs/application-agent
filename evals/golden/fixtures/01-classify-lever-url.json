@@ -1,0 +1,14 @@
+{
+  "id": "01-classify-lever-url",
+  "kind": "classify_url",
+  "description": "Deterministic Lever hosted URL classification (site + posting ids).",
+  "graders": ["deterministic"],
+  "input": {
+    "url": "https://jobs.lever.co/examplecorp/abc-123-def/apply?utm_source=evals"
+  },
+  "expected": {
+    "kind": "lever",
+    "siteIdentifier": "examplecorp",
+    "postingIdentifier": "abc-123-def"
+  }
+}

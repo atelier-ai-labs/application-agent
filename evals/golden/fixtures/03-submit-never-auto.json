@@ -1,0 +1,16 @@
+{
+  "id": "03-submit-never-auto",
+  "kind": "submit_policy",
+  "description": "Fail-closed submit path: authority never must block auto-submit (never silent allow).",
+  "graders": [
+    "deterministic"
+  ],
+  "input": {
+    "authority": "never",
+    "requireExplicitApproval": true
+  },
+  "expected": {
+    "allowed": false,
+    "mustBlockOnAuthorityNever": true
+  }
+}
