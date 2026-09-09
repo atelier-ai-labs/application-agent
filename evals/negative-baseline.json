@@ -1,0 +1,24 @@
+{
+  "ranAt": "2026-09-09T01:46:00.000Z",
+  "fixtureCount": 2,
+  "passedCount": 0,
+  "failedCount": 2,
+  "passRate": 0,
+  "averageScore": 0.333,
+  "modelGraderMode": "mock",
+  "summaryLine": "evals baseline: fixtures=2 passed=0 failed=2 passRate=0 averageScore=0.333",
+  "tasks": [
+    {
+      "id": "N01-submit-never-wrongly-allowed",
+      "kind": "submit_policy",
+      "passed": false,
+      "score": 0.5
+    },
+    {
+      "id": "N02-groundedness-invents-employer",
+      "kind": "groundedness",
+      "passed": false,
+      "score": 0.167
+    }
+  ]
+}
