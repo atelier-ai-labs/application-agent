@@ -3,6 +3,9 @@
  * Soft-exit by default so CI can report baseline without blocking merges.
  * Set EVALS_FAIL_ON_ERROR=1 to exit non-zero when any task fails.
  * Always writes evals/baseline.json alongside the console report.
+ *
+ * Loads positives only (`evals/golden/fixtures/`).
+ * Known-bad fail-audit: `npm run test:evals:negatives` → evals/runNegatives.ts
  */
 
 import { formatSuiteReport, runEvalSuite, writeBaselineArtifact } from "./runner";
