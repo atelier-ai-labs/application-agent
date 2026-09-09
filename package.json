@@ -15,7 +15,9 @@
     "career-agent:google-auth": "vite-node application-agent/automation/googleAuth.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:acceptance": "npm run build && vite-node application-agent/automation/acceptance/run.ts"
+    "test:acceptance": "npm run build && vite-node application-agent/automation/acceptance/run.ts",
+    "observability:sample": "vite-node application-agent/automation/observability/runSample.ts",
+    "test:observability": "vitest run tests/prep-metrics.test.ts && vite-node application-agent/automation/observability/runSample.ts"
   },
   "dependencies": {
     "react": "^19.1.1",

@@ -1,0 +1,80 @@
+{
+  "generatedAt": "2026-09-08T18:00:00.000Z",
+  "source": "synthetic_dry_run",
+  "runCount": 5,
+  "applicationPrepCount": 5,
+  "stages": [
+    {
+      "stage": "scout",
+      "sampleCount": 5,
+      "meanMs": 832,
+      "maxMs": 910,
+      "p50Ms": 820,
+      "p95Ms": 904,
+      "totalInputTokens": 0,
+      "totalOutputTokens": 0
+    },
+    {
+      "stage": "fit",
+      "sampleCount": 5,
+      "meanMs": 413,
+      "maxMs": 455,
+      "p50Ms": 410,
+      "p95Ms": 450,
+      "totalInputTokens": 4023,
+      "totalOutputTokens": 784
+    },
+    {
+      "stage": "prepare",
+      "sampleCount": 5,
+      "meanMs": 1278,
+      "maxMs": 1520,
+      "p50Ms": 1240,
+      "p95Ms": 1486,
+      "totalInputTokens": 7476,
+      "totalOutputTokens": 2356
+    },
+    {
+      "stage": "needs_input",
+      "sampleCount": 2,
+      "meanMs": 565,
+      "maxMs": 610,
+      "p50Ms": 565,
+      "p95Ms": 606,
+      "totalInputTokens": 0,
+      "totalOutputTokens": 0
+    },
+    {
+      "stage": "ready_to_submit",
+      "sampleCount": 4,
+      "meanMs": 173,
+      "maxMs": 200,
+      "p50Ms": 170,
+      "p95Ms": 197,
+      "totalInputTokens": 0,
+      "totalOutputTokens": 0
+    }
+  ],
+  "tokens": {
+    "input": 11499,
+    "output": 3140,
+    "estimatedCostUsd": 0.003609
+  },
+  "costPerApplicationPrepUsd": 0.000722,
+  "humanAttentionRate": 0.4,
+  "prepareSuccessRate": 0.8,
+  "pricingAssumptions": {
+    "inputUsdPer1M": 0.15,
+    "outputUsdPer1M": 0.6,
+    "modelLabel": "default-small-llm (documented assumption)",
+    "notes": "Synthetic dry-run: tokens are illustrative estimates for portfolio quoting; no live model billed."
+  },
+  "quote": {
+    "endToEndMeanLatencyMs": 2887,
+    "endToEndP50LatencyMs": 3010,
+    "endToEndP95LatencyMs": 3233,
+    "costPerPrepUsd": 0.000722,
+    "humanAttentionRate": 0.4,
+    "prepareSuccessRate": 0.8
+  }
+}
