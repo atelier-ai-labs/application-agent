@@ -1,0 +1,19 @@
+{
+  "id": "13b-rippling-url-identity-mismatch",
+  "kind": "classify_url",
+  "description": "Rippling URL with mismatched posting id fails hosted identity verification.",
+  "graders": [
+    "deterministic"
+  ],
+  "input": {
+    "url": "https://ats.rippling.com/exampleorg/jobs/other-posting",
+    "verifyOrganization": "exampleorg",
+    "verifyPostingId": "posting-789"
+  },
+  "expected": {
+    "kind": "rippling",
+    "siteIdentifier": "exampleorg",
+    "postingIdentifier": "other-posting",
+    "verifiedHosted": false
+  }
+}

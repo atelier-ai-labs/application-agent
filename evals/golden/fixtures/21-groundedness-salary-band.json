@@ -1,0 +1,24 @@
+{
+  "id": "21-groundedness-salary-band",
+  "kind": "groundedness",
+  "description": "Answer grounded for salary expectation when profile has an approved band.",
+  "graders": [
+    "model_rubric"
+  ],
+  "input": {
+    "draftText": "Alex Example's expected compensation is $140,000–$160,000 USD per year for this Cloud Platform Engineer role.",
+    "profileFacts": [
+      "Alex Example",
+      "$140,000–$160,000 USD per year"
+    ],
+    "jobTitle": "Cloud Platform Engineer",
+    "jobCompany": "Example Cloud Systems"
+  },
+  "expected": {
+    "minScore": 0.9,
+    "mustNotInventSkills": [
+      "$250,000",
+      "equity-only"
+    ]
+  }
+}
