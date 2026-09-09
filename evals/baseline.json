@@ -1,12 +1,12 @@
 {
-  "ranAt": "2026-09-09T01:26:15.376Z",
-  "fixtureCount": 30,
-  "passedCount": 30,
+  "ranAt": "2026-09-09T02:34:53.733Z",
+  "fixtureCount": 31,
+  "passedCount": 31,
   "failedCount": 0,
   "passRate": 1,
   "averageScore": 1,
   "modelGraderMode": "mock",
-  "summaryLine": "evals baseline: fixtures=30 passed=30 failed=0 passRate=1 averageScore=1",
+  "summaryLine": "evals baseline: fixtures=31 passed=31 failed=0 passRate=1 averageScore=1",
   "tasks": [
     {
       "id": "01-classify-lever-url",
@@ -185,6 +185,12 @@
     {
       "id": "26-malformed-posting-url",
       "kind": "classify_url",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "27-email-address-not-location",
+      "kind": "field_classify",
       "passed": true,
       "score": 1
     }
