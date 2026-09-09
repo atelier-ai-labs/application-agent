@@ -1,0 +1,16 @@
+{
+  "id": "12b-locale-prefix-stripped",
+  "kind": "classify_url",
+  "description": "Real locale prefix en-US is stripped; org+posting identity preserved.",
+  "graders": [
+    "deterministic"
+  ],
+  "input": {
+    "url": "https://ats.rippling.com/en-US/exampleorg/jobs/posting-456/apply"
+  },
+  "expected": {
+    "kind": "rippling",
+    "siteIdentifier": "exampleorg",
+    "postingIdentifier": "posting-456"
+  }
+}

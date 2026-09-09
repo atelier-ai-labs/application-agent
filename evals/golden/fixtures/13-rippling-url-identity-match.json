@@ -1,0 +1,19 @@
+{
+  "id": "13-rippling-url-identity-match",
+  "kind": "classify_url",
+  "description": "Direct Rippling URL requires matching source URL + org:posting identity.",
+  "graders": [
+    "deterministic"
+  ],
+  "input": {
+    "url": "https://ats.rippling.com/exampleorg/jobs/posting-789",
+    "verifyOrganization": "exampleorg",
+    "verifyPostingId": "posting-789"
+  },
+  "expected": {
+    "kind": "rippling",
+    "siteIdentifier": "exampleorg",
+    "postingIdentifier": "posting-789",
+    "verifiedHosted": true
+  }
+}
