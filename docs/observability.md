@@ -19,7 +19,7 @@ Open [`observability/metrics-sample.json`](./observability/metrics-sample.json).
    `maxMs`) plus token totals where LLM-ish nodes recorded them.
 3. **`tokens`** — aggregate input/output tokens and `estimatedCostUsd`.
 4. **`pricingAssumptions`** — documented USD-per-1M rates used when nodes lack
-   `estimatedCost` (default small-model table in `prepMetrics.ts`).
+   `estimatedCost` (default small-model table in `prepMetricsTypes.ts`).
 5. **`humanAttentionRate`** — `needs_input` prep units ÷ total application-prep
    units (correlated by `prepTraceId` = `runId:jobId`).
 6. **`prepareSuccessRate`** — prep units that reached `ready_to_submit` (or
@@ -27,8 +27,13 @@ Open [`observability/metrics-sample.json`](./observability/metrics-sample.json).
 
 Correlation: every node should carry `metadata.stage` (existing vocabulary such
 as `scout.total`, `job.fit`, `preparation.total`, …) and preferably
-`metadata.jobId`. The summarizer normalizes stages into the Week-2 pipeline
-list and joins one prep with `metadata.prepTraceId` or `runId + jobId`.
+`metadata.jobId`. Use `prepStageMetadata(runId, jobId, stage)` when measuring
+nodes. The summarizer normalizes stages into the Week-2 pipeline list and joins
+one prep with `metadata.prepTraceId` or `runId + jobId`.
+
+Live campaign runs also emit the same log lines from
+`application-agent/automation/runtime/run.ts` when
+`ATELIER_CAREER_AGENT_RUN_ON_START=true` and a trace is present.
 
 ## Generate / refresh the sample (offline)
 
