@@ -3,6 +3,10 @@ import {
   createConfiguredBackgroundCareerAgentRuntime,
   type BackgroundCareerAgentEnvironment,
 } from "./careerAgentRuntime";
+import {
+  formatMetricsLogLines,
+  summarizePrepMetrics,
+} from "../../src/domain/prepMetrics";
 
 // Keep server-side runtime configuration in the same local env files as the
 // existing Node host, while explicit shell variables retain precedence.
@@ -49,6 +53,12 @@ try {
     if (campaign.status === "draft") runtime.service.activateCampaign(campaignId);
     const result = await runtime.runCampaign(campaignId);
     console.log(`[career-agent-runtime] campaign ${campaignId} completed: ${result.attentionRequired} item(s) need attention`);
+    if (result.trace) {
+      const report = summarizePrepMetrics([result.trace], { source: "execution_traces" });
+      for (const line of formatMetricsLogLines(report)) {
+        console.info(line);
+      }
+    }
   }
 
   console.log(`[career-agent-runtime] durable state: ${runtime.stateFilePath ?? "injected storage"}`);

@@ -25,6 +25,7 @@ export * from "./domain/lifecycle";
 export * from "./domain/model";
 export * from "./domain/notifications";
 export * from "./domain/policies";
+export * from "./domain/prepMetrics";
 export * from "./domain/profile";
 export * from "./domain/resume";
 export * from "./domain/remotiveJobSource";
