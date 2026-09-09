@@ -1,7 +1,7 @@
 /**
  * Golden-task schema for the evals harness.
  * JSON fixtures under `evals/golden/fixtures/` should match these shapes.
- * Expand toward ≥20 tasks by adding one JSON file per scenario.
+ * Known-bad fail-audit fixtures live under `evals/golden/negative/` with expectFail: true.
  */
 
 import type { EvalTaskKind, GraderKind } from "../types";
@@ -22,6 +22,8 @@ export interface GoldenTaskBase {
   kind: EvalTaskKind;
   description: string;
   graders: readonly GraderKind[];
+  /** Tag for fail-audit negatives: fixture must FAIL grading (see evals/golden/negative/). */
+  expectFail?: boolean;
 }
 
 export interface ClassifyUrlTask extends GoldenTaskBase {
@@ -214,6 +216,7 @@ export function isGoldenTask(value: unknown): value is GoldenTask {
     typeof task.description === "string" &&
     Array.isArray(task.graders) &&
     task.input !== undefined &&
-    task.expected !== undefined
+    task.expected !== undefined &&
+    (task.expectFail === undefined || typeof task.expectFail === "boolean")
   );
 }
