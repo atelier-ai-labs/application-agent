@@ -7,7 +7,11 @@ export type EvalTaskKind =
   | "assess_fit"
   | "field_fill"
   | "submit_policy"
-  | "groundedness";
+  | "groundedness"
+  | "field_classify"
+  | "rippling_dom"
+  | "blocker_policy"
+  | "pass_k";
 
 export interface GraderResult {
   grader: GraderKind;
@@ -34,4 +38,22 @@ export interface SuiteReport {
   averageScore: number;
   modelGraderMode: "mock" | "live";
   tasks: readonly TaskResult[];
+}
+
+/** Compact baseline artifact written by the runner for CI uploads. */
+export interface BaselineArtifact {
+  ranAt: string;
+  fixtureCount: number;
+  passedCount: number;
+  failedCount: number;
+  passRate: number;
+  averageScore: number;
+  modelGraderMode: "mock" | "live";
+  summaryLine: string;
+  tasks: readonly {
+    id: string;
+    kind: EvalTaskKind;
+    passed: boolean;
+    score: number;
+  }[];
 }
