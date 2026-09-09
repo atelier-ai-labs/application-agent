@@ -10,6 +10,7 @@ import type {
   AssessFitTask,
   GoldenTask,
   GroundednessTask,
+  PassKTask,
 } from "../golden/schema";
 import type { GraderResult } from "../types";
 
@@ -36,7 +37,7 @@ function countGroundedFacts(draftText: string, facts: readonly string[]): number
   return facts.filter((fact) => lower.includes(fact.trim().toLowerCase())).length;
 }
 
-/** Offline rubric: reward profile-fact overlap; penalize invented skills. */
+/** Offline rubric: reward profile-fact overlap; penalize invented skills/employers/years. */
 export function mockGradeGroundedness(task: GroundednessTask): GraderResult {
   const factHits = countGroundedFacts(task.input.draftText, task.input.profileFacts);
   const factScore = task.input.profileFacts.length === 0
@@ -75,6 +76,17 @@ export function mockGradeFitRubric(task: AssessFitTask): GraderResult {
   };
 }
 
+/** Pass^k: note that mock rubric is deterministic here (variance reserved for live). */
+export function mockGradePassK(task: PassKTask): GraderResult {
+  return {
+    grader: "model_rubric",
+    name: "pass_k_variance_note",
+    passed: true,
+    score: 1,
+    detail: `mock mode: deterministic nested grader is stable across k=${task.input.k}; live rubric variance not measured.`,
+  };
+}
+
 function liveUnavailable(name: string): GraderResult {
   return {
     grader: "model_rubric",
@@ -101,9 +113,14 @@ export async function runModelRubricGrader(
       return mockGradeGroundedness(task);
     case "assess_fit":
       return mockGradeFitRubric(task);
+    case "pass_k":
+      return mockGradePassK(task);
     case "classify_url":
     case "field_fill":
     case "submit_policy":
+    case "field_classify":
+    case "rippling_dom":
+    case "blocker_policy":
       return {
         grader: "model_rubric",
         name: `${task.kind}_rubric_skipped`,

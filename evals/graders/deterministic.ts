@@ -3,7 +3,11 @@
  * Offline / CI-safe: no network, no Playwright, no live ATS.
  */
 
-import { classifyJobUrl } from "../../application-agent/src/domain/jobUrlClassifier";
+import {
+  classifyJobUrl,
+  isVerifiedRipplingApplicationUrl,
+  isVerifiedRipplingHostedUrl,
+} from "../../application-agent/src/domain/jobUrlClassifier";
 import { assessFit } from "../../application-agent/src/domain/fit";
 import {
   buildDraftAnswer,
@@ -11,6 +15,16 @@ import {
 } from "../../application-agent/src/domain/answers";
 import { verifyPreparedApplication } from "../../application-agent/src/domain/policies";
 import { tailorResume } from "../../application-agent/src/domain/resume";
+import { classifyLeverApplicationField } from "../../application-agent/src/domain/leverBrowserExecutor";
+import {
+  attentionEventForCareerBlocker,
+} from "../../application-agent/src/domain/attention";
+import {
+  extractRipplingPromptFromCandidates,
+  looksLikeOpaqueToken,
+  looksLikePromptText,
+  pickNearestUniqueByDistance,
+} from "../../application-agent/automation/ripplingDomHelpers";
 import type {
   Application,
   CandidateProfile,
@@ -23,9 +37,14 @@ import type {
 } from "../../application-agent/src/domain/campaignTypes";
 import type {
   AssessFitTask,
+  BlockerPolicyTask,
   ClassifyUrlTask,
+  FieldClassifyTask,
   FieldFillTask,
   GoldenTask,
+  PassKNestedTask,
+  PassKTask,
+  RipplingDomTask,
   SubmitPolicyTask,
 } from "../golden/schema";
 import type { GraderResult } from "../types";
@@ -50,6 +69,24 @@ export function gradeClassifyUrl(task: ClassifyUrlTask): GraderResult {
     checks.push({
       ok: actual.postingIdentifier === task.expected.postingIdentifier,
       label: `postingIdentifier=${actual.postingIdentifier ?? "undefined"}`,
+    });
+  }
+  if (task.expected.verifiedHosted !== undefined) {
+    const org = task.input.verifyOrganization ?? "";
+    const posting = task.input.verifyPostingId ?? "";
+    const verified = isVerifiedRipplingHostedUrl(task.input.url, org, posting);
+    checks.push({
+      ok: verified === task.expected.verifiedHosted,
+      label: `verifiedHosted=${verified}`,
+    });
+  }
+  if (task.expected.verifiedApplication !== undefined) {
+    const org = task.input.verifyOrganization;
+    const posting = task.input.verifyPostingId;
+    const verified = isVerifiedRipplingApplicationUrl(task.input.url, org, posting);
+    checks.push({
+      ok: verified === task.expected.verifiedApplication,
+      label: `verifiedApplication=${verified}`,
     });
   }
   const passedCount = checks.filter((c) => c.ok).length;
@@ -128,6 +165,13 @@ export async function gradeFieldFill(task: FieldFillTask): Promise<GraderResult>
     checks.push({
       ok: answer?.policy === "never_auto" && answer.status === "blocked",
       label: `neverAutoBlocked:${field}=${answer?.status ?? "missing"}`,
+    });
+  }
+  for (const field of task.expected.needsInputFields ?? []) {
+    const answer = byField.get(field);
+    checks.push({
+      ok: answer?.status === "needs_input",
+      label: `needsInput:${field}=${answer?.status ?? "missing"}`,
     });
   }
 
@@ -323,6 +367,186 @@ export function gradeSubmitPolicy(task: SubmitPolicyTask): GraderResult {
   };
 }
 
+export function gradeFieldClassify(task: FieldClassifyTask): GraderResult {
+  const checks: Array<{ ok: boolean; label: string }> = [];
+  for (const field of task.input.fields) {
+    const actual = classifyLeverApplicationField({
+      id: field.id,
+      label: field.label,
+      type: field.type,
+      ...(field.section ? { section: field.section } : {}),
+      ...(field.options ? { options: field.options } : {}),
+      ...(field.questionDescriptor ? { questionDescriptor: field.questionDescriptor } : {}),
+    });
+    const expected = task.expected.classifications[field.id];
+    checks.push({
+      ok: actual === expected,
+      label: `${field.id}:${actual} (want ${expected})`,
+    });
+  }
+  const passedCount = checks.filter((c) => c.ok).length;
+  const passed = passedCount === checks.length;
+  return {
+    grader: "deterministic",
+    name: "field_classify",
+    passed,
+    score: scoreFromChecks(passedCount, checks.length),
+    detail: checks.map((c) => `${c.ok ? "PASS" : "FAIL"}:${c.label}`).join("; "),
+  };
+}
+
+export function gradeRipplingDom(task: RipplingDomTask): GraderResult {
+  const checks: Array<{ ok: boolean; label: string }> = [];
+  for (const testCase of task.input.cases) {
+    switch (testCase.type) {
+      case "prompt_candidates": {
+        const actual = extractRipplingPromptFromCandidates(testCase.candidates) ?? null;
+        checks.push({
+          ok: actual === testCase.expectedPrompt,
+          label: `${testCase.id}:prompt=${actual ?? "null"}`,
+        });
+        break;
+      }
+      case "opaque_token": {
+        const actual = looksLikeOpaqueToken(testCase.value);
+        checks.push({
+          ok: actual === testCase.expected,
+          label: `${testCase.id}:opaque=${actual}`,
+        });
+        break;
+      }
+      case "prompt_text": {
+        const actual = looksLikePromptText(testCase.value);
+        checks.push({
+          ok: actual === testCase.expected,
+          label: `${testCase.id}:promptText=${actual}`,
+        });
+        break;
+      }
+      case "nearest_unique": {
+        const actual = pickNearestUniqueByDistance(
+          testCase.anchor,
+          testCase.points,
+          testCase.marginPx,
+          testCase.maxDistancePx,
+        );
+        checks.push({
+          ok: actual === testCase.expectedIndex,
+          label: `${testCase.id}:index=${actual ?? "null"}`,
+        });
+        break;
+      }
+      default: {
+        const _exhaustive: never = testCase;
+        void _exhaustive;
+      }
+    }
+  }
+  const passedCount = checks.filter((c) => c.ok).length;
+  const passed = passedCount === checks.length && task.expected.allMustPass;
+  return {
+    grader: "deterministic",
+    name: "rippling_dom",
+    passed,
+    score: scoreFromChecks(passedCount, checks.length),
+    detail: checks.map((c) => `${c.ok ? "PASS" : "FAIL"}:${c.label}`).join("; "),
+  };
+}
+
+export function gradeBlockerPolicy(task: BlockerPolicyTask): GraderResult {
+  const generated = attentionEventForCareerBlocker({
+    campaignId: task.input.campaignId,
+    jobId: task.input.jobId,
+    blocker: task.input.blocker,
+    postingCompensation: task.input.postingCompensation,
+    createdAt: task.input.blocker.createdAt,
+    createId: (prefix) => `${prefix}-evals-1`,
+  });
+  const checks: Array<{ ok: boolean; label: string }> = [];
+  const produced = Boolean(generated);
+  checks.push({
+    ok: produced === task.expected.mustProduceAttentionEvent,
+    label: `producedEvent=${produced}`,
+  });
+  if (task.expected.mustNotSilentSkip) {
+    checks.push({
+      ok: produced,
+      label: produced ? "handoff:attention-event" : "silent-skip-forbidden",
+    });
+  }
+  if (generated && task.expected.eventType !== undefined) {
+    checks.push({
+      ok: generated.event.type === task.expected.eventType,
+      label: `eventType=${generated.event.type}`,
+    });
+  }
+  if (generated && task.expected.blockerType !== undefined) {
+    checks.push({
+      ok: generated.event.blockerType === task.expected.blockerType,
+      label: `blockerType=${generated.event.blockerType ?? "undefined"}`,
+    });
+  }
+  const passedCount = checks.filter((c) => c.ok).length;
+  const passed = passedCount === checks.length;
+  return {
+    grader: "deterministic",
+    name: "blocker_policy",
+    passed,
+    score: scoreFromChecks(passedCount, checks.length),
+    detail: checks.map((c) => `${c.ok ? "PASS" : "FAIL"}:${c.label}`).join("; "),
+  };
+}
+
+async function gradeNestedDeterministic(nested: PassKNestedTask): Promise<GraderResult> {
+  switch (nested.kind) {
+    case "assess_fit":
+      return gradeAssessFit(nested);
+    case "classify_url":
+      return gradeClassifyUrl(nested);
+    case "field_fill":
+      return gradeFieldFill(nested);
+    case "field_classify":
+      return gradeFieldClassify(nested);
+    default: {
+      const _exhaustive: never = nested;
+      return _exhaustive;
+    }
+  }
+}
+
+export async function gradePassK(task: PassKTask): Promise<GraderResult> {
+  const k = Math.max(1, Math.floor(task.input.k));
+  const runs: GraderResult[] = [];
+  for (let i = 0; i < k; i += 1) {
+    runs.push(await gradeNestedDeterministic(task.input.nested));
+  }
+  const scores = runs.map((run) => run.score);
+  const details = runs.map((run) => run.detail);
+  const allPassed = runs.every((run) => run.passed);
+  const identicalScores = scores.every((score) => score === scores[0]);
+  const identicalDetails = details.every((detail) => detail === details[0]);
+  const checks: Array<{ ok: boolean; label: string }> = [
+    { ok: allPassed, label: `allRunsPassed=${allPassed}` },
+  ];
+  if (task.expected.requireIdenticalDeterministicScores) {
+    checks.push({
+      ok: identicalScores && identicalDetails,
+      label: identicalScores && identicalDetails
+        ? `stableScore=${scores[0]} across ${k}`
+        : `unstable scores=[${scores.join(",")}]`,
+    });
+  }
+  const passedCount = checks.filter((c) => c.ok).length;
+  const passed = passedCount === checks.length;
+  return {
+    grader: "deterministic",
+    name: "pass_k",
+    passed,
+    score: scoreFromChecks(passedCount, checks.length),
+    detail: checks.map((c) => `${c.ok ? "PASS" : "FAIL"}:${c.label}`).join("; "),
+  };
+}
+
 export async function runDeterministicGrader(task: GoldenTask): Promise<GraderResult | null> {
   if (!task.graders.includes("deterministic")) return null;
   switch (task.kind) {
@@ -334,6 +558,14 @@ export async function runDeterministicGrader(task: GoldenTask): Promise<GraderRe
       return gradeFieldFill(task);
     case "submit_policy":
       return gradeSubmitPolicy(task);
+    case "field_classify":
+      return gradeFieldClassify(task);
+    case "rippling_dom":
+      return gradeRipplingDom(task);
+    case "blocker_policy":
+      return gradeBlockerPolicy(task);
+    case "pass_k":
+      return gradePassK(task);
     case "groundedness":
       return null;
     default: {

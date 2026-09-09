@@ -1,0 +1,87 @@
+{
+  "id": "16-search-remount-unique-recovery",
+  "kind": "rippling_dom",
+  "description": "Duplicate Search remount recovery: uniquely nearest control wins; ambiguous/far cases fail closed.",
+  "graders": [
+    "deterministic"
+  ],
+  "input": {
+    "cases": [
+      {
+        "id": "unique-near",
+        "type": "nearest_unique",
+        "anchor": {
+          "x": 100,
+          "y": 200
+        },
+        "points": [
+          {
+            "x": 400,
+            "y": 500
+          },
+          {
+            "x": 110,
+            "y": 205
+          },
+          {
+            "x": 300,
+            "y": 200
+          }
+        ],
+        "marginPx": 24,
+        "expectedIndex": 1
+      },
+      {
+        "id": "ambiguous-margin",
+        "type": "nearest_unique",
+        "anchor": {
+          "x": 100,
+          "y": 200
+        },
+        "points": [
+          {
+            "x": 100,
+            "y": 210
+          },
+          {
+            "x": 108,
+            "y": 205
+          }
+        ],
+        "marginPx": 24,
+        "expectedIndex": null
+      },
+      {
+        "id": "empty",
+        "type": "nearest_unique",
+        "anchor": {
+          "x": 0,
+          "y": 0
+        },
+        "points": [],
+        "marginPx": 24,
+        "expectedIndex": null
+      },
+      {
+        "id": "too-far",
+        "type": "nearest_unique",
+        "anchor": {
+          "x": 0,
+          "y": 0
+        },
+        "points": [
+          {
+            "x": 241,
+            "y": 0
+          }
+        ],
+        "marginPx": 24,
+        "maxDistancePx": 240,
+        "expectedIndex": null
+      }
+    ]
+  },
+  "expected": {
+    "allMustPass": true
+  }
+}

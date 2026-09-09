@@ -1,8 +1,9 @@
 /**
  * Evals suite runner: load golden fixtures, execute domain steps, emit pass/fail + score.
+ * Also writes evals/baseline.json for CI artifact uploads.
  */
 
-import { readdir, readFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isGoldenTask, type GoldenTask } from "./golden/schema";
@@ -12,10 +13,11 @@ import {
   runModelRubricGrader,
   type ModelGraderMode,
 } from "./graders/modelRubric";
-import type { GraderResult, SuiteReport, TaskResult } from "./types";
+import type { BaselineArtifact, GraderResult, SuiteReport, TaskResult } from "./types";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const defaultFixturesDir = path.join(here, "golden", "fixtures");
+const defaultBaselinePath = path.join(here, "baseline.json");
 
 export async function loadGoldenTasks(
   fixturesDir: string = defaultFixturesDir,
@@ -104,12 +106,49 @@ export async function runEvalSuite(options?: {
   };
 }
 
+export function toBaselineArtifact(report: SuiteReport): BaselineArtifact {
+  const passRate = report.fixtureCount === 0
+    ? 0
+    : Number((report.passedCount / report.fixtureCount).toFixed(4));
+  const summaryLine =
+    `evals baseline: fixtures=${report.fixtureCount} passed=${report.passedCount} ` +
+    `failed=${report.failedCount} passRate=${passRate} averageScore=${report.averageScore}`;
+  return {
+    ranAt: report.ranAt,
+    fixtureCount: report.fixtureCount,
+    passedCount: report.passedCount,
+    failedCount: report.failedCount,
+    passRate,
+    averageScore: report.averageScore,
+    modelGraderMode: report.modelGraderMode,
+    summaryLine,
+    tasks: report.tasks.map((task) => ({
+      id: task.id,
+      kind: task.kind,
+      passed: task.passed,
+      score: task.score,
+    })),
+  };
+}
+
+export async function writeBaselineArtifact(
+  report: SuiteReport,
+  baselinePath: string = defaultBaselinePath,
+): Promise<BaselineArtifact> {
+  const artifact = toBaselineArtifact(report);
+  await mkdir(path.dirname(baselinePath), { recursive: true });
+  await writeFile(baselinePath, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
+  return artifact;
+}
+
 export function formatSuiteReport(report: SuiteReport): string {
+  const baseline = toBaselineArtifact(report);
   const lines: string[] = [
     "=== evals harness baseline ===",
     `ranAt=${report.ranAt}`,
     `fixtures=${report.fixtureCount} passed=${report.passedCount} failed=${report.failedCount}`,
-    `averageScore=${report.averageScore} modelGrader=${report.modelGraderMode}`,
+    `passRate=${baseline.passRate} averageScore=${report.averageScore} modelGrader=${report.modelGraderMode}`,
+    baseline.summaryLine,
     "",
   ];
 

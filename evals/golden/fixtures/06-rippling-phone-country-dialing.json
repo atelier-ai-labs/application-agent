@@ -1,0 +1,62 @@
+{
+  "id": "06-rippling-phone-country-dialing",
+  "kind": "field_classify",
+  "description": "Rippling phone-country dialing-floor / typeahead options classify as location (not free_text).",
+  "graders": [
+    "deterministic"
+  ],
+  "input": {
+    "fields": [
+      {
+        "id": "phone-country-search",
+        "label": "Search",
+        "type": "select",
+        "section": "Contact",
+        "options": [
+          {
+            "label": "+1 US - United States",
+            "value": "+1"
+          },
+          {
+            "label": "+44 GB - United Kingdom",
+            "value": "+44"
+          },
+          {
+            "label": "+61 AU - Australia",
+            "value": "+61"
+          },
+          {
+            "label": "+49 DE - Germany",
+            "value": "+49"
+          },
+          {
+            "label": "+33 FR - France",
+            "value": "+33"
+          },
+          {
+            "label": "+81 JP - Japan",
+            "value": "+81"
+          },
+          {
+            "label": "+91 IN - India",
+            "value": "+91"
+          },
+          {
+            "label": "+55 BR - Brazil",
+            "value": "+55"
+          }
+        ],
+        "questionDescriptor": {
+          "promptText": "Phone country",
+          "sourceStrategy": "nearby_text",
+          "confidence": "medium"
+        }
+      }
+    ]
+  },
+  "expected": {
+    "classifications": {
+      "phone-country-search": "location"
+    }
+  }
+}
