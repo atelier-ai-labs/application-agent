@@ -1219,6 +1219,29 @@ describe("Rippling field classification regressions", () => {
     })).toBe("location");
   });
 
+  it("classifies Email address / E-mail address as contact, not location", () => {
+    expect(classifyLeverApplicationField({
+      id: "email",
+      label: "Email address",
+      type: "text",
+      questionDescriptor: {
+        promptText: "Email address",
+        sourceStrategy: "aria_labelledby",
+        confidence: "high",
+      },
+    })).toBe("contact");
+    expect(classifyLeverApplicationField({
+      id: "email-hyphen",
+      label: "E-mail address",
+      type: "text",
+      questionDescriptor: {
+        promptText: "E-mail address",
+        sourceStrategy: "aria_labelledby",
+        confidence: "high",
+      },
+    })).toBe("contact");
+  });
+
   it("classifies Search selects with international dialing options as location", () => {
     expect(looksLikeInternationalDialingOptions(dialingOptions)).toBe(true);
     expect(classifyLeverApplicationField({

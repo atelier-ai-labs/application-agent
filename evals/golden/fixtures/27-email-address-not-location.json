@@ -1,0 +1,49 @@
+{
+  "id": "27-email-address-not-location",
+  "kind": "field_classify",
+  "description": "Prompt/label \"Email address\" (and \"E-mail address\") classifies as contact, not location — bare address must not steal email.",
+  "graders": [
+    "deterministic"
+  ],
+  "input": {
+    "fields": [
+      {
+        "id": "email-address",
+        "label": "Email address",
+        "type": "text",
+        "questionDescriptor": {
+          "promptText": "Email address",
+          "sourceStrategy": "aria_labelledby",
+          "confidence": "high"
+        }
+      },
+      {
+        "id": "email-hyphen-address",
+        "label": "E-mail address",
+        "type": "text",
+        "questionDescriptor": {
+          "promptText": "E-mail address",
+          "sourceStrategy": "aria_labelledby",
+          "confidence": "high"
+        }
+      },
+      {
+        "id": "mailing-address",
+        "label": "Mailing address",
+        "type": "text",
+        "questionDescriptor": {
+          "promptText": "Mailing address",
+          "sourceStrategy": "aria_labelledby",
+          "confidence": "high"
+        }
+      }
+    ]
+  },
+  "expected": {
+    "classifications": {
+      "email-address": "contact",
+      "email-hyphen-address": "contact",
+      "mailing-address": "location"
+    }
+  }
+}

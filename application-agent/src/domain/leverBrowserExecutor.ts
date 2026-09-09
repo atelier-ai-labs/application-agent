@@ -273,6 +273,8 @@ export function classifyLeverApplicationField(
   if (hasPhrase(text, /why|interest|motivat|cover letter|tell us|anything else|additional information/)) return "free_text";
   if (factField) return factField;
   if (hasPhrase(text, /employ|employer|company|work history|job history|position held|job title|occupation|start date|end date/)) return "employment_history";
+  // Email/e-mail must win over bare "address" in location (e.g. "Email address").
+  if (hasPhrase(text, /email|e-mail/)) return "contact";
   if (hasPhrase(text, /location|city|state|country|address|postal|zip|phone country|dialing code|country code/)) return "location";
   if (hasPhrase(text, /first name|given name|last name|family name|surname|full name|email|e-mail|phone|telephone|mobile|linkedin|portfolio|website/)) return "contact";
   // Opaque widget labels with a real question prompt are treated by prompt semantics above;
