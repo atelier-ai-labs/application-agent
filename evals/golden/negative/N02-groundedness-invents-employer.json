@@ -1,0 +1,27 @@
+{
+  "id": "N02-groundedness-invents-employer",
+  "kind": "groundedness",
+  "description": "KNOWN-BAD (model_rubric): draft invents FakeCorp + 15 years not in Alex Example profile — mock must FAIL.",
+  "graders": [
+    "model_rubric"
+  ],
+  "expectFail": true,
+  "input": {
+    "draftText": "Alex Example spent 15 years at FakeCorp and Acme Stealth Startup leading AWS platforms for Example Cloud Systems.",
+    "profileFacts": [
+      "Alex Example",
+      "Example Labs",
+      "AWS"
+    ],
+    "jobTitle": "Cloud Platform Engineer",
+    "jobCompany": "Example Cloud Systems"
+  },
+  "expected": {
+    "minScore": 0.75,
+    "mustNotInventSkills": [
+      "FakeCorp",
+      "Acme Stealth Startup",
+      "15 years"
+    ]
+  }
+}
