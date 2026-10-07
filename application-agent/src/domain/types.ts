@@ -74,6 +74,10 @@ export interface CandidateIdentity {
   email: string | null;
   phone: string | null;
   location: string | null;
+  /** Optional explicit street address; never derived from preferred work location. */
+  streetAddress?: string | null;
+  /** Optional explicit postal/ZIP code; never guessed from city or state. */
+  postalCode?: string | null;
 }
 
 export interface EmploymentRecord {
@@ -167,6 +171,13 @@ export interface JobIntakeInput {
   /** Trusted structured compensation, when the source already supplied it. */
   compensation?: JobCompensation;
   isExample?: boolean;
+  /** Explicit queue selection may relax preferences, never hard safety checks. */
+  queueSelected?: boolean;
+  /** Explicit resume family selected by the queue for this posting. */
+  resumeFamily?: string;
+  /** Trusted queue metadata kept separate from the posting description. */
+  queueFit?: string;
+  queuePriority?: string;
 }
 
 export interface JobCompensation {

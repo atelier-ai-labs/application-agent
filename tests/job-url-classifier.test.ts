@@ -6,7 +6,18 @@ import {
   isVerifiedRipplingHostedUrl,
   isVerifiedRipplingApplicationUrl,
   isVerifiedWorkdayApplicationUrl,
+  isVerifiedWorkdayHostedUrl,
+  workdayPostingId,
+  isVerifiedMatlenApplicationUrl,
+  isVerifiedProtagonaApplicationUrl,
+  isVerifiedYouHiredApplicationUrl,
+  isVerifiedGustoHostedUrl,
+  isVerifiedGustoApplicationUrl,
+  gustoPostingId,
+  matlenPostingId,
+  protagonaPostingId,
   ripplingApplicationUrl,
+  youHiredPostingId,
 } from "../application-agent/src";
 
 describe("deterministic job URL classifier", () => {
@@ -80,6 +91,51 @@ describe("deterministic job URL classifier", () => {
     expect(classifyJobUrl("https://example.com/careers/greenhouse-platform-engineer").kind).toBe("custom");
   });
 
+  it("recognizes only the bounded YouHired job route for custom execution", () => {
+    const url = "https://youhired.me/job/1932919574/platform-engineer-remote?utm_source=chatgpt.com";
+    expect(classifyJobUrl(url).kind).toBe("custom");
+    expect(isVerifiedYouHiredApplicationUrl(url)).toBe(true);
+    expect(youHiredPostingId(url)).toBe("1932919574");
+    expect(isVerifiedYouHiredApplicationUrl("https://youhired.me/")).toBe(false);
+    expect(isVerifiedYouHiredApplicationUrl("https://evil.example/job/1932919574/platform-engineer-remote")).toBe(false);
+    expect(isVerifiedYouHiredApplicationUrl("https://youhired.me/job/not-a-number/platform-engineer-remote")).toBe(false);
+  });
+
+  it("recognizes only the bounded Matlen Silver posting/application route for custom execution", () => {
+    const url = "https://matlensilver.com/job/azure-engineer-60869931/?utm_source=daily-hunt";
+    expect(classifyJobUrl(url).kind).toBe("custom");
+    expect(isVerifiedMatlenApplicationUrl(url)).toBe(true);
+    expect(matlenPostingId(url)).toBe("60869931");
+    expect(isVerifiedMatlenApplicationUrl("https://matlensilver.com/jobs/")).toBe(false);
+    expect(isVerifiedMatlenApplicationUrl("https://matlensilver.com/job/azure-engineer-no-id")).toBe(false);
+    expect(isVerifiedMatlenApplicationUrl("https://evil.example/job/azure-engineer-60869931")).toBe(false);
+  });
+
+  it("recognizes only the exact current Protagona ApplyToJob route for custom execution", () => {
+    const url = "https://protagona.applytojob.com/apply/YDO63zlPbH/AWS-Cloud-Engineer?utm_source=daily-hunt";
+    expect(classifyJobUrl(url).kind).toBe("custom");
+    expect(isVerifiedProtagonaApplicationUrl(url)).toBe(true);
+    expect(protagonaPostingId(url)).toBe("YDO63zlPbH");
+    expect(isVerifiedProtagonaApplicationUrl("https://protagona.applytojob.com/")).toBe(false);
+    expect(isVerifiedProtagonaApplicationUrl("https://protagona.applytojob.com/apply/YDO63zlPbH/Other-Role")).toBe(false);
+    expect(isVerifiedProtagonaApplicationUrl("https://evil.example/apply/YDO63zlPbH/AWS-Cloud-Engineer")).toBe(false);
+  });
+
+  it("recognizes only the exact Sidekick Gusto posting and applicant form", () => {
+    const posting = "https://jobs.gusto.com/postings/sidekick-solutions-llc-cloud-engineer-ac0d6b2b-36c5-4bad-a8d2-91b69546d4ad";
+    const application = `${posting}/applicants/new?utm_source=daily-hunt`;
+
+    expect(classifyJobUrl(posting).kind).toBe("custom");
+    expect(isVerifiedGustoHostedUrl(posting)).toBe(true);
+    expect(isVerifiedGustoApplicationUrl(application)).toBe(true);
+    expect(gustoPostingId(posting)).toBe("sidekick-solutions-llc-cloud-engineer:ac0d6b2b-36c5-4bad-a8d2-91b69546d4ad");
+    expect(gustoPostingId(application)).toBe("sidekick-solutions-llc-cloud-engineer:ac0d6b2b-36c5-4bad-a8d2-91b69546d4ad");
+    expect(isVerifiedGustoHostedUrl(application)).toBe(false);
+    expect(isVerifiedGustoApplicationUrl(posting)).toBe(false);
+    expect(isVerifiedGustoApplicationUrl("https://jobs.gusto.com/postings/other-company-role-ac0d6b2b-36c5-4bad-a8d2-91b69546d4ad/applicants/new")).toBe(false);
+    expect(isVerifiedGustoApplicationUrl("https://jobs.gusto.com/postings/sidekick-solutions-llc-cloud-engineer-ac0d6b2b-36c5-4bad-a8d2-91b69546d4ad/applicants/new/other")).toBe(false);
+  });
+
   it("distinguishes a verified Ashby posting page from its application route", () => {
     const posting = "https://jobs.ashbyhq.com/Mastra/3b06208b-34fe-4dda-b409-ee3fd9305cc3";
     const application = `${posting}/application`;
@@ -88,6 +144,16 @@ describe("deterministic job URL classifier", () => {
     expect(isVerifiedAshbyHostedUrl(application, "Mastra", "3b06208b-34fe-4dda-b409-ee3fd9305cc3")).toBe(false);
     expect(isVerifiedAshbyApplicationUrl(posting, "Mastra", "3b06208b-34fe-4dda-b409-ee3fd9305cc3")).toBe(false);
     expect(isVerifiedAshbyApplicationUrl(`${posting}/application/other`, "Mastra", "3b06208b-34fe-4dda-b409-ee3fd9305cc3")).toBe(false);
+  });
+
+  it("matches Ashby organization identity case-insensitively but keeps posting UUID exact", () => {
+    const postingId = "3b06208b-34fe-4dda-b409-ee3fd9305cc3";
+    const posting = `https://jobs.ashbyhq.com/Mastra/${postingId}`;
+    const application = `https://jobs.ashbyhq.com/mastra/${postingId}/application`;
+    expect(isVerifiedAshbyHostedUrl(posting, "mastra", postingId)).toBe(true);
+    expect(isVerifiedAshbyApplicationUrl(application, "MASTRA", postingId)).toBe(true);
+    expect(isVerifiedAshbyApplicationUrl(application, "MASTRA", "3b06208b-34fe-4dda-b409-ee3fd9305cc4")).toBe(false);
+    expect(isVerifiedAshbyHostedUrl(`https://jobs.ashbyhq.com/MASTRA/${postingId.slice(0, -1)}4`, "mastra", postingId)).toBe(false);
   });
 
   it("accepts only a Workday job application route, including interactive steps", () => {
@@ -100,6 +166,15 @@ describe("deterministic job URL classifier", () => {
       "homedepot.wd5",
     )).toBe(false);
     expect(isVerifiedWorkdayApplicationUrl(applyUrl, "other-tenant")).toBe(false);
+    expect(isVerifiedWorkdayHostedUrl(applyUrl, "homedepot.wd5")).toBe(false);
+    expect(isVerifiedWorkdayHostedUrl(
+      "https://homedepot.wd5.myworkdayjobs.com/en-US/CareerDepot/job/TEXAS---VIRTUAL---TX01/Software-Engineer-II--REMOTE-_Req191434",
+      "homedepot.wd5",
+    )).toBe(true);
+    expect(workdayPostingId(applyUrl)).toBe(workdayPostingId(
+      "https://homedepot.wd5.myworkdayjobs.com/en-US/CareerDepot/job/TEXAS---VIRTUAL---TX01/Software-Engineer-II--REMOTE-_Req191434",
+    ));
+    expect(workdayPostingId("https://homedepot.wd5.myworkdayjobs.com/en-US/CareerDepot")).toBeUndefined();
   });
 
   it("returns custom for valid unknown career pages and unknown for invalid URLs", () => {

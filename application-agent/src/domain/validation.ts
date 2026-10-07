@@ -237,6 +237,8 @@ export function isCandidateProfile(value: unknown): value is CandidateProfile {
     isStringOrNull(identity.email) &&
     isStringOrNull(identity.phone) &&
     isStringOrNull(identity.location) &&
+    (identity.streetAddress === undefined || isStringOrNull(identity.streetAddress)) &&
+    (identity.postalCode === undefined || isStringOrNull(identity.postalCode)) &&
     isStringOrNull(value.location) &&
     Array.isArray(value.employmentHistory) &&
     value.employmentHistory.every(isEmploymentRecord) &&

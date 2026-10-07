@@ -17,6 +17,10 @@ export interface ApplicationExecutionRequest {
   now: string;
   /** The validated profile is supplied by the host; it is never inferred by an executor. */
   profile?: CandidateProfile;
+  /** Trusted host callback invoked immediately before an automatic final click. */
+  beforeAutomaticSubmission?: () => void | Promise<void>;
+  /** Trusted host callback records the click outcome without accepting browser proof. */
+  recordAutomaticSubmissionOutcome?: (outcome: BrowserSubmissionResult) => void | Promise<void>;
 }
 
 /** Whether an executor can only prepare a form or may return submission proof. */
@@ -90,6 +94,11 @@ export interface ApplicationFieldDescriptor {
   classification: ApplicationFieldClassification;
 }
 
+/** Grounded context used to disambiguate provider typeahead options. */
+export interface ApplicationFieldSelectionContext {
+  groundedLocation?: string;
+}
+
 export type BrowserBoundaryKind = "external_login" | "captcha" | "external_verification";
 
 export interface BrowserHumanBoundary {
@@ -105,6 +114,7 @@ export type BrowserCaptchaEvidenceCategory =
   | "no_markers"
   | "hidden_infrastructure"
   | "passive_infrastructure"
+  | "challenge_completed"
   | "visible_challenge_iframe"
   | "visible_challenge_control"
   | "explicit_challenge_text"
@@ -117,6 +127,8 @@ export interface BrowserCaptchaDiagnostics {
   visibleMarkerCount: number;
   challengeIframeCount: number;
   visibleChallengeIframeCount: number;
+  /** Count of known CAPTCHA frames exposing a checked state; no token is read. */
+  resolvedChallengeCount?: number;
   evidenceCategory: BrowserCaptchaEvidenceCategory;
 }
 
@@ -142,6 +154,8 @@ export type BrowserExecutionDiagnosticReasonCode =
   | "navigation_timeout"
   | "page_load_failed"
   | "inspection_failed"
+  | "posting_not_found"
+  | "posting_closed"
   | "unsupported_page"
   | "browser_closed"
   | "cancelled"
@@ -198,6 +212,26 @@ export class BrowserExecutionDiagnosticError extends Error {
   }
 }
 
+/** Safe page-level evidence that a previously verified posting is no longer available. */
+export interface BrowserUnavailablePage {
+  reasonCode: "posting_not_found" | "posting_closed";
+  evidence: readonly string[];
+}
+
+/**
+ * Read-only discovery result for a public listing page. Discovery may click a
+ * clearly labelled Apply control, but it never fills a form or crosses the
+ * final submission boundary.
+ */
+export type BrowserApplicationRouteDiscoveryStatus = "resolved" | "not_found" | "ambiguous" | "blocked" | "failed";
+
+export interface BrowserApplicationRouteDiscovery {
+  status: BrowserApplicationRouteDiscoveryStatus;
+  applicationUrl?: string;
+  reason?: string;
+  evidence: readonly string[];
+}
+
 /** Redacts common secret-bearing values before a short diagnostic is persisted. */
 export function safeBrowserDiagnosticMessage(error: unknown, fallback: string): string {
   const source = error instanceof Error ? error.message : typeof error === "string" ? error : fallback;
@@ -239,7 +273,7 @@ export function browserDiagnosticForError(
 /** The small browser capability surface used by the Lever domain executor and its tests. */
 export interface LeverBrowserField extends ApplicationFieldDescriptor {
   fill(value: string): Promise<void>;
-  select(value: string): Promise<void>;
+  select(value: string, context?: ApplicationFieldSelectionContext): Promise<void>;
   setChecked(value: boolean): Promise<void>;
   uploadFile(path: string): Promise<void>;
   readValue?(): Promise<string | boolean | null>;
@@ -249,14 +283,35 @@ export interface LeverBrowserField extends ApplicationFieldDescriptor {
 export interface BrowserSubmissionResult {
   clicked: boolean;
   confirmed: boolean;
+  /** Set when the page provided deterministic evidence that submission was rejected. */
+  outcome?: "confirmed" | "rejected" | "ambiguous";
+  reasonCode?: "validation-error" | "upload-error" | "server-error" | "confirmation-missing";
   externalApplicationId?: string;
   evidence: string;
+  /** Origin observed on the verified confirmation page, when available. */
+  confirmationOrigin?: string;
+  /** Full provider confirmation URL, including its success path. */
+  confirmationUrl?: string;
+  /** Visible human boundary detected after a Submit click; never retry automatically. */
+  humanBoundary?: BrowserHumanBoundary;
 }
 
 export interface LeverBrowserSession {
   navigate(url: string): Promise<void>;
   currentUrl(): string | Promise<string>;
+  /** Optional read-only check for a stale/closed posting page before form parsing. */
+  detectUnavailablePage?(): Promise<BrowserUnavailablePage | null>;
+  /** Clicks one uniquely identified public-listing Apply control and returns the resulting URL. */
+  discoverApplicationRoute?(company: string, role: string): Promise<BrowserApplicationRouteDiscovery>;
   inspectFields(): Promise<readonly LeverBrowserField[]>;
+  /** Read-only origin of the page form action, when present. */
+  formActionOrigin?(): Promise<string | null>;
+  /** Confirms the rendered page visibly names the expected company and role. */
+  verifyPageIdentity?(company: string, role: string): Promise<boolean>;
+  /** Provider-owned post-rerender verification for uploaded artifacts. */
+  verifyUploadedFile?(path: string): Promise<boolean>;
+  /** Safe bounded provider state captured when post-fill upload verification fails. */
+  uploadVerificationDiagnostics?(): string | undefined;
   detectHumanBoundary(): Promise<BrowserHumanBoundary | null>;
   hasSubmitControl(): Promise<boolean>;
   /** Clicks only the verified form Submit control and proves the resulting confirmation. */
@@ -268,6 +323,16 @@ export interface LeverBrowserSession {
     captcha?: BrowserCaptchaDiagnostics;
   };
   close(): Promise<void>;
+  /** Server-side, semantic-only human handoff capabilities. */
+  handoffScreenshot?(): Promise<Buffer>;
+  handoffControls?(): Promise<readonly BrowserHandoffControl[]>;
+  activateHandoffControl?(controlId: string, point?: { x: number; y: number }): Promise<void>;
+}
+
+export interface BrowserHandoffControl {
+  id: "captcha-frame" | "verify-human";
+  label: string;
+  bounds?: { x: number; y: number; width: number; height: number };
 }
 
 export interface LeverBrowserSessionFactory {
@@ -345,8 +410,19 @@ export interface ApplicationExecutor {
   executionMode?(request: ApplicationExecutionRequest): ApplicationExecutorMode;
   inspect?(request: ApplicationExecutionRequest): Promise<ExecutionInspection>;
   execute(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult>;
+  /**
+   * Optional action-time submission capability for an already prepared,
+   * retained browser session. Implementations must not refill or restart the
+   * form; the host supplies its own exact ready-to-submit fence.
+   */
+  submitPrepared?(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult>;
   /** Optional lifecycle hook for executors that retain an external session. */
   close?(applicationId: string): Promise<void>;
+  getHandoffBridge?(applicationId: string): {
+    screenshot(): Promise<Buffer>;
+    controls(): Promise<readonly BrowserHandoffControl[]>;
+    activate(controlId: string, point?: { x: number; y: number }): Promise<void>;
+  } | undefined;
 }
 
 export interface SimulatedApplicationExecutorOptions {

@@ -8,7 +8,7 @@ import type {
   SearchCriteria,
   SubmissionPolicy,
 } from "./campaignTypes";
-import type { FitAssessment, JobPosting } from "./types";
+import type { FitAssessment, JobPosting, ResumeFamilyId } from "./types";
 
 export interface HardFilterResult {
   decision: "pass" | "review" | "reject";
@@ -37,6 +37,19 @@ function normalized(value: string | undefined): string {
   return (value ?? "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+/**
+ * Queue metadata is human-entered and historically used both the short
+ * `agentic-ai` name and the profile's canonical label. Keep the aliasing in
+ * one place so intake and fit assessment make the same decision.
+ */
+export function canonicalQueueResumeFamily(value: string | undefined): ResumeFamilyId | undefined {
+  const key = normalized(value).replace(/[\/_-]+/g, " ").replace(/\s+/g, " ");
+  if (key === "cloud platform") return "cloud-platform";
+  if (key === "frontend software") return "frontend-software";
+  if (key === "agentic ai" || key === "ai platform agentic") return "ai-platform-agentic";
+  return undefined;
+}
+
 function matchesPhrase(value: string | undefined, phrase: string): boolean {
   const haystack = normalized(value);
   const needle = normalized(phrase);
@@ -46,6 +59,40 @@ function matchesPhrase(value: string | undefined, phrase: string): boolean {
 
 function matchingAny(value: string | undefined, choices: readonly string[]): boolean {
   return choices.some((choice) => matchesPhrase(value, choice));
+}
+
+/**
+ * A queue row may carry an explicit resume family selected for that posting.
+ * Keep this mapping deliberately narrow: it adds only the known Agentic-AI
+ * title aliases and only for an explicitly queue-selected job. The generic
+ * `AI Engineer` alias is intentionally scoped to this resume family; it lets
+ * titles such as `AI Engineer II` pass without broadening ordinary campaigns.
+ */
+export function criteriaForQueueSelection(
+  criteria: SearchCriteria,
+  queueSelected: boolean,
+  resumeFamily?: string,
+): SearchCriteria {
+  const family = canonicalQueueResumeFamily(resumeFamily);
+  if (!queueSelected || family !== "ai-platform-agentic") return criteria;
+  const additions = [
+    ...(!criteria.roleLanes.includes("forward deployed engineer") ? ["forward deployed engineer"] : []),
+    ...(!criteria.roleLanes.includes("ai engineer") ? ["ai engineer"] : []),
+  ];
+  return additions.length ? { ...criteria, roleLanes: [...criteria.roleLanes, ...additions] } : criteria;
+}
+
+function matchingLocation(value: string | undefined, choices: readonly string[]): boolean {
+  const normalizeLocation = (input: string) => normalized(input).replace(/\bunited states(?: of america)?\b|\bu\.?s\.?a?\b/g, "us");
+  const candidate = normalizeLocation(value ?? "");
+  return choices.some((choice) => candidate.includes(normalizeLocation(choice)));
+}
+
+/** True only when grounded employment fields explicitly describe non-permanent work. */
+export function isContractRole(job: Pick<JobPosting, "employmentType" | "description">): boolean {
+  const type = normalized(job.employmentType);
+  if (/\b(?:contract(?:or)?|freelance|1099|c2c|corp[ -]?to[ -]?corp|task[ -]?based)\b/.test(type)) return true;
+  return /\b(?:contract[ -]?to[ -]?hire|1099|c2c|corp[ -]?to[ -]?corp|task[ -]?based|freelance)\b/.test(normalized(job.description));
 }
 
 function matchingSeniority(value: string | undefined, choice: string): boolean {
@@ -63,6 +110,9 @@ function matchesWholeTitleTerm(value: string | undefined, term: string): boolean
 }
 
 export function applyHardFilters(job: JobPosting, criteria: SearchCriteria): HardFilterResult {
+  if (isContractRole(job)) {
+    return { decision: "reject", reason: "Contract, 1099, freelance, or task-based roles are excluded by candidate policy.", evidence: [`employment-type:${job.employmentType ?? "unspecified"}`] };
+  }
   const company = normalized(job.company);
   const excludedCompany = criteria.excludedCompanies.find((candidate) => company === normalized(candidate));
   if (excludedCompany) {
@@ -125,7 +175,7 @@ export function applyHardFilters(job: JobPosting, criteria: SearchCriteria): Har
         evidence: ["location:missing"],
       };
     }
-    if (!matchingAny(job.location, criteria.locations)) {
+    if (!matchingLocation(job.location, criteria.locations)) {
       return {
         decision: "reject",
         reason: "Posting location does not match the campaign location preference.",
@@ -272,17 +322,10 @@ export function verifyPreparedApplication(
     ));
   }
 
-  // A preparation-only browser may inspect and prepare a stretch posting even
-  // when fit flags unsupported requirements. The fit result remains unchanged;
-  // submission-capable execution still requires this policy blocker to clear.
-  if (fit?.unsupportedRequiredQualifications.length && !allowPreparationOnly) {
-    blockers.push(blocker(
-      "unknown_fact",
-      "Unsupported required qualifications",
-      "The posting contains required qualifications not supported by the verified profile.",
-      fit.unsupportedRequiredQualifications,
-    ));
-  }
+  // Unsupported requirements remain an explicit fit signal, but they are not
+  // an unresolved candidate fact. Employers decide whether a stretch applicant
+  // is viable; this gate must not turn a fit gap into a misleading Slack
+  // question or require the candidate to approve an internal policy label.
 
   blockers.push(...careerBlockerDraftsForApplication(application));
 
@@ -354,6 +397,7 @@ export function verifyPreparedApplication(
     ));
   } else if (
     (submissionPolicy.authority === "approval_required" || submissionPolicy.requireExplicitApproval) &&
+    !allowPreparationOnly &&
     !resolvedBlockerKeys.has(careerBlockerKey(blocker(
       "submission_approval",
       "Approve application execution",

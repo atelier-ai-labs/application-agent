@@ -107,7 +107,8 @@ function isBrowserExecutionDiagnostic(value: unknown): value is BrowserExecution
     (value.reasonCode === "browser_launch_failed" || value.reasonCode === "context_create_failed" ||
       value.reasonCode === "page_create_failed" || value.reasonCode === "navigation_failed" ||
       value.reasonCode === "navigation_timeout" || value.reasonCode === "page_load_failed" ||
-      value.reasonCode === "inspection_failed" || value.reasonCode === "unsupported_page" ||
+      value.reasonCode === "inspection_failed" || value.reasonCode === "posting_not_found" ||
+      value.reasonCode === "posting_closed" || value.reasonCode === "unsupported_page" ||
       value.reasonCode === "browser_closed" || value.reasonCode === "cancelled" || value.reasonCode === "unknown") &&
     (value.message === undefined || isSafeBrowserDiagnosticMessage(value.message)) &&
     (value.boundaries === undefined || isBrowserExecutionBoundaryState(value.boundaries)) &&
@@ -122,9 +123,11 @@ function isBrowserCaptchaDiagnostics(value: unknown): value is BrowserCaptchaDia
     isNonNegativeInteger(value.visibleMarkerCount) &&
     isNonNegativeInteger(value.challengeIframeCount) &&
     isNonNegativeInteger(value.visibleChallengeIframeCount) &&
+    (value.resolvedChallengeCount === undefined || isNonNegativeInteger(value.resolvedChallengeCount)) &&
     (value.evidenceCategory === "no_markers" || value.evidenceCategory === "hidden_infrastructure" || value.evidenceCategory === "passive_infrastructure" ||
       value.evidenceCategory === "visible_challenge_iframe" || value.evidenceCategory === "visible_challenge_control" ||
-      value.evidenceCategory === "explicit_challenge_text" || value.evidenceCategory === "visible_marker_ambiguous");
+      value.evidenceCategory === "explicit_challenge_text" || value.evidenceCategory === "visible_marker_ambiguous" ||
+      value.evidenceCategory === "challenge_completed");
 }
 
 function isBrowserExecutionTelemetry(value: unknown): boolean {
