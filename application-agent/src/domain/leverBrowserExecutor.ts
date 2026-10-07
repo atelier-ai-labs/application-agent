@@ -258,25 +258,31 @@ export function classifyLeverApplicationField(
   // often exposes "Search" / "textbox" / random ids as the control label).
   // Exception: unlabeled Yes/No radios keep control-only text so nearby
   // work-auth/legal prompts stay unknown_form_field human gates.
-  const text = isAmbiguousYesNoControl(field) ? fieldText(field) : inspectedPromptText(field);
+  //
+  // Short keywords carry word boundaries so substrings of unrelated words do
+  // not trip a gate ("embrace"/"trace" are not "race", "statement" is not
+  // "state", "capacity" is not "city", "advisable" is not "visa"). Underscores
+  // become spaces first because `_` is a regex word character and DOM ids such
+  // as `question_race` would otherwise fail the boundary.
+  const text = (isAmbiguousYesNoControl(field) ? fieldText(field) : inspectedPromptText(field)).replace(/_/g, " ");
   const factField = profileFactField(field);
   if (looksLikeInternationalDialingOptions(field.options)) return "location";
-  if (hasPhrase(text, /resume|cv|curriculum vitae/)) return "resume_upload";
-  if (hasPhrase(text, /demographic|gender identity|race|ethnicity|veteran|disability|voluntary self/)) return "demographic";
-  if (hasPhrase(text, /\blegal\b|attest|certif(?:y|ication)|agree to|authorize|terms|accurate and complete|sign your name for acknowledgement/)) return "legal_attestation";
+  if (hasPhrase(text, /\bresume|\bcv\b|curriculum vitae/)) return "resume_upload";
+  if (hasPhrase(text, /demographic|gender identity|\brace\b|ethnicity|veteran|disability|voluntary self/)) return "demographic";
+  if (hasPhrase(text, /\blegal\b|attest|certif(?:y|ication)|agree to|\bauthorize|\bterms\b|accurate and complete|sign your name for acknowledgement/)) return "legal_attestation";
   if (hasPhrase(text, /work authorization|authorized to work|legally authorized|right to work|eligible to work/)) return "work_authorization";
-  if (hasPhrase(text, /sponsor|visa|immigration status/)) return "sponsorship";
+  if (hasPhrase(text, /\bsponsor|\bvisas?\b|immigration status/)) return "sponsorship";
   if (hasPhrase(text, /salary|compensation|pay expectation|desired pay|desired annual compensation/)) return "salary";
-  if (hasPhrase(text, /relocat/)) return "relocation";
-  if (hasPhrase(text, /travel/)) return "travel";
-  if (hasPhrase(text, /education|degree|university|college|school|major|study/)) return "education";
-  if (hasPhrase(text, /why|interest|motivat|cover letter|tell us|anything else|additional information/)) return "free_text";
+  if (hasPhrase(text, /\brelocat/)) return "relocation";
+  if (hasPhrase(text, /\btravel/)) return "travel";
+  if (hasPhrase(text, /\beducation|\bdegree|\buniversit|\bcollege|\bschool|\bmajors?\b|\bstudy\b/)) return "education";
+  if (hasPhrase(text, /\bwhy\b|\binterest|\bmotivat|cover letter|tell us|anything else|additional information/)) return "free_text";
   if (factField) return factField;
-  if (hasPhrase(text, /employ|employer|company|work history|job history|position held|job title|occupation|start date|end date/)) return "employment_history";
+  if (hasPhrase(text, /\bemploy|\bcompan(?:y|ies)\b|work history|job history|position held|job title|occupation|start date|end date/)) return "employment_history";
   // Email/e-mail must win over bare "address" in location (e.g. "Email address").
   if (hasPhrase(text, /email|e-mail/)) return "contact";
-  if (hasPhrase(text, /location|city|state|country|address|postal|zip|phone country|dialing code|country code/)) return "location";
-  if (hasPhrase(text, /first name|given name|last name|family name|surname|full name|email|e-mail|phone|telephone|mobile|linkedin|portfolio|website/)) return "contact";
+  if (hasPhrase(text, /\blocation|\bcity\b|\bstates?\b|\bcountry\b|\baddress|\bpostal|\bzip\b|phone country|dialing code|country code/)) return "location";
+  if (hasPhrase(text, /first name|given name|last name|family name|surname|full name|email|e-mail|\bphone|\btelephone|\bmobile|\blinkedin|\bportfolio|\bwebsite/)) return "contact";
   // Opaque widget labels with a real question prompt are treated by prompt semantics above;
   // remaining long free-response prompts stay free_text rather than unknown.
   const prompt = field.questionDescriptor?.promptText?.trim();

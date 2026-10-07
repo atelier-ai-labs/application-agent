@@ -1,12 +1,12 @@
 {
-  "ranAt": "2026-09-09T02:39:44.195Z",
-  "fixtureCount": 31,
-  "passedCount": 31,
+  "ranAt": "2026-10-07T01:32:01.527Z",
+  "fixtureCount": 33,
+  "passedCount": 33,
   "failedCount": 0,
   "passRate": 1,
   "averageScore": 1,
   "modelGraderMode": "mock",
-  "summaryLine": "evals baseline: fixtures=31 passed=31 failed=0 passRate=1 averageScore=1",
+  "summaryLine": "evals baseline: fixtures=33 passed=33 failed=0 passRate=1 averageScore=1",
   "tasks": [
     {
       "id": "01-classify-lever-url",
@@ -190,6 +190,18 @@
     },
     {
       "id": "27-email-address-not-location",
+      "kind": "field_classify",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "28-substring-words-not-gated",
+      "kind": "field_classify",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "29-underscore-ids-still-gated",
       "kind": "field_classify",
       "passed": true,
       "score": 1
