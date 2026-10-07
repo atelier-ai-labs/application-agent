@@ -1,19 +1,12 @@
 import { describe, expect, it } from "vitest";
-import {
-  SlackConfigurationError,
-  resolveSlackConfig,
-} from "../application-agent/automation/slack/config";
+import { SlackConfigurationError, resolveSlackConfig } from "../application-agent/automation/slack/config";
 import {
   ACTION_ID,
   SlackNotificationAdapter,
   type SlackDiagnosticLogger,
   type SlackInteractionResult,
 } from "../application-agent/automation/slack/slackNotificationAdapter";
-import type {
-  AttentionEvent,
-  AttentionProviderDelivery,
-  PersistedAttentionEvent,
-} from "../application-agent/src/domain/attention";
+import type { AttentionEvent, AttentionProviderDelivery, PersistedAttentionEvent } from "../application-agent/src/domain/attention";
 
 const config = {
   botToken: "bot-token-fixture",
@@ -43,7 +36,10 @@ function event(status: AttentionEvent["status"] = "open"): AttentionEvent {
     question: {
       prompt: "Are you legally eligible to work in the US?",
       kind: "single_choice",
-      options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }],
+      options: [
+        { id: "yes", label: "Yes" },
+        { id: "no", label: "No" },
+      ],
     },
     blockerType: "unknown_form_field",
   };
@@ -81,10 +77,7 @@ function freeTextEvent(): AttentionEvent {
   };
 }
 
-function persistedFreeTextEvent(
-  status: AttentionEvent["status"] = "open",
-  delivery?: AttentionProviderDelivery,
-): PersistedAttentionEvent {
+function persistedFreeTextEvent(status: AttentionEvent["status"] = "open", delivery?: AttentionProviderDelivery): PersistedAttentionEvent {
   return {
     ...freeTextEvent(),
     status,
@@ -110,7 +103,11 @@ function slackResponse(actionValue = "attention-1|yes", overrides: Record<string
   };
 }
 
-function diagnosticCapture(): { infos: string[]; warnings: string[]; logger: SlackDiagnosticLogger } {
+function diagnosticCapture(): {
+  infos: string[];
+  warnings: string[];
+  logger: SlackDiagnosticLogger;
+} {
   const infos: string[] = [];
   const warnings: string[] = [];
   return {
@@ -145,9 +142,15 @@ function messageEnvelope(overrides: Record<string, unknown> = {}) {
 
 describe("Slack human-attention adapter", () => {
   it("fails safely with an explicit missing-configuration list and no token echo", () => {
-    expect(() => resolveSlackConfig({ ATELIER_SLACK_BOT_TOKEN: "bot-token-fixture-secret" })).toThrow(SlackConfigurationError);
+    expect(() =>
+      resolveSlackConfig({
+        ATELIER_SLACK_BOT_TOKEN: "bot-token-fixture-secret",
+      }),
+    ).toThrow(SlackConfigurationError);
     try {
-      resolveSlackConfig({ ATELIER_SLACK_BOT_TOKEN: "bot-token-fixture-secret" });
+      resolveSlackConfig({
+        ATELIER_SLACK_BOT_TOKEN: "bot-token-fixture-secret",
+      });
     } catch (error) {
       expect(error).toBeInstanceOf(SlackConfigurationError);
       expect((error as Error).message).toContain("ATELIER_SLACK_APP_TOKEN");
@@ -158,11 +161,12 @@ describe("Slack human-attention adapter", () => {
   it("reports only a sanitized Slack API error code without exposing the token", async () => {
     const adapter = new SlackNotificationAdapter({
       config,
-      fetcher: async () => ({
-        ok: true,
-        status: 200,
-        json: async () => ({ ok: false, error: "invalid_auth" }),
-      } as Response),
+      fetcher: async () =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: false, error: "invalid_auth" }),
+        }) as Response,
     });
 
     const failure = await adapter.start().catch((error: unknown) => error);
@@ -176,7 +180,10 @@ describe("Slack human-attention adapter", () => {
     const adapter = new SlackNotificationAdapter({
       config,
       fetcher: async (input, init) => {
-        requests.push({ url: String(input), body: typeof init?.body === "string" ? init.body : undefined });
+        requests.push({
+          url: String(input),
+          body: typeof init?.body === "string" ? init.body : undefined,
+        });
         return {
           ok: true,
           status: 200,
@@ -197,7 +204,7 @@ describe("Slack human-attention adapter", () => {
     const responses: string[] = [];
     const adapter = new SlackNotificationAdapter({
       config,
-      eventLookup: (eventId) => eventId === "attention-1" ? event() : undefined,
+      eventLookup: (eventId) => (eventId === "attention-1" ? event() : undefined),
       responseHandler: async ({ selectedOption }) => {
         responses.push(selectedOption);
         return { status: "resolved" };
@@ -213,36 +220,59 @@ describe("Slack human-attention adapter", () => {
     });
     await adapter.publishAttentionEvent(event());
 
-    const blocks = JSON.parse(requests[0]).blocks as Array<{ type: string; elements?: Array<{ action_id?: string }> }>;
+    const blocks = JSON.parse(requests[0]).blocks as Array<{
+      type: string;
+      elements?: Array<{ action_id?: string }>;
+    }>;
     const actionIds = blocks.find((block) => block.type === "actions")?.elements?.map((element) => element.action_id);
     expect(actionIds).toEqual([`${ACTION_ID}_0`, `${ACTION_ID}_1`]);
     expect(new Set(actionIds).size).toBe(2);
 
-    await expect(adapter.handleInteraction(slackResponse("attention-1|yes", {
-      actions: [{ action_id: `${ACTION_ID}_0`, value: "attention-1|yes" }],
-    }))).resolves.toEqual({ status: "resolved" });
-    await expect(adapter.handleInteraction(slackResponse("attention-1|no", {
-      actions: [{ action_id: `${ACTION_ID}_1`, value: "attention-1|no" }],
-    }))).resolves.toEqual({ status: "resolved" });
+    await expect(
+      adapter.handleInteraction(
+        slackResponse("attention-1|yes", {
+          actions: [{ action_id: `${ACTION_ID}_0`, value: "attention-1|yes" }],
+        }),
+      ),
+    ).resolves.toEqual({ status: "resolved" });
+    await expect(
+      adapter.handleInteraction(
+        slackResponse("attention-1|no", {
+          actions: [{ action_id: `${ACTION_ID}_1`, value: "attention-1|no" }],
+        }),
+      ),
+    ).resolves.toEqual({ status: "resolved" });
     expect(responses).toEqual(["yes", "no"]);
   });
 
   it("keeps the legacy action ID compatible while rejecting unscoped or mismatched generated IDs", async () => {
     const adapter = new SlackNotificationAdapter({
       config,
-      eventLookup: (eventId) => eventId === "attention-1" ? event() : undefined,
+      eventLookup: (eventId) => (eventId === "attention-1" ? event() : undefined),
       responseHandler: response(),
     });
     await expect(adapter.handleInteraction(slackResponse("attention-1|yes"))).resolves.toEqual({ status: "resolved" });
-    await expect(adapter.handleInteraction(slackResponse("attention-1|yes", {
-      actions: [{ action_id: `${ACTION_ID}_1`, value: "attention-1|yes" }],
-    }))).resolves.toEqual({ status: "rejected", reason: "invalid_option" });
-    await expect(adapter.handleInteraction(slackResponse("attention-1|yes", {
-      actions: [{ action_id: `${ACTION_ID}_x`, value: "attention-1|yes" }],
-    }))).resolves.toEqual({ status: "rejected", reason: "unexpected_action" });
-    await expect(adapter.handleInteraction(slackResponse("attention-1|yes", {
-      actions: [{ action_id: "unrelated_action", value: "attention-1|yes" }],
-    }))).resolves.toEqual({ status: "rejected", reason: "unexpected_action" });
+    await expect(
+      adapter.handleInteraction(
+        slackResponse("attention-1|yes", {
+          actions: [{ action_id: `${ACTION_ID}_1`, value: "attention-1|yes" }],
+        }),
+      ),
+    ).resolves.toEqual({ status: "rejected", reason: "invalid_option" });
+    await expect(
+      adapter.handleInteraction(
+        slackResponse("attention-1|yes", {
+          actions: [{ action_id: `${ACTION_ID}_x`, value: "attention-1|yes" }],
+        }),
+      ),
+    ).resolves.toEqual({ status: "rejected", reason: "unexpected_action" });
+    await expect(
+      adapter.handleInteraction(
+        slackResponse("attention-1|yes", {
+          actions: [{ action_id: "unrelated_action", value: "attention-1|yes" }],
+        }),
+      ),
+    ).resolves.toEqual({ status: "rejected", reason: "unexpected_action" });
   });
 
   it("publishes a bounded free-text question with a clear threaded-reply action", async () => {
@@ -262,6 +292,128 @@ describe("Slack human-attention adapter", () => {
     expect(requests[0]).toContain("What compensation do you expect for this role?");
     expect(requests[0]).toContain("Reply in this Slack thread with one grounded answer.");
     expect(requests[0]).not.toContain('"type":"actions"');
+  });
+
+  it("reannounces one buried open question as a fresh top-level message", async () => {
+    const requests: string[] = [];
+    let sequence = 1;
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        requests.push(typeof init?.body === "string" ? init.body : "");
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, ts: `1710000000.00000${sequence++}` }),
+        } as Response;
+      },
+    });
+    const original = await adapter.publishAttentionEvent(event());
+    const reannounced = await adapter.reannounceAttentionEvent(event());
+    expect(original?.messageTs).toBe("1710000000.000001");
+    expect(reannounced?.messageTs).toBe("1710000000.000002");
+    expect(JSON.parse(requests[1]).thread_ts).toBeUndefined();
+  });
+
+  it("renders a local answer draft as review material and keeps approval explicit", async () => {
+    const requests: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        requests.push(typeof init?.body === "string" ? init.body : "");
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, ts: "1710000000.000006" }),
+        } as Response;
+      },
+    });
+    await adapter.publishAttentionEvent({
+      ...freeTextEvent(),
+      question: {
+        prompt: "Tell us about a difficult technical problem you solved.",
+        kind: "free_text",
+        options: [],
+      },
+      blockerType: "subjective_answer",
+      draft: {
+        answer: "I improved service observability by adding runbooks and operational checks.",
+        evidence: ["Employment history — Platform Engineer at Example Labs"],
+        provider: "ollama",
+      },
+    });
+    expect(requests[0]).toContain("Application question:");
+    expect(requests[0]).toContain("Tell us about a difficult technical problem you solved.");
+    expect(requests[0]).toContain("Suggested answer generated locally for your review (not submitted):");
+    expect(requests[0]).toContain("I improved service observability by adding runbooks and operational checks.");
+    expect(requests[0]).toContain("Reply APPROVE to use this draft, or reply with your edited answer.");
+    expect(requests[0]).not.toContain("Your answer is");
+  });
+
+  it("updates an existing Slack attention message in place when a draft is backfilled", async () => {
+    const requests: { input: string; body: string }[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (input, init) => {
+        requests.push({ input: String(input), body: typeof init?.body === "string" ? init.body : "" });
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, ts: "1710000000.000007" }),
+        } as Response;
+      },
+    });
+    const original = {
+      ...freeTextEvent(),
+      id: "attention-backfill-1",
+      question: {
+        prompt: "Please tell us your story, what has you looking for a new role?",
+        kind: "free_text" as const,
+        options: [],
+      },
+      blockerType: "subjective_answer" as const,
+    };
+    await adapter.publishAttentionEvent(original);
+    await adapter.updateAttentionEvent({
+      ...original,
+      draft: {
+        answer: "I am looking for a role where I can keep growing as an engineer.",
+        evidence: ["Employment history — Platform Engineer at Example Labs"],
+        provider: "ollama",
+      },
+    });
+
+    expect(requests).toHaveLength(2);
+    expect(requests[0].input).toContain("chat.postMessage");
+    expect(requests[1].input).toContain("chat.update");
+    expect(requests[1].body).toContain("I am looking for a role where I can keep growing as an engineer.");
+    expect(requests[1].body).toContain("Reply APPROVE to use this draft, or reply with your edited answer.");
+    expect(requests[1].body).not.toContain("chat.postMessage");
+  });
+
+  it("keeps the exact accepted answer visible when closing an attention message", async () => {
+    const requests: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        requests.push(typeof init?.body === "string" ? init.body : "");
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, ts: "1710000000.000008" }),
+        } as Response;
+      },
+    });
+    const event = { ...freeTextEvent(), id: "attention-answer-used-1" };
+    await adapter.publishAttentionEvent(event);
+    await adapter.closeAttentionEvent({
+      ...event,
+      status: "resolved",
+      answerUsed: "I am looking for a role where I can keep growing as an engineer.",
+    });
+
+    expect(requests[1]).toContain("Answer used in application");
+    expect(requests[1]).toContain("I am looking for a role where I can keep growing as an engineer.");
   });
 
   it("labels preparation questions as Career Agent prerequisites, not employer questions", async () => {
@@ -292,7 +444,7 @@ describe("Slack human-attention adapter", () => {
     expect(requests[0]).not.toContain("Application question:");
   });
 
-  it("renders exact field labels, questions, optionality, and structured options", async () => {
+  it("keeps internal field labels out of Slack while preserving the exact question, optionality, and options", async () => {
     const requests: string[] = [];
     const adapter = new SlackNotificationAdapter({
       config,
@@ -308,7 +460,11 @@ describe("Slack human-attention adapter", () => {
     await adapter.publishAttentionEvent({
       ...event(),
       blockerType: "demographic_disclosure",
-      context: { company: "H1", role: "Data Engineer", section: "Voluntary Self-Identification" },
+      context: {
+        company: "H1",
+        role: "Data Engineer",
+        section: "Voluntary Self-Identification",
+      },
       question: {
         prompt: "What is your race or ethnicity?",
         fieldLabel: "Race / Ethnicity",
@@ -321,7 +477,7 @@ describe("Slack human-attention adapter", () => {
         ],
       },
     });
-    expect(requests[0]).toContain("Field label: Race / Ethnicity");
+    expect(requests[0]).not.toContain("Field label: Race / Ethnicity");
     expect(requests[0]).toContain("Optional field.");
     expect(requests[0]).toContain("What is your race or ethnicity?");
     expect(requests[0]).toContain("Options: Asian / Black or African American / Prefer not to answer");
@@ -334,7 +490,9 @@ describe("Slack human-attention adapter", () => {
     const adapter = new SlackNotificationAdapter({
       config,
       fetcher: async (_input, init) => {
-        requests.push({ body: typeof init?.body === "string" ? init.body : undefined });
+        requests.push({
+          body: typeof init?.body === "string" ? init.body : undefined,
+        });
         sequence += 1;
         return {
           ok: true,
@@ -344,8 +502,19 @@ describe("Slack human-attention adapter", () => {
       },
     });
     const first = freeTextEvent();
-    const second = { ...freeTextEvent(), id: "attention-free-text-2", question: { ...freeTextEvent().question!, prompt: "Why do you want this role?" } };
-    const otherApplication = { ...second, id: "attention-free-text-3", applicationId: "application-2" };
+    const second = {
+      ...freeTextEvent(),
+      id: "attention-free-text-2",
+      question: {
+        ...freeTextEvent().question!,
+        prompt: "Why do you want this role?",
+      },
+    };
+    const otherApplication = {
+      ...second,
+      id: "attention-free-text-3",
+      applicationId: "application-2",
+    };
 
     const firstDelivery = await adapter.publishAttentionEvent(first);
     const secondDelivery = await adapter.publishAttentionEvent(second);
@@ -354,11 +523,139 @@ describe("Slack human-attention adapter", () => {
     expect(JSON.parse(requests[0].body ?? "{}").thread_ts).toBeUndefined();
     expect(JSON.parse(requests[1].body ?? "{}").thread_ts).toBe("1710000000.000001");
     expect(JSON.parse(requests[2].body ?? "{}").thread_ts).toBeUndefined();
-    expect(firstDelivery).toEqual({ provider: "slack", messageTs: "1710000000.000001", channelId: "C123456" });
-    expect(secondDelivery).toEqual({ provider: "slack", messageTs: "1710000000.000002", channelId: "C123456", threadTs: "1710000000.000001" });
-    expect(otherDelivery).toEqual({ provider: "slack", messageTs: "1710000000.000003", channelId: "C123456" });
+    expect(firstDelivery).toEqual({
+      provider: "slack",
+      messageTs: "1710000000.000001",
+      channelId: "C123456",
+    });
+    expect(secondDelivery).toEqual({
+      provider: "slack",
+      messageTs: "1710000000.000002",
+      channelId: "C123456",
+      threadTs: "1710000000.000001",
+    });
+    expect(otherDelivery).toEqual({
+      provider: "slack",
+      messageTs: "1710000000.000003",
+      channelId: "C123456",
+    });
     expect(requests[1].body).toContain("Why do you want this role?");
     expect(requests[1].body).not.toContain("H1 — Data Engineer");
+  });
+
+  it("publishes CAPTCHA handoffs as one fresh top-level alert and routes DONE", async () => {
+    const requests: string[] = [];
+    const responses: string[] = [];
+    const captchaEvent: AttentionEvent = {
+      ...freeTextEvent(),
+      id: "attention-captcha-1",
+      blockerType: "captcha",
+      question: { prompt: "Verify you are human", kind: "free_text", options: [] },
+    };
+    const adapter = new SlackNotificationAdapter({
+      config,
+      eventLookup: (eventId) => eventId === captchaEvent.id ? captchaEvent : undefined,
+      responseHandler: async ({ selectedOption }) => {
+        responses.push(selectedOption);
+        return { status: "resolved" };
+      },
+      fetcher: async (_input, init) => {
+        requests.push(typeof init?.body === "string" ? init.body : "");
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000099" }) } as Response;
+      },
+      handoffUrlForApplication: async () => "https://sample.trycloudflare.com/handoff#token=redacted",
+    });
+
+    await adapter.publishAttentionEvent(captchaEvent);
+    await adapter.publishAttentionEvent(captchaEvent);
+    expect(requests).toHaveLength(1);
+    expect(JSON.parse(requests[0]).thread_ts).toBeUndefined();
+    expect(JSON.parse(requests[0]).text).toContain("reply DONE");
+    expect(JSON.parse(requests[0]).text).toContain("protected browser handoff below");
+    expect(JSON.parse(requests[0]).text).not.toContain("open local browser");
+    expect(JSON.parse(requests[0]).text).not.toContain("No interactive browser link is provided");
+    expect(JSON.parse(requests[0]).unfurl_links).toBe(false);
+    expect(JSON.parse(requests[0]).unfurl_media).toBe(false);
+
+    await adapter.handleSocketEnvelope(JSON.stringify(messageEnvelope({
+      thread_ts: "1710000000.000099",
+      text: "DONE",
+    })));
+    expect(responses).toEqual(["DONE"]);
+  });
+
+  it("does not post a human-verification alert when its configured handoff URL is unavailable", async () => {
+    const requests: string[] = [];
+    const captchaEvent: AttentionEvent = {
+      ...freeTextEvent(),
+      id: "attention-captcha-no-handoff",
+      blockerType: "captcha",
+      question: { prompt: "Verify you are human", kind: "free_text", options: [] },
+    };
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        requests.push(typeof init?.body === "string" ? init.body : "");
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000099" }) } as Response;
+      },
+      handoffUrlForApplication: async () => undefined,
+    });
+
+    await expect(adapter.publishAttentionEvent(captchaEvent)).rejects.toThrow(
+      "Slack human-verification handoff URL could not be created",
+    );
+    expect(requests).toHaveLength(0);
+  });
+
+  it("updates the handoff with an expired-session warning without claiming success", async () => {
+    const requests: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (input, init) => {
+        requests.push(`${String(input)} ${typeof init?.body === "string" ? init.body : ""}`);
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000100" }) } as Response;
+      },
+    });
+    const captchaEvent: AttentionEvent = {
+      ...freeTextEvent(),
+      id: "attention-expired-1",
+      blockerType: "captcha",
+      question: { prompt: "Verify you are human", kind: "free_text", options: [] },
+    };
+    await adapter.publishAttentionEvent(captchaEvent);
+    await adapter.publishExpiredSessionNotice(captchaEvent);
+    expect(requests[1]).toContain("chat.update");
+    expect(requests[1]).toContain("session expired");
+    expect(requests[1]).toContain("No application submission was retried");
+    expect(requests[1]).not.toContain("application received");
+  });
+
+  it("starts the next answered blocker at a fresh top-level root after a stale review", async () => {
+    const requests: Array<{ body?: string }> = [];
+    let sequence = 0;
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        requests.push({ body: typeof init?.body === "string" ? init.body : undefined });
+        sequence += 1;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, ts: `1710000000.00001${sequence}` }),
+        } as Response;
+      },
+    });
+
+    await adapter.publishAttentionEvent(freeTextEvent());
+    adapter.startFreshApplicationReview("application-1");
+    await adapter.publishAttentionEvent({
+      ...freeTextEvent(),
+      id: "attention-free-text-next",
+      question: { ...freeTextEvent().question!, prompt: "How many years of experience do you have?" },
+    });
+
+    expect(JSON.parse(requests[0].body ?? "{}").thread_ts).toBeUndefined();
+    expect(JSON.parse(requests[1].body ?? "{}").thread_ts).toBeUndefined();
   });
 
   it("communicates uncertain question context without exposing debug metadata", async () => {
@@ -406,11 +703,12 @@ describe("Slack human-attention adapter", () => {
   it("returns the Slack delivery timestamp for durable persistence", async () => {
     const adapter = new SlackNotificationAdapter({
       config,
-      fetcher: async () => ({
-        ok: true,
-        status: 200,
-        json: async () => ({ ok: true, ts: "1710000000.000011" }),
-      } as Response),
+      fetcher: async () =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, ts: "1710000000.000011" }),
+        }) as Response,
     });
     await expect(adapter.publishAttentionEvent(freeTextEvent())).resolves.toEqual({
       provider: "slack",
@@ -430,11 +728,12 @@ describe("Slack human-attention adapter", () => {
         responses.push("unexpected");
         return { status: "resolved" };
       },
-      fetcher: async () => ({
-        ok: true,
-        status: 200,
-        json: async () => ({ ok: true }),
-      } as Response),
+      fetcher: async () =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true }),
+        }) as Response,
     });
     await expect(adapter.publishAttentionEvent(freeTextEvent())).rejects.toThrow("message timestamp");
     await adapter.handleSocketEnvelope(JSON.stringify(messageEnvelope()));
@@ -446,7 +745,7 @@ describe("Slack human-attention adapter", () => {
     const responses: string[] = [];
     const adapter = new SlackNotificationAdapter({
       config,
-      eventLookup: (eventId) => eventId === "attention-1" ? event() : undefined,
+      eventLookup: (eventId) => (eventId === "attention-1" ? event() : undefined),
       responseHandler: async (attentionResponse) => {
         responses.push(attentionResponse.selectedOption);
         return { status: "resolved" };
@@ -485,19 +784,48 @@ describe("Slack human-attention adapter", () => {
       jobId: "job-1",
       blockerId: "blocker-1",
       descriptorSignature: "form:question",
-      providerDelivery: { provider: "slack", messageTs: "1710000000.000001", channelId: "C123456" },
+      providerDelivery: {
+        provider: "slack",
+        messageTs: "1710000000.000001",
+        channelId: "C123456",
+      },
       publishedAt: "2026-09-01T12:00:01.000Z",
     });
 
-    await expect(adapter.handleInteraction(slackResponse())).resolves.toEqual({ status: "resolved" });
+    await expect(adapter.handleInteraction(slackResponse())).resolves.toEqual({
+      status: "resolved",
+    });
     expect(responses).toEqual(["attention-1:yes"]);
+  });
+
+  it("routes a thread reply to a durable event when the service lookup is stale", async () => {
+    const durableEvents: PersistedAttentionEvent[] = [];
+    const responses: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      eventLookup: () => undefined,
+      persistedAttentionEventsLookup: () => durableEvents,
+      responseHandler: async ({ eventId, selectedOption }) => {
+        responses.push(`${eventId}:${selectedOption}`);
+        return { status: "resolved" };
+      },
+    });
+    durableEvents.push(persistedFreeTextEvent("open", {
+      provider: "slack",
+      messageTs: "1710000000.000003",
+      threadTs: "1710000000.000002",
+      channelId: "C123456",
+    }));
+
+    await adapter.handleSocketEnvelope(JSON.stringify(messageEnvelope({ text: "USD 150000 base salary" })));
+    expect(responses).toEqual(["attention-free-text-1:USD 150000 base salary"]);
   });
 
   it("routes an authorized free-text thread reply through the existing response core", async () => {
     const responses: string[] = [];
     const adapter = new SlackNotificationAdapter({
       config,
-      eventLookup: (eventId) => eventId === "attention-free-text-1" ? freeTextEvent() : undefined,
+      eventLookup: (eventId) => (eventId === "attention-free-text-1" ? freeTextEvent() : undefined),
       responseHandler: async (attentionResponse) => {
         responses.push(attentionResponse.selectedOption);
         return { status: "resolved" };
@@ -512,23 +840,96 @@ describe("Slack human-attention adapter", () => {
       },
     });
     await adapter.publishAttentionEvent(freeTextEvent());
-    await adapter.handleSocketEnvelope(JSON.stringify({
-      envelope_id: "envelope-free-text-1",
-      payload: {
-        type: "event_callback",
-        team_id: "T123456",
-        event: {
-          type: "message",
-          user: "U123456",
-          channel: "C123456",
-          channel_type: "group",
-          thread_ts: "1710000000.000002",
-          ts: "1710000000.000003",
-          text: "USD 150000 base salary",
+    await adapter.handleSocketEnvelope(
+      JSON.stringify({
+        envelope_id: "envelope-free-text-1",
+        payload: {
+          type: "event_callback",
+          team_id: "T123456",
+          event: {
+            type: "message",
+            user: "U123456",
+            channel: "C123456",
+            channel_type: "group",
+            thread_ts: "1710000000.000002",
+            ts: "1710000000.000003",
+            text: "USD 150000 base salary",
+          },
         },
-      },
-    }));
+      }),
+    );
     expect(responses).toEqual(["USD 150000 base salary"]);
+  });
+
+  it("routes an authorized rich-text thread reply when Slack omits top-level text", async () => {
+    const responses: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      eventLookup: (eventId) => (eventId === "attention-free-text-1" ? freeTextEvent() : undefined),
+      responseHandler: async ({ selectedOption }) => {
+        responses.push(selectedOption);
+        return { status: "resolved" };
+      },
+      fetcher: async (_input, _init) =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, ts: "1710000000.000002" }),
+        }) as Response,
+    });
+    await adapter.publishAttentionEvent(freeTextEvent());
+    await adapter.handleSocketEnvelope(
+      JSON.stringify(
+        messageEnvelope({
+          text: "",
+          blocks: [
+            {
+              type: "rich_text",
+              elements: [
+                {
+                  type: "rich_text_section",
+                  elements: [{ type: "text", text: "AWS Lambda, ECS, and S3" }],
+                },
+              ],
+            },
+            { type: "actions", elements: [{ action_id: "ignored_metadata", value: "not-an-answer" }] },
+          ],
+        }),
+      ),
+    );
+    expect(responses).toEqual(["AWS Lambda, ECS, and S3"]);
+  });
+
+  it("does not treat file or attachment metadata as a rich-text answer", async () => {
+    const responses: string[] = [];
+    const diagnostics = diagnosticCapture();
+    const adapter = new SlackNotificationAdapter({
+      config,
+      diagnosticLogger: diagnostics.logger,
+      eventLookup: () => freeTextEvent(),
+      responseHandler: async () => {
+        responses.push("unexpected");
+        return { status: "resolved" };
+      },
+      fetcher: async (_input, _init) =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, ts: "1710000000.000002" }),
+        }) as Response,
+    });
+    await adapter.publishAttentionEvent(freeTextEvent());
+    await adapter.handleSocketEnvelope(
+      JSON.stringify(
+        messageEnvelope({
+          text: "",
+          blocks: [{ type: "rich_text", elements: [{ type: "rich_text_section", elements: [{ type: "text", text: "not used" }] }] }],
+          files: [{ id: "F123" }],
+        }),
+      ),
+    );
+    expect(responses).toEqual([]);
+    expect(diagnostics.infos).toContain("ignored: message contains files or attachments");
   });
 
   it.each([
@@ -540,16 +941,17 @@ describe("Slack human-attention adapter", () => {
     const adapter = new SlackNotificationAdapter({
       config,
       diagnosticLogger: diagnostics.logger,
-      eventLookup: (eventId) => eventId === "attention-free-text-1" ? freeTextEvent() : undefined,
+      eventLookup: (eventId) => (eventId === "attention-free-text-1" ? freeTextEvent() : undefined),
       responseHandler: async (attentionResponse) => {
         responses.push(attentionResponse.selectedOption);
         return { status: "resolved" };
       },
-      fetcher: async (_input, _init) => ({
-        ok: true,
-        status: 200,
-        json: async () => ({ ok: true, ts: "1710000000.000002" }),
-      } as Response),
+      fetcher: async (_input, _init) =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, ts: "1710000000.000002" }),
+        }) as Response,
     });
     await adapter.publishAttentionEvent(freeTextEvent());
     await adapter.handleSocketEnvelope(JSON.stringify(messageEnvelope({ channel_type: channelType })));
@@ -574,11 +976,12 @@ describe("Slack human-attention adapter", () => {
         responses.push("unexpected");
         return { status: "resolved" };
       },
-      fetcher: async (_input, _init) => ({
-        ok: true,
-        status: 200,
-        json: async () => ({ ok: true, ts: "1710000000.000002" }),
-      } as Response),
+      fetcher: async (_input, _init) =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, ts: "1710000000.000002" }),
+        }) as Response,
     });
     await adapter.publishAttentionEvent(freeTextEvent());
     await adapter.handleSocketEnvelope(JSON.stringify(messageEnvelope(messageOverrides)));
@@ -595,18 +998,17 @@ describe("Slack human-attention adapter", () => {
     const adapter = new SlackNotificationAdapter({
       config,
       diagnosticLogger: diagnostics.logger,
-      eventLookup: (eventId) => eventId === "attention-free-text-1"
-        ? { ...freeTextEvent(), status: "resolved" }
-        : undefined,
+      eventLookup: (eventId) => (eventId === "attention-free-text-1" ? { ...freeTextEvent(), status: "resolved" } : undefined),
       responseHandler: async () => {
         responses.push("unexpected");
         return { status: "resolved" };
       },
-      fetcher: async (_input, _init) => ({
-        ok: true,
-        status: 200,
-        json: async () => ({ ok: true, ts: "1710000000.000002" }),
-      } as Response),
+      fetcher: async (_input, _init) =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, ts: "1710000000.000002" }),
+        }) as Response,
     });
     await adapter.publishAttentionEvent(freeTextEvent());
     await adapter.handleSocketEnvelope(JSON.stringify(messageEnvelope({ thread_ts: threadTs })));
@@ -617,11 +1019,12 @@ describe("Slack human-attention adapter", () => {
   it("correlates a thread after adapter recreation when the durable timestamp is hydrated", async () => {
     const diagnostics = diagnosticCapture();
     const responses: string[] = [];
-    const fetcher = async (_input: RequestInfo | URL, _init?: RequestInit) => ({
-      ok: true,
-      status: 200,
-      json: async () => ({ ok: true, ts: "1710000000.000002" }),
-    } as Response);
+    const fetcher = async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      ({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, ts: "1710000000.000002" }),
+      }) as Response;
     const first = new SlackNotificationAdapter({ config, fetcher });
     const delivery = await first.publishAttentionEvent(freeTextEvent());
     expect(delivery).toBeDefined();
@@ -694,7 +1097,7 @@ describe("Slack human-attention adapter", () => {
     const responses: string[] = [];
     const adapter = new SlackNotificationAdapter({
       config,
-      eventLookup: (eventId) => eventId === second.id ? second : undefined,
+      eventLookup: (eventId) => (eventId === second.id ? second : undefined),
       responseHandler: async (attentionResponse) => {
         responses.push(attentionResponse.eventId);
         return { status: "resolved" };
@@ -709,13 +1112,24 @@ describe("Slack human-attention adapter", () => {
       },
     });
     adapter.hydratePublishedAttentionEvents([
-      { ...persistedFreeTextEvent("resolved", firstDelivery), applicationId: "application-1" },
-      { ...persistedFreeTextEvent("open", secondDelivery), id: second.id, applicationId: "application-1" },
+      {
+        ...persistedFreeTextEvent("resolved", firstDelivery),
+        applicationId: "application-1",
+      },
+      {
+        ...persistedFreeTextEvent("open", secondDelivery),
+        id: second.id,
+        applicationId: "application-1",
+      },
     ]);
     await adapter.handleSocketEnvelope(JSON.stringify(messageEnvelope({ thread_ts: "1710000000.000041" })));
     expect(responses).toEqual([second.id]);
 
-    const third = { ...second, id: "attention-free-text-3", question: { ...second.question!, prompt: "What is your notice period?" } };
+    const third = {
+      ...second,
+      id: "attention-free-text-3",
+      question: { ...second.question!, prompt: "What is your notice period?" },
+    };
     const thirdDelivery = await adapter.publishAttentionEvent(third);
     expect(JSON.parse(requests[0]).thread_ts).toBe("1710000000.000041");
     expect(thirdDelivery).toMatchObject({ threadTs: "1710000000.000041" });
@@ -742,7 +1156,10 @@ describe("Slack human-attention adapter", () => {
     const olderLegacy = {
       ...legacy,
       id: "attention-free-text-legacy-2",
-      providerDelivery: { ...legacy.providerDelivery!, messageTs: "1710000000.000060" },
+      providerDelivery: {
+        ...legacy.providerDelivery!,
+        messageTs: "1710000000.000060",
+      },
     } satisfies PersistedAttentionEvent;
     const threaded = {
       ...persistedFreeTextEvent("resolved", {
@@ -756,11 +1173,44 @@ describe("Slack human-attention adapter", () => {
     } satisfies PersistedAttentionEvent;
     adapter.hydratePublishedAttentionEvents([olderLegacy, legacy, threaded]);
 
-    const next = { ...freeTextEvent(), id: "attention-free-text-next", applicationId: legacy.applicationId };
+    const next = {
+      ...freeTextEvent(),
+      id: "attention-free-text-next",
+      applicationId: legacy.applicationId,
+    };
     const delivery = await adapter.publishAttentionEvent(next);
 
     expect(JSON.parse(requests[0]).thread_ts).toBe("1710000000.000062");
     expect(delivery).toMatchObject({ threadTs: "1710000000.000062" });
+  });
+
+  it("starts a fresh top-level root after stale history and correlates later replies to it", async () => {
+    const requests: string[] = [];
+    let sequence = 70;
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        requests.push(typeof init?.body === "string" ? init.body : "");
+        sequence += 1;
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: `1710000000.0000${sequence}` }) } as Response;
+      },
+    });
+    const historical = persistedFreeTextEvent("resolved", {
+      provider: "slack",
+      messageTs: "1710000000.000061",
+      threadTs: "1710000000.000062",
+      channelId: "C123456",
+    });
+    adapter.hydratePublishedAttentionEvents([historical]);
+    adapter.startFreshApplicationReview("application-1");
+
+    const first = await adapter.publishAttentionEvent({ ...freeTextEvent(), id: "attention-fresh-1" });
+    const second = await adapter.publishAttentionEvent({ ...freeTextEvent(), id: "attention-fresh-2" });
+
+    expect(JSON.parse(requests[0]).thread_ts).toBeUndefined();
+    expect(first).toMatchObject({ messageTs: "1710000000.000071", channelId: "C123456" });
+    expect(JSON.parse(requests[1]).thread_ts).toBe("1710000000.000071");
+    expect(second).toMatchObject({ threadTs: "1710000000.000071", channelId: "C123456" });
   });
 
   it("fails safely when one application thread has multiple active blockers", async () => {
@@ -782,7 +1232,8 @@ describe("Slack human-attention adapter", () => {
     const adapter = new SlackNotificationAdapter({
       config,
       diagnosticLogger: diagnostics.logger,
-      eventLookup: (eventId) => eventId === first.id ? freeTextEvent() : eventId === second.id ? { ...freeTextEvent(), id: second.id } : undefined,
+      eventLookup: (eventId) =>
+        eventId === first.id ? freeTextEvent() : eventId === second.id ? { ...freeTextEvent(), id: second.id } : undefined,
       responseHandler: async () => ({ status: "resolved" }),
     });
     adapter.hydratePublishedAttentionEvents([first, second]);
@@ -802,11 +1253,13 @@ describe("Slack human-attention adapter", () => {
         return { status: "resolved" };
       },
     });
-    adapter.hydratePublishedAttentionEvents([persistedFreeTextEvent(status, {
-      provider: "slack",
-      messageTs: "1710000000.000002",
-      channelId: "C123456",
-    })]);
+    adapter.hydratePublishedAttentionEvents([
+      persistedFreeTextEvent(status, {
+        provider: "slack",
+        messageTs: "1710000000.000002",
+        channelId: "C123456",
+      }),
+    ]);
     await adapter.handleSocketEnvelope(JSON.stringify(messageEnvelope()));
     expect(responses).toEqual([]);
     expect(diagnostics.infos).toContain("ignored: unmatched thread");
@@ -829,7 +1282,8 @@ describe("Slack human-attention adapter", () => {
     } satisfies PersistedAttentionEvent;
     const adapter = new SlackNotificationAdapter({
       config,
-      eventLookup: (eventId) => eventId === first.id ? freeTextEvent() : eventId === second.id ? { ...freeTextEvent(), id: second.id } : undefined,
+      eventLookup: (eventId) =>
+        eventId === first.id ? freeTextEvent() : eventId === second.id ? { ...freeTextEvent(), id: second.id } : undefined,
       responseHandler: async (attentionResponse) => {
         responses.push(attentionResponse.eventId);
         return { status: "resolved" };
@@ -852,7 +1306,13 @@ describe("Slack human-attention adapter", () => {
     });
     collisionAdapter.hydratePublishedAttentionEvents([
       first,
-      { ...second, providerDelivery: { ...second.providerDelivery!, messageTs: first.providerDelivery!.messageTs } },
+      {
+        ...second,
+        providerDelivery: {
+          ...second.providerDelivery!,
+          messageTs: first.providerDelivery!.messageTs,
+        },
+      },
     ]);
     await collisionAdapter.handleSocketEnvelope(JSON.stringify(messageEnvelope({ thread_ts: first.providerDelivery!.messageTs })));
     expect(responses).toEqual([first.id, second.id]);
@@ -880,11 +1340,12 @@ describe("Slack human-attention adapter", () => {
       diagnosticLogger: diagnostics.logger,
       eventLookup: () => freeTextEvent(),
       responseHandler: async () => ({ status: "resolved" }),
-      fetcher: async (_input, _init) => ({
-        ok: true,
-        status: 200,
-        json: async () => ({ ok: true, ts: "1710000000.000002" }),
-      } as Response),
+      fetcher: async (_input, _init) =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, ts: "1710000000.000002" }),
+        }) as Response,
     });
     await adapter.publishAttentionEvent(freeTextEvent());
     await adapter.handleSocketEnvelope(JSON.stringify(messageEnvelope({ text: privateResponse })));
@@ -915,22 +1376,34 @@ describe("Slack human-attention adapter", () => {
 
   it("acks Socket Mode envelopes and routes only interactive block actions", async () => {
     const sent: string[] = [];
-    let socket: { onopen?: () => void; onmessage?: (message: { data: unknown }) => void; onerror?: (event: unknown) => void; onclose?: () => void; send(data: string): void; close(): void } | undefined;
+    let socket:
+      | {
+          onopen?: () => void;
+          onmessage?: (message: { data: unknown }) => void;
+          onerror?: (event: unknown) => void;
+          onclose?: () => void;
+          send(data: string): void;
+          close(): void;
+        }
+      | undefined;
     const adapter = new SlackNotificationAdapter({
       config,
       responseHandler: response(),
-      fetcher: async () => ({
-        ok: true,
-        status: 200,
-        json: async () => ({ ok: true, url: "wss://slack.test/socket" }),
-      } as Response),
+      fetcher: async () =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, url: "wss://slack.test/socket" }),
+        }) as Response,
       webSocketFactory: () => {
         const nextSocket = {
           onopen: undefined as (() => void) | undefined,
           onmessage: undefined as ((message: { data: unknown }) => void) | undefined,
           onerror: undefined as ((event: unknown) => void) | undefined,
           onclose: undefined as (() => void) | undefined,
-          send: (data: string) => { sent.push(data); },
+          send: (data: string) => {
+            sent.push(data);
+          },
           close: () => undefined,
         };
         socket = nextSocket;
@@ -957,12 +1430,83 @@ describe("Slack human-attention adapter", () => {
       diagnosticLogger: diagnostics.logger,
     });
 
-    await adapter.handleSocketEnvelope(JSON.stringify({
-      type: "disconnect",
-      reason: "refresh_requested",
-    }));
+    await adapter.handleSocketEnvelope(
+      JSON.stringify({
+        type: "disconnect",
+        reason: "refresh_requested",
+      }),
+    );
 
     expect(diagnostics.warnings).toEqual([]);
     expect(diagnostics.infos).toContain("received Socket Mode disconnect (refresh_requested)");
+  });
+
+  it("reconnects after Slack closes the Socket Mode connection", async () => {
+    const diagnostics = diagnosticCapture();
+    let socketCount = 0;
+    const sockets: Array<{ onopen?: () => void; onerror?: (event: unknown) => void; onclose?: () => void; send(data: string): void; close(): void }> = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      diagnosticLogger: diagnostics.logger,
+      socketReconnectDelayMs: 1,
+      fetcher: async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, url: "wss://slack.test/socket" }),
+      }) as Response,
+      webSocketFactory: () => {
+        socketCount += 1;
+        const socket = {
+          onopen: undefined as (() => void) | undefined,
+          onerror: undefined as ((event: unknown) => void) | undefined,
+          onclose: undefined as (() => void) | undefined,
+          send: () => undefined,
+          close: () => undefined,
+        };
+        sockets.push(socket);
+        queueMicrotask(() => socket.onopen?.());
+        return socket;
+      },
+    });
+
+    await adapter.start();
+    sockets[0]?.onclose?.();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(socketCount).toBe(2);
+    expect(diagnostics.warnings).toContain("Slack Socket Mode connection closed; reconnecting.");
+    adapter.stop();
+  });
+
+  it("reconnects when Slack reports an established-socket error or disconnect envelope", async () => {
+    let socketCount = 0;
+    const sockets: Array<{ onopen?: () => void; onerror?: (event: unknown) => void; onclose?: () => void; send(data: string): void; close(): void }> = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      socketReconnectDelayMs: 1,
+      fetcher: async () => ({ ok: true, status: 200, json: async () => ({ ok: true, url: "wss://slack.test/socket" }) }) as Response,
+      webSocketFactory: () => {
+        socketCount += 1;
+        const socket = {
+          onopen: undefined as (() => void) | undefined,
+          onerror: undefined as ((event: unknown) => void) | undefined,
+          onclose: undefined as (() => void) | undefined,
+          send: () => undefined,
+          close: () => undefined,
+        };
+        sockets.push(socket);
+        queueMicrotask(() => socket.onopen?.());
+        return socket;
+      },
+    });
+
+    await adapter.start();
+    sockets[0]?.onerror?.(new Error("socket reset"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(socketCount).toBe(2);
+
+    await adapter.handleSocketEnvelope(JSON.stringify({ type: "disconnect", reason: "refresh_requested" }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(socketCount).toBe(3);
+    adapter.stop();
   });
 });
