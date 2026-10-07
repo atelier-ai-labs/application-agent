@@ -1,0 +1,16 @@
+{
+  "id": "24-classify-greenhouse-url",
+  "kind": "classify_url",
+  "description": "Greenhouse hosted URL classification (board + numeric posting id).",
+  "graders": [
+    "deterministic"
+  ],
+  "input": {
+    "url": "https://boards.greenhouse.io/examplecorp/jobs/1234567"
+  },
+  "expected": {
+    "kind": "greenhouse",
+    "siteIdentifier": "examplecorp",
+    "postingIdentifier": "1234567"
+  }
+}

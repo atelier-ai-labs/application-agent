@@ -1,0 +1,43 @@
+{
+  "id": "14-captcha-blocker-handoff",
+  "kind": "blocker_policy",
+  "description": "CAPTCHA active challenge becomes needs_input attention handoff (not silent skip).",
+  "graders": [
+    "deterministic"
+  ],
+  "input": {
+    "campaignId": "evals-campaign",
+    "jobId": "evals-job-captcha",
+    "blocker": {
+      "id": "blocker-captcha-1",
+      "kind": "captcha",
+      "unit": "submission",
+      "questionProvenance": "ATS_FORM",
+      "field": "captcha-challenge",
+      "question": "Complete the CAPTCHA challenge to continue this application.",
+      "reason": "An active CAPTCHA challenge requires human completion; the agent must not skip or guess.",
+      "evidence": [
+        "executor:rippling-browser",
+        "boundary:captcha",
+        "captcha-state:active_challenge",
+        "question-prompt:Complete the CAPTCHA challenge to continue this application.",
+        "field-required:true"
+      ],
+      "resumeAfterHuman": true,
+      "context": {
+        "jobId": "evals-job-captcha",
+        "applicationId": "evals-application-captcha",
+        "company": "Example Cloud Systems",
+        "role": "Cloud Platform Engineer"
+      },
+      "status": "open",
+      "createdAt": "2026-09-08T12:00:00.000Z"
+    }
+  },
+  "expected": {
+    "mustProduceAttentionEvent": true,
+    "eventType": "needs_input",
+    "blockerType": "captcha",
+    "mustNotSilentSkip": true
+  }
+}

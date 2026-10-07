@@ -1,0 +1,14 @@
+{
+  "id": "26-malformed-posting-url",
+  "kind": "classify_url",
+  "description": "Malformed posting URL classifies as unknown (not forced into an ATS).",
+  "graders": [
+    "deterministic"
+  ],
+  "input": {
+    "url": "not a URL"
+  },
+  "expected": {
+    "kind": "unknown"
+  }
+}

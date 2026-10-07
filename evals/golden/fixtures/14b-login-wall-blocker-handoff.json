@@ -1,0 +1,42 @@
+{
+  "id": "14b-login-wall-blocker-handoff",
+  "kind": "blocker_policy",
+  "description": "External login wall becomes needs_input handoff (not silent skip).",
+  "graders": [
+    "deterministic"
+  ],
+  "input": {
+    "campaignId": "evals-campaign",
+    "jobId": "evals-job-login",
+    "blocker": {
+      "id": "blocker-login-1",
+      "kind": "external_login",
+      "unit": "external",
+      "questionProvenance": "ATS_FORM",
+      "field": "login-wall",
+      "question": "Sign in to continue this application on the employer site.",
+      "reason": "An external login wall requires the candidate; the agent must hand off.",
+      "evidence": [
+        "executor:rippling-browser",
+        "boundary:external_login",
+        "question-prompt:Sign in to continue this application on the employer site.",
+        "field-required:true"
+      ],
+      "resumeAfterHuman": true,
+      "context": {
+        "jobId": "evals-job-login",
+        "applicationId": "evals-application-login",
+        "company": "Example Cloud Systems",
+        "role": "Cloud Platform Engineer"
+      },
+      "status": "open",
+      "createdAt": "2026-09-08T12:00:00.000Z"
+    }
+  },
+  "expected": {
+    "mustProduceAttentionEvent": true,
+    "eventType": "needs_input",
+    "blockerType": "external_login",
+    "mustNotSilentSkip": true
+  }
+}

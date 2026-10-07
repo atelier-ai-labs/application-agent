@@ -1,0 +1,27 @@
+{
+  "id": "09b-salary-field-classify",
+  "kind": "field_classify",
+  "description": "Desired compensation prompt classifies as salary (not free_text invent).",
+  "graders": [
+    "deterministic"
+  ],
+  "input": {
+    "fields": [
+      {
+        "id": "opaque-salary",
+        "label": "abc12XYZ99",
+        "type": "text",
+        "questionDescriptor": {
+          "promptText": "What are your salary expectations?",
+          "sourceStrategy": "nearby_text",
+          "confidence": "high"
+        }
+      }
+    ]
+  },
+  "expected": {
+    "classifications": {
+      "opaque-salary": "salary"
+    }
+  }
+}

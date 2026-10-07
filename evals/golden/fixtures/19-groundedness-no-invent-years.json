@@ -1,0 +1,26 @@
+{
+  "id": "19-groundedness-no-invent-years",
+  "kind": "groundedness",
+  "description": "Cover/answer does not invent years of experience beyond profile facts.",
+  "graders": [
+    "model_rubric"
+  ],
+  "input": {
+    "draftText": "Alex Example built AWS and Kubernetes workflows at Example Labs for the Cloud Platform Engineer role.",
+    "profileFacts": [
+      "Alex Example",
+      "Example Labs",
+      "AWS"
+    ],
+    "jobTitle": "Cloud Platform Engineer",
+    "jobCompany": "Example Cloud Systems"
+  },
+  "expected": {
+    "minScore": 0.66,
+    "mustNotInventSkills": [
+      "15 years",
+      "20 years of experience",
+      "decade-plus tenure"
+    ]
+  }
+}

@@ -1,0 +1,102 @@
+{
+  "id": "04-field-fill-policies",
+  "kind": "field_fill",
+  "description": "Auto fields resolve from profile; never_auto demographic/legal stay blocked.",
+  "graders": ["deterministic"],
+  "input": {
+    "job": {
+      "company": "Example Cloud Systems",
+      "title": "Cloud Platform Engineer",
+      "description": "Platform role used only for answer-policy evals.",
+      "requiredSkills": ["AWS", "Kubernetes", "Python"],
+      "preferredSkills": ["Terraform"],
+      "capturedAt": "2026-09-08T12:00:00.000Z"
+    },
+    "profile": {
+      "schemaVersion": "0.1",
+      "id": "evals-alex-field-fill",
+      "profileKind": "example",
+      "identity": {
+        "fullName": "Alex Example",
+        "email": "alex.example@example.com",
+        "phone": "+1 555 0100",
+        "location": "Example City, US"
+      },
+      "location": "Example City, US",
+      "employmentHistory": [
+        {
+          "id": "emp-example-labs",
+          "employer": "Example Labs",
+          "title": "Platform Engineer",
+          "startDate": "2022-01",
+          "endDate": "2025-06",
+          "location": "Example City, US",
+          "bullets": ["Operated AWS and Kubernetes platforms."],
+          "verifiedSkills": ["AWS", "Kubernetes", "Python", "Terraform"],
+          "provenance": "evals-fixture"
+        }
+      ],
+      "education": [],
+      "skills": ["AWS", "Kubernetes", "Python", "Terraform"],
+      "projects": [],
+      "certifications": [],
+      "workPreferences": {
+        "remote": "Open to remote roles",
+        "relocation": null,
+        "travel": null
+      },
+      "workAuthorization": {
+        "status": null,
+        "countries": [],
+        "sponsorshipRequired": null
+      },
+      "resumeFamilies": [
+        {
+          "id": "cloud-platform",
+          "label": "Cloud / Platform",
+          "summary": "Platform engineer focused on reliable cloud systems.",
+          "focusKeywords": ["cloud", "platform", "kubernetes", "aws"],
+          "experienceIds": ["emp-example-labs"],
+          "projectIds": []
+        },
+        {
+          "id": "frontend-software",
+          "label": "Frontend / Software",
+          "summary": "Software engineer focused on clear product interfaces.",
+          "focusKeywords": ["frontend", "react", "typescript"],
+          "experienceIds": ["emp-example-labs"],
+          "projectIds": []
+        },
+        {
+          "id": "ai-platform-agentic",
+          "label": "AI Platform / Agentic",
+          "summary": "Engineer focused on grounded AI workflows.",
+          "focusKeywords": ["ai", "agentic", "llm"],
+          "experienceIds": ["emp-example-labs"],
+          "projectIds": []
+        }
+      ],
+      "answerPolicies": {
+        "name": "auto",
+        "email": "auto",
+        "phone": "auto",
+        "location": "auto",
+        "employment_history": "auto",
+        "verified_skills": "auto",
+        "why_company": "draft_review",
+        "cover_letter": "draft_review",
+        "salary_expectations": "ask",
+        "relocation": "ask",
+        "travel": "ask",
+        "sponsorship": "ask",
+        "demographic_disclosure": "never_auto",
+        "legal_attestations": "never_auto"
+      },
+      "approvedReusableAnswers": {}
+    }
+  },
+  "expected": {
+    "autoFieldsResolved": ["name", "email", "phone", "location"],
+    "neverAutoBlocked": ["demographic_disclosure", "legal_attestations"]
+  }
+}

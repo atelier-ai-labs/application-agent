@@ -1,0 +1,27 @@
+{
+  "id": "10-linkedin-url-classification",
+  "kind": "field_classify",
+  "description": "LinkedIn URL field classifies as linkedin profile fact.",
+  "graders": [
+    "deterministic"
+  ],
+  "input": {
+    "fields": [
+      {
+        "id": "linkedin-url",
+        "label": "LinkedIn Profile",
+        "type": "text",
+        "questionDescriptor": {
+          "promptText": "LinkedIn URL",
+          "sourceStrategy": "aria_labelledby",
+          "confidence": "high"
+        }
+      }
+    ]
+  },
+  "expected": {
+    "classifications": {
+      "linkedin-url": "linkedin"
+    }
+  }
+}

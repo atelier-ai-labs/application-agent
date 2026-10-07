@@ -1,0 +1,24 @@
+{
+  "id": "20-groundedness-work-auth",
+  "kind": "groundedness",
+  "description": "Answer grounded for work authorization using profile facts only.",
+  "graders": [
+    "model_rubric"
+  ],
+  "input": {
+    "draftText": "Alex Example is Authorized to work in the US and does not require sponsorship.",
+    "profileFacts": [
+      "Alex Example",
+      "Authorized to work in the US"
+    ],
+    "jobTitle": "Cloud Platform Engineer",
+    "jobCompany": "Example Cloud Systems"
+  },
+  "expected": {
+    "minScore": 0.9,
+    "mustNotInventSkills": [
+      "Canadian citizenship",
+      "EU Blue Card"
+    ]
+  }
+}

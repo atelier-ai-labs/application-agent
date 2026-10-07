@@ -1,0 +1,16 @@
+{
+  "id": "12-locale-vs-org-slug",
+  "kind": "classify_url",
+  "description": "Two-letter org slug /us/jobs/... is org identity, not a locale prefix.",
+  "graders": [
+    "deterministic"
+  ],
+  "input": {
+    "url": "https://ats.rippling.com/us/jobs/posting-123/apply"
+  },
+  "expected": {
+    "kind": "rippling",
+    "siteIdentifier": "us",
+    "postingIdentifier": "posting-123"
+  }
+}

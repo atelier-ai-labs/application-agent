@@ -1,0 +1,198 @@
+{
+  "ranAt": "2026-09-09T02:39:44.195Z",
+  "fixtureCount": 31,
+  "passedCount": 31,
+  "failedCount": 0,
+  "passRate": 1,
+  "averageScore": 1,
+  "modelGraderMode": "mock",
+  "summaryLine": "evals baseline: fixtures=31 passed=31 failed=0 passRate=1 averageScore=1",
+  "tasks": [
+    {
+      "id": "01-classify-lever-url",
+      "kind": "classify_url",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "02-fit-strong-cloud",
+      "kind": "assess_fit",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "03-submit-never-auto",
+      "kind": "submit_policy",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "04-field-fill-policies",
+      "kind": "field_fill",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "05-groundedness-mock",
+      "kind": "groundedness",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "06-rippling-phone-country-dialing",
+      "kind": "field_classify",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "07-rippling-location-field",
+      "kind": "field_classify",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "08-opaque-custom-prompt-extraction",
+      "kind": "rippling_dom",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "09-salary-needs-input-not-invent",
+      "kind": "field_fill",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "09b-salary-field-classify",
+      "kind": "field_classify",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "10-linkedin-url-classification",
+      "kind": "field_classify",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "11-legal-attestation-classification",
+      "kind": "field_classify",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "12-locale-vs-org-slug",
+      "kind": "classify_url",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "12b-locale-prefix-stripped",
+      "kind": "classify_url",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "13-rippling-url-identity-match",
+      "kind": "classify_url",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "13b-rippling-url-identity-mismatch",
+      "kind": "classify_url",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "14-captcha-blocker-handoff",
+      "kind": "blocker_policy",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "14b-login-wall-blocker-handoff",
+      "kind": "blocker_policy",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "15-greenhouse-lever-prepare-field-map",
+      "kind": "field_classify",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "16-search-remount-unique-recovery",
+      "kind": "rippling_dom",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "17-fit-low-mismatch",
+      "kind": "assess_fit",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "18-groundedness-no-invent-employers",
+      "kind": "groundedness",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "19-groundedness-no-invent-years",
+      "kind": "groundedness",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "20-groundedness-work-auth",
+      "kind": "groundedness",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "21-groundedness-salary-band",
+      "kind": "groundedness",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "22-needs-input-missing-profile-fact",
+      "kind": "field_fill",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "23-pass-k-stability-smoke",
+      "kind": "pass_k",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "24-classify-greenhouse-url",
+      "kind": "classify_url",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "25-fit-empty-jd-skills",
+      "kind": "assess_fit",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "26-malformed-posting-url",
+      "kind": "classify_url",
+      "passed": true,
+      "score": 1
+    },
+    {
+      "id": "27-email-address-not-location",
+      "kind": "field_classify",
+      "passed": true,
+      "score": 1
+    }
+  ]
+}
