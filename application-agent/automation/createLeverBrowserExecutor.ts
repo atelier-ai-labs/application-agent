@@ -7,7 +7,7 @@ import { isUsableResumeArtifact } from "./resume/resumeArtifact";
 
 export interface CreatePlaywrightLeverExecutorOptions extends PlaywrightLeverBrowserOptions {
   /** The existing browser policy can target a supported ATS or infer a verified destination. */
-  provider?: "lever" | "greenhouse" | "rippling" | "ashby" | "workday" | "auto";
+  provider?: "lever" | "greenhouse" | "rippling" | "ashby" | "workday" | "youhired" | "matlensilver" | "protagona" | "gusto" | "auto";
   resumePaths?: LeverBrowserExecutorOptions["resumePaths"];
   now?: LeverBrowserExecutorOptions["now"];
   allowedFieldClassifications?: LeverBrowserExecutorOptions["allowedFieldClassifications"];
