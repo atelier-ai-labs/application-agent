@@ -52,6 +52,7 @@ import {
   ripplingApplicationUrl,
 } from "./jobUrlClassifier";
 import { monotonicNow } from "./executionTrace";
+import { isReusableAnswer } from "./answerBank";
 
 export interface LeverBrowserExecutorOptions {
   sessionFactory: LeverBrowserSessionFactory;
@@ -674,7 +675,59 @@ function resolvedCareerValue(
   const exact = candidates.find((blocker) => blocker.field === field.id);
   if (exact && careerBlockerMatchesField(exact, field)) return exact.value;
   const byQuestion = candidates.find((blocker) => normalized(blocker.question) === normalized(field.label));
-  return byQuestion && careerBlockerMatchesField(byQuestion, field) ? byQuestion.value : undefined;
+  if (byQuestion && careerBlockerMatchesField(byQuestion, field)) return byQuestion.value;
+  return priorAnswerValue(field, request);
+}
+
+/**
+ * Strict question-identity match for cross-job reuse. Unlike
+ * `careerBlockerMatchesField` (which resumes the same job and tolerates
+ * Greenhouse hiding its options on resume), this demands that prompt, section
+ * and option set all agree, and that both sides agree on whether the control
+ * has options at all. Field ids are never compared: they differ per posting.
+ */
+function priorAnswerMatchesField(blocker: CareerBlocker, field: ApplicationFieldDescriptor): boolean {
+  const expectedPrompt = blockerEvidenceValue(blocker, "question-prompt:");
+  const actualPrompt = field.questionDescriptor?.promptText;
+  if (!expectedPrompt || !actualPrompt || normalized(expectedPrompt) !== normalized(actualPrompt)) return false;
+
+  const expectedSection = blockerEvidenceValue(blocker, "question-section:");
+  const actualSection = field.questionDescriptor?.sectionTitle ?? field.section;
+  if (normalized(expectedSection) !== normalized(actualSection)) return false;
+
+  const expectedOptions = (blockerEvidenceValue(blocker, "options:") ?? "")
+    .split("|")
+    .map((option) => normalized(option))
+    .filter(Boolean);
+  const actualOptions = field.options?.map((option) => normalized(option.label)).filter(Boolean) ?? [];
+  if (expectedOptions.length !== actualOptions.length) return false;
+  return expectedOptions.every((option) => actualOptions.includes(option));
+}
+
+/**
+ * Reuse an answer the human already gave to the identical question on another
+ * job. Deliberately conservative:
+ *   - the control must be unclassified, or a `free_text`-classified fixed
+ *     choice (select/radio with options). Anything the classifier recognizes
+ *     as salary, sponsorship, legal, demographic, etc. is never filled from
+ *     history, and prose answers are never carried across companies;
+ *   - the prior answer must be an eligible reusable blocker; and
+ *   - the question identity must match exactly (see `priorAnswerMatchesField`).
+ * A stale value that no longer matches one of the offered options is still
+ * caught downstream and escalated to the human rather than guessed.
+ */
+function priorAnswerValue(
+  field: ApplicationFieldDescriptor,
+  request: ApplicationExecutionRequest,
+): AnswerValue | undefined {
+  const isChoiceControl = (field.type === "select" || field.type === "radio") && (field.options?.length ?? 0) > 0;
+  const eligibleControl = field.classification === "unknown" ||
+    (field.classification === "free_text" && isChoiceControl);
+  if (!eligibleControl) return undefined;
+  const prior = (request.priorAnswers ?? []).find(
+    (blocker) => isReusableAnswer(blocker) && priorAnswerMatchesField(blocker, field),
+  );
+  return prior?.value;
 }
 
 function usableAnswer(

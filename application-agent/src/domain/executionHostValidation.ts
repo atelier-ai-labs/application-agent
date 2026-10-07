@@ -28,7 +28,8 @@ import {
   isSubmissionProof,
 } from "./validation";
 import { isExecutionFailureReason } from "./executionTrace";
-import { isCampaign, isCareerJob } from "../persistence/careerRepository";
+import { isCampaign, isCareerBlocker, isCareerJob } from "../persistence/careerRepository";
+import { MAX_REUSABLE_ANSWERS, isReusableAnswer } from "./answerBank";
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
@@ -295,5 +296,18 @@ export function isExecutionHostRequest(value: unknown): value is ExecutionHostRe
     isCareerJob(value.careerJob) &&
     isApplication(value.application) &&
     isCandidateProfile(value.profile) &&
-    isJobPosting(value.careerJob.job);
+    isJobPosting(value.careerJob.job) &&
+    (value.priorAnswers === undefined || isPriorAnswers(value.priorAnswers));
+}
+
+/**
+ * Prior answers are caller-supplied data that can fill an employer form, so the
+ * host accepts only bounded, well-formed blockers that are still eligible for
+ * reuse. A gated kind (salary, legal, demographic, ...) is rejected outright
+ * instead of being filtered, so a bad caller fails loudly.
+ */
+function isPriorAnswers(value: unknown): boolean {
+  return Array.isArray(value) &&
+    value.length <= MAX_REUSABLE_ANSWERS &&
+    value.every((entry) => isCareerBlocker(entry) && isReusableAnswer(entry));
 }

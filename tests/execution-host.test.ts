@@ -20,6 +20,7 @@ import {
   type ApplicationExecutor,
   type ApplicationExecutorResult,
   type CandidateProfile,
+  type CareerBlocker,
   type CareerJob,
   type Campaign,
   type ExecutionInspection,
@@ -33,6 +34,8 @@ import { createExecutionHostServer } from "../application-agent/automation/execu
 import { ExecutionHostRegistryError, ExecutionSessionRegistry } from "../application-agent/automation/executionHost/sessionRegistry";
 import { resolveResumePathsFromEnv } from "../application-agent/automation/executionHost/config";
 import { trustedExecutionRequestReason } from "../application-agent/automation/executionHost/trustedRequest";
+import { MAX_REUSABLE_ANSWERS } from "../application-agent/src/domain/answerBank";
+import { isExecutionHostRequest } from "../application-agent/src/domain/executionHostValidation";
 
 const capturedAt = "2026-08-30T12:00:00.000Z";
 
@@ -787,5 +790,124 @@ describe("trusted local execution host", () => {
   it("rejects a non-loopback host unless the explicit process opt-in is present", async () => {
     const executor = new BlockingPreparationExecutor();
     expect(() => createExecutionHostServer({ executor, host: "0.0.0.0", port: 0 })).toThrow("loopback");
+  });
+});
+
+class RecordingExecutor extends BlockingPreparationExecutor {
+  readonly seen: ApplicationExecutionRequest[] = [];
+
+  async inspect(request?: ApplicationExecutionRequest): Promise<ExecutionInspection> {
+    if (request) this.seen.push(request);
+    return super.inspect();
+  }
+
+  async execute(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult> {
+    this.seen.push(request);
+    return super.execute(request);
+  }
+}
+
+function priorAnswer(jobId: string, prompt: string, value: string, overrides: Partial<CareerBlocker> = {}): CareerBlocker {
+  return {
+    id: `prior-${jobId}`,
+    kind: "unknown_form_field",
+    unit: "submission",
+    questionProvenance: "ATS_FORM",
+    field: "question-from-another-posting",
+    question: prompt,
+    context: { jobId, company: "Other Co", role: "Engineer" },
+    reason: "Input was required.",
+    evidence: ["executor:greenhouse-browser", "field-type:select", "options:S|M|L", `question-prompt:${prompt}`],
+    status: "resolved",
+    createdAt: capturedAt,
+    resolvedAt: capturedAt,
+    value,
+    resumeAfterHuman: true,
+    ...overrides,
+  };
+}
+
+describe("cross-job answers across the host boundary", () => {
+  it("accepts a request with no prior answers and one with eligible prior answers", async () => {
+    const { request } = await fixture("bank-valid");
+    expect(isExecutionHostRequest(request)).toBe(true);
+    expect(isExecutionHostRequest({ ...request, priorAnswers: [] })).toBe(true);
+    expect(isExecutionHostRequest({
+      ...request,
+      priorAnswers: [priorAnswer("job-elsewhere", "T-shirt size", "M")],
+    })).toBe(true);
+  });
+
+  it("rejects gated, unresolved, non-form, or oversized prior answers instead of filtering them", async () => {
+    const { request } = await fixture("bank-invalid");
+    const good = priorAnswer("job-elsewhere", "T-shirt size", "M");
+    const bad: Array<[string, unknown]> = [
+      ["salary kind", [priorAnswer("job-elsewhere", "T-shirt size", "M", { kind: "salary" })]],
+      ["legal attestation kind", [priorAnswer("job-elsewhere", "T-shirt size", "M", { kind: "legal_attestation" })]],
+      ["demographic kind", [priorAnswer("job-elsewhere", "T-shirt size", "M", { kind: "demographic_disclosure" })]],
+      ["open blocker", [priorAnswer("job-elsewhere", "T-shirt size", "M", { status: "open", resolvedAt: undefined })]],
+      ["policy provenance", [priorAnswer("job-elsewhere", "T-shirt size", "M", { questionProvenance: "POLICY" })]],
+      ["missing prompt evidence", [priorAnswer("job-elsewhere", "T-shirt size", "M", { evidence: ["executor:test"] })]],
+      ["a good entry mixed with a gated one", [good, priorAnswer("job-x", "Pay", "1", { kind: "salary" })]],
+      ["not an array", "nope"],
+      ["too many entries", Array.from({ length: MAX_REUSABLE_ANSWERS + 1 }, () => good)],
+      ["a malformed entry", [{ kind: "unknown_form_field" }]],
+    ];
+    for (const [label, priorAnswers] of bad) {
+      expect(isExecutionHostRequest({ ...request, priorAnswers }), label).toBe(false);
+    }
+  });
+
+  it("refuses to start a session when the prior answers are not eligible", async () => {
+    const executor = new RecordingExecutor();
+    const { request } = await fixture("bank-refused", executor);
+    const registry = new ExecutionSessionRegistry({ executor });
+    expect(() => registry.start({
+      ...request,
+      priorAnswers: [priorAnswer("job-elsewhere", "T-shirt size", "M", { kind: "salary" })],
+    })).toThrow("persisted domain contracts");
+    expect(executor.seen).toHaveLength(0);
+  });
+
+  it("delivers validated prior answers to the executor", async () => {
+    const executor = new RecordingExecutor();
+    executor.completeHumanStep();
+    const { request } = await fixture("bank-delivered", executor);
+    const prior = priorAnswer("job-elsewhere", "T-shirt size", "M");
+    const registry = new ExecutionSessionRegistry({ executor, sessionTimeoutMs: 30_000 });
+
+    const started = registry.start({ ...request, priorAnswers: [prior] });
+    await registry.waitForStatus(started.id, ["ready_to_submit"]);
+
+    expect(executor.seen.length).toBeGreaterThan(0);
+    for (const seen of executor.seen) expect(seen.priorAnswers).toEqual([prior]);
+    await registry.closeAll();
+  });
+
+  it("omits the field entirely when no prior answers were supplied", async () => {
+    const executor = new RecordingExecutor();
+    executor.completeHumanStep();
+    const { request } = await fixture("bank-none", executor);
+    const registry = new ExecutionSessionRegistry({ executor, sessionTimeoutMs: 30_000 });
+
+    const started = registry.start(request);
+    await registry.waitForStatus(started.id, ["ready_to_submit"]);
+
+    for (const seen of executor.seen) expect("priorAnswers" in seen).toBe(false);
+    await registry.closeAll();
+  });
+
+  it("derives reusable answers across jobs and campaigns, excluding the requesting job", async () => {
+    const { service, careerJob, careerRepository } = await fixture("bank-service");
+    const elsewhere: CareerJob = {
+      ...careerJob,
+      id: "career-job-elsewhere",
+      campaignId: "campaign-elsewhere",
+      blockers: [priorAnswer("career-job-elsewhere", "T-shirt size", "M")],
+    };
+    careerRepository.saveJob(elsewhere);
+
+    expect(service.reusableAnswersFor(careerJob.id).map((entry) => entry.value)).toEqual(["M"]);
+    expect(service.reusableAnswersFor(elsewhere.id)).toEqual([]);
   });
 });

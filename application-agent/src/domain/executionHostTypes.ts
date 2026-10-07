@@ -5,6 +5,7 @@ import type {
 } from "./executor";
 import type { ExecutionFailureReason } from "./executionTrace";
 import type {
+  CareerBlocker,
   CareerJob,
   Campaign,
 } from "./campaignTypes";
@@ -39,6 +40,8 @@ export interface ExecutionHostRequest {
   careerJob: CareerJob;
   application: Application;
   profile: CandidateProfile;
+  /** Reusable answers from other jobs; revalidated by the host (reusable kinds only, bounded). */
+  priorAnswers?: readonly CareerBlocker[];
 }
 
 /**

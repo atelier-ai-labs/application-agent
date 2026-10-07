@@ -224,12 +224,14 @@ function executionRequestFor(
   const careerJob = service.getJob(jobId);
   if (!careerJob.applicationId) throw new Error("This career job has no prepared application packet.");
   const application = service.getApplication(careerJob.applicationId);
+  const priorAnswers = service.reusableAnswersFor(careerJob.id);
   return {
     mode: "real_local",
     campaign,
     careerJob,
     application,
     profile,
+    ...(priorAnswers.length > 0 ? { priorAnswers } : {}),
   };
 }
 

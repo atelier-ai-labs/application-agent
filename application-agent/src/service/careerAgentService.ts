@@ -82,6 +82,7 @@ import {
   type ApplicationExecutionRequest,
   type ApplicationExecutorResult,
 } from "../domain/executor";
+import { collectReusableAnswers } from "../domain/answerBank";
 import { JobScout, jobDedupeKeys, jobKeysMatch, type ScoutedJob } from "../domain/scout";
 import {
   normalizeJobSearchIntent,
@@ -627,6 +628,15 @@ export class CareerAgentService {
     const job = this.careerRepository.getJob(jobId);
     if (!job) throw new CareerJobNotFoundError(jobId);
     return job;
+  }
+
+  /**
+   * Answers the human already gave to identical, previously unclassified form
+   * questions on other jobs (across campaigns). Derived from persisted resolved
+   * blockers; gated categories are never included. See `domain/answerBank`.
+   */
+  reusableAnswersFor(jobId: string): readonly CareerBlocker[] {
+    return collectReusableAnswers(this.careerRepository.listJobs(), jobId);
   }
 
   getApplication(applicationId: string): Application {
@@ -2768,12 +2778,14 @@ export class CareerAgentService {
     const resolvedKinds = new Set(
       careerJob.blockers.filter((blocker) => blocker.status === "resolved").map((blocker) => careerBlockerKey(blocker)),
     );
+    const priorAnswers = this.reusableAnswersFor(careerJob.id);
     const executionRequest: ApplicationExecutionRequest = {
       campaign,
       careerJob,
       application,
       now: this.now(),
       profile: this.profile,
+      ...(priorAnswers.length > 0 ? { priorAnswers } : {}),
     };
     // A host result is already produced by the preparation-only browser
     // executor. Never invoke the local/injected executor a second time when a
