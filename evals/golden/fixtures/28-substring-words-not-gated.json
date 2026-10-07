@@ -1,0 +1,52 @@
+{
+  "id": "28-substring-words-not-gated",
+  "kind": "field_classify",
+  "description": "Short gate keywords must match whole words: embrace/trace are not race, majority is not major, statement is not state, capacity is not city, advisable is not visa. Ordinary free-response prompts stay free_text instead of tripping demographic/education/location/sponsorship gates.",
+  "graders": [
+    "deterministic"
+  ],
+  "input": {
+    "fields": [
+      {
+        "id": "q-embrace",
+        "label": "How do you plan to embrace our culture?",
+        "type": "textarea"
+      },
+      {
+        "id": "q-trace",
+        "label": "Describe a time you had to trace a production bug",
+        "type": "textarea"
+      },
+      {
+        "id": "q-majority",
+        "label": "Describe your experience with the majority of our stack",
+        "type": "textarea"
+      },
+      {
+        "id": "q-statement",
+        "label": "Please write a statement about your goals",
+        "type": "textarea"
+      },
+      {
+        "id": "q-capacity",
+        "label": "What is your capacity for on-call work?",
+        "type": "textarea"
+      },
+      {
+        "id": "q-advisable",
+        "label": "Do you have experience with advisable cloud patterns?",
+        "type": "textarea"
+      }
+    ]
+  },
+  "expected": {
+    "classifications": {
+      "q-embrace": "free_text",
+      "q-trace": "free_text",
+      "q-majority": "free_text",
+      "q-statement": "free_text",
+      "q-capacity": "free_text",
+      "q-advisable": "free_text"
+    }
+  }
+}

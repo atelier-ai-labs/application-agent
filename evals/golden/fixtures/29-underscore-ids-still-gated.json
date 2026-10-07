@@ -1,0 +1,46 @@
+{
+  "id": "29-underscore-ids-still-gated",
+  "kind": "field_classify",
+  "description": "Word-boundary matching must not weaken gates for ATS ids that join words with underscores (question_race, visa_sponsorship_needed). Real whole-word keywords still route to their human-gated categories.",
+  "graders": [
+    "deterministic"
+  ],
+  "input": {
+    "fields": [
+      {
+        "id": "question_race",
+        "label": "Select one",
+        "type": "select"
+      },
+      {
+        "id": "visa_sponsorship_needed",
+        "label": "Select one",
+        "type": "select"
+      },
+      {
+        "id": "race-ethnicity",
+        "label": "Race/Ethnicity",
+        "type": "select"
+      },
+      {
+        "id": "q-major",
+        "label": "What was your major?",
+        "type": "text"
+      },
+      {
+        "id": "q-state",
+        "label": "What state do you live in?",
+        "type": "text"
+      }
+    ]
+  },
+  "expected": {
+    "classifications": {
+      "question_race": "demographic",
+      "visa_sponsorship_needed": "sponsorship",
+      "race-ethnicity": "demographic",
+      "q-major": "education",
+      "q-state": "location"
+    }
+  }
+}

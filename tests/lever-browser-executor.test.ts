@@ -1242,6 +1242,28 @@ describe("Rippling field classification regressions", () => {
     })).toBe("contact");
   });
 
+  it("does not let gate keywords match inside unrelated words", () => {
+    const freeResponse = [
+      "How do you plan to embrace our culture?",
+      "Describe a time you had to trace a production bug",
+      "Describe your experience with the majority of our stack",
+      "Please write a statement about your goals",
+      "What is your capacity for on-call work?",
+      "Do you have experience with advisable cloud patterns?",
+    ];
+    for (const label of freeResponse) {
+      expect(classifyLeverApplicationField({ id: "q", label, type: "textarea" }), label).toBe("free_text");
+    }
+  });
+
+  it("still gates whole-word keywords, including underscore-joined ids", () => {
+    expect(classifyLeverApplicationField({ id: "question_race", label: "Select one", type: "select" })).toBe("demographic");
+    expect(classifyLeverApplicationField({ id: "race-ethnicity", label: "Race/Ethnicity", type: "select" })).toBe("demographic");
+    expect(classifyLeverApplicationField({ id: "visa_sponsorship_needed", label: "Select one", type: "select" })).toBe("sponsorship");
+    expect(classifyLeverApplicationField({ id: "q-major", label: "What was your major?", type: "text" })).toBe("education");
+    expect(classifyLeverApplicationField({ id: "q-state", label: "What state do you live in?", type: "text" })).toBe("location");
+  });
+
   it("classifies Search selects with international dialing options as location", () => {
     expect(looksLikeInternationalDialingOptions(dialingOptions)).toBe(true);
     expect(classifyLeverApplicationField({
