@@ -5,6 +5,7 @@ import type {
   SubmissionProof,
 } from "./types";
 import type {
+  CareerBlocker,
   CareerBlockerDraft,
   CareerJob,
   Campaign,
@@ -17,6 +18,12 @@ export interface ApplicationExecutionRequest {
   now: string;
   /** The validated profile is supplied by the host; it is never inferred by an executor. */
   profile?: CandidateProfile;
+  /**
+   * Answers the human already gave to identical questions on other jobs (see
+   * `answerBank`). Executors re-check eligibility and match strictly by prompt,
+   * section, and options; this is never a source for gated categories.
+   */
+  priorAnswers?: readonly CareerBlocker[];
 }
 
 /** Whether an executor can only prepare a form or may return submission proof. */

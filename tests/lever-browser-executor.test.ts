@@ -303,6 +303,26 @@ function resolvedCareerBlocker(field: string, value: string | boolean | number):
   };
 }
 
+/** A resolved answer the human gave to the same question on a different job. */
+function priorAnswerBlocker(
+  prompt: string,
+  value: string | boolean | number,
+  evidence: readonly string[],
+  overrides: Partial<CareerBlocker> = {},
+): CareerBlocker {
+  const base = resolvedCareerBlocker("question-from-another-posting", value);
+  return {
+    ...base,
+    id: "prior-blocker-1",
+    kind: "unknown_form_field",
+    questionProvenance: "ATS_FORM",
+    question: prompt,
+    context: { ...base.context, jobId: "career-job-0", applicationId: "application-0" },
+    evidence: ["executor:greenhouse-browser", "field-id:question-from-another-posting", ...evidence, `question-prompt:${prompt}`],
+    ...overrides,
+  };
+}
+
 describe("LeverBrowserExecutor", () => {
   const captchaObservation = (overrides: Partial<CaptchaDomObservation> = {}): CaptchaDomObservation => ({
     markerCount: 0,
@@ -868,6 +888,160 @@ describe("LeverBrowserExecutor", () => {
 
     expect(result.state).toBe("ready_to_submit");
     expect(field.current).toBe("No");
+  });
+
+  describe("cross-job answer bank", () => {
+    const shirtOptions = [
+      { label: "S", value: "S" },
+      { label: "M", value: "M" },
+      { label: "L", value: "L" },
+    ];
+
+    function choiceField(prompt: string, options: readonly ApplicationFieldOption[], overrides: { id?: string; type?: string } = {}) {
+      return new FakeField({
+        id: overrides.id ?? "question-current-posting",
+        label: prompt,
+        type: overrides.type ?? "select",
+        required: true,
+        options,
+        questionDescriptor: { promptText: prompt, sourceStrategy: "question_container", confidence: "high" },
+      });
+    }
+
+    async function run(field: FakeField, priorAnswers: readonly CareerBlocker[]) {
+      return new LeverBrowserExecutor({
+        sessionFactory: new FakeSessionFactory(new FakeSession([field])),
+        now: () => capturedAt,
+      }).execute(request({ priorAnswers }));
+    }
+
+    it("fills an unclassified question from an identical answer given on another job, ignoring field ids", async () => {
+      const field = choiceField("T-shirt size", shirtOptions);
+      const result = await run(field, [
+        priorAnswerBlocker("T-shirt size", "M", ["field-type:select", "options:S|M|L"]),
+      ]);
+
+      expect(result.state).toBe("ready_to_submit");
+      expect(field.current).toBe("M");
+    });
+
+    it("fills a fixed-choice question that classifies as free text from a prior subjective answer", async () => {
+      const prompt = "Are you 18 years of age or older?";
+      const field = choiceField(prompt, [{ label: "Yes", value: "yes" }, { label: "No", value: "no" }]);
+      const result = await run(field, [
+        priorAnswerBlocker(prompt, "Yes", ["field-type:select", "options:Yes|No"], { kind: "subjective_answer" }),
+      ]);
+
+      expect(result.state).toBe("ready_to_submit");
+      expect(field.current).toBe("yes");
+    });
+
+    it("asks the human when the prompt differs", async () => {
+      const field = choiceField("Shirt size for the swag box", shirtOptions);
+      const result = await run(field, [
+        priorAnswerBlocker("T-shirt size", "M", ["field-type:select", "options:S|M|L"]),
+      ]);
+
+      expect(result.state).toBe("requires_human");
+      expect(field.selectCalls).toBe(0);
+    });
+
+    it("asks the human when the option set differs", async () => {
+      const field = choiceField("T-shirt size", [...shirtOptions, { label: "XL", value: "XL" }]);
+      const result = await run(field, [
+        priorAnswerBlocker("T-shirt size", "M", ["field-type:select", "options:S|M|L"]),
+      ]);
+
+      expect(result.state).toBe("requires_human");
+      expect(field.selectCalls).toBe(0);
+    });
+
+    it("asks the human when the section differs", async () => {
+      const field = new FakeField({
+        id: "question-current-posting",
+        label: "T-shirt size",
+        type: "select",
+        required: true,
+        options: shirtOptions,
+        questionDescriptor: {
+          promptText: "T-shirt size",
+          sectionTitle: "Swag",
+          sourceStrategy: "question_container",
+          confidence: "high",
+        },
+      });
+      const result = await run(field, [
+        priorAnswerBlocker("T-shirt size", "M", ["field-type:select", "options:S|M|L", "question-section:Referrals"]),
+      ]);
+
+      expect(result.state).toBe("requires_human");
+      expect(field.selectCalls).toBe(0);
+    });
+
+    it("never carries a prose answer from one company to another", async () => {
+      const prompt = "Is there anything else you would like us to know about you?";
+      const field = new FakeField({
+        id: "question-current-posting",
+        label: prompt,
+        type: "textarea",
+        required: true,
+        questionDescriptor: { promptText: prompt, sourceStrategy: "question_container", confidence: "high" },
+      });
+      const result = await run(field, [
+        priorAnswerBlocker(prompt, "I love your mission.", ["field-type:textarea"], { kind: "subjective_answer" }),
+      ]);
+
+      expect(result.state).toBe("requires_human");
+      expect(field.fillCalls).toBe(0);
+    });
+
+    it("never fills a salary question from history, even for an identical prompt", async () => {
+      const prompt = "What are your salary expectations?";
+      const field = new FakeField({
+        id: "question-current-posting",
+        label: prompt,
+        type: "text",
+        required: true,
+        questionDescriptor: { promptText: prompt, sourceStrategy: "question_container", confidence: "high" },
+      });
+      const result = await run(field, [
+        priorAnswerBlocker(prompt, "$150,000", ["field-type:text"]),
+      ]);
+
+      expect(result.state).toBe("requires_human");
+      expect(field.fillCalls).toBe(0);
+    });
+
+    it("ignores a supplied prior answer whose kind is gated", async () => {
+      const field = choiceField("T-shirt size", shirtOptions);
+      const result = await run(field, [
+        priorAnswerBlocker("T-shirt size", "M", ["field-type:select", "options:S|M|L"], { kind: "salary" }),
+      ]);
+
+      expect(result.state).toBe("requires_human");
+      expect(field.selectCalls).toBe(0);
+    });
+
+    it("lets the current job's own resolved answer win over history", async () => {
+      const field = choiceField("T-shirt size", shirtOptions);
+      const own: CareerBlocker = {
+        ...resolvedCareerBlocker(field.id, "L"),
+        kind: "unknown_form_field",
+        questionProvenance: "ATS_FORM",
+        question: "T-shirt size",
+        evidence: ["field-type:select", "options:S|M|L", "question-prompt:T-shirt size"],
+      };
+      const result = await new LeverBrowserExecutor({
+        sessionFactory: new FakeSessionFactory(new FakeSession([field])),
+        now: () => capturedAt,
+      }).execute(request({
+        careerJob: careerJob({ blockers: [own] }),
+        priorAnswers: [priorAnswerBlocker("T-shirt size", "M", ["field-type:select", "options:S|M|L"])],
+      }));
+
+      expect(result.state).toBe("ready_to_submit");
+      expect(field.current).toBe("L");
+    });
   });
 
   it("reuses a resolved combobox answer when Greenhouse hides options on resume", async () => {

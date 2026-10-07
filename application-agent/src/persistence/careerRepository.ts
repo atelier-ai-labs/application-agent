@@ -462,7 +462,7 @@ function isQuestionProvenance(value: unknown): value is QuestionProvenance {
     value === "CONFIGURATION" || value === "UNKNOWN";
 }
 
-function isCareerBlocker(value: unknown): value is CareerBlocker {
+export function isCareerBlocker(value: unknown): value is CareerBlocker {
   if (!isRecord(value)) return false;
   const context = value.context;
   if (!isRecord(context)) return false;

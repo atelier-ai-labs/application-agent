@@ -100,6 +100,7 @@ function requestForHost(request: ExecutionHostRequest, now: string): Application
     careerJob: request.careerJob,
     application: request.application,
     profile: request.profile,
+    ...(request.priorAnswers && request.priorAnswers.length > 0 ? { priorAnswers: request.priorAnswers } : {}),
     now,
   };
 }
