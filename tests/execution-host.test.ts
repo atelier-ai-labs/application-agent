@@ -13,6 +13,11 @@ import {
   exampleCandidateProfile,
   jobDedupeKeys,
   normalizeJobPosting,
+  isVerifiedMatlenApplicationUrl,
+  isVerifiedProtagonaApplicationUrl,
+  isVerifiedGustoHostedUrl,
+  isVerifiedGustoApplicationUrl,
+  gustoPostingId,
   trackerSyncContextForJob,
   trackerUpdateForJob,
   type Application,
@@ -28,11 +33,13 @@ import {
   type JobTracker,
   type JobTrackerResult,
 } from "../application-agent/src";
+import { resolveExecutionHostConfig } from "../application-agent/automation/executionHost/config";
 import { HttpExecutionHostClient, ExecutionHostUnavailableError } from "../application-agent/src/service/executionHostClient";
 import { createExecutionHostServer } from "../application-agent/automation/executionHost/server";
 import { ExecutionHostRegistryError, ExecutionSessionRegistry } from "../application-agent/automation/executionHost/sessionRegistry";
 import { resolveResumePathsFromEnv } from "../application-agent/automation/executionHost/config";
 import { trustedExecutionRequestReason } from "../application-agent/automation/executionHost/trustedRequest";
+import { DurableSubmissionAuthority } from "../application-agent/automation/executionHost/submissionAuthority";
 
 const capturedAt = "2026-08-30T12:00:00.000Z";
 
@@ -80,6 +87,8 @@ class BlockingPreparationExecutor implements ApplicationExecutor {
   closeCalls = 0;
   private blocked = true;
 
+  constructor(private readonly exposesCaptchaDiagnostics = false) {}
+
   executionMode() {
     return "preparation_only" as const;
   }
@@ -91,7 +100,7 @@ class BlockingPreparationExecutor implements ApplicationExecutor {
   async inspect(): Promise<ExecutionInspection> {
     this.inspectCalls += 1;
     if (this.blocked) {
-      return inspection("needs_input", [{
+      const result = inspection("needs_input", [{
         kind: "captcha",
         unit: "external",
         field: "captcha",
@@ -100,6 +109,17 @@ class BlockingPreparationExecutor implements ApplicationExecutor {
         evidence: ["captcha", "submit:not-clicked"],
         resumeAfterHuman: true,
       }]);
+      return this.exposesCaptchaDiagnostics ? {
+        ...result,
+        captcha: {
+          state: "active_challenge",
+          markerCount: 2,
+          visibleMarkerCount: 1,
+          challengeIframeCount: 1,
+          visibleChallengeIframeCount: 1,
+          evidenceCategory: "visible_challenge_iframe",
+        },
+      } : result;
     }
     return inspection();
   }
@@ -128,6 +148,49 @@ class SubmittedProofExecutor extends BlockingPreparationExecutor {
         externalApplicationId: "must-not-leave-host",
         submittedAt: request.now,
         evidence: "The test intentionally tries to cross the closed lane.",
+      },
+    };
+  }
+}
+
+class PreparationToggleExecutor implements ApplicationExecutor {
+  readonly id = "preparation-toggle-executor";
+  beforeCalls = 0;
+  outcomeCalls = 0;
+  submitCalls = 0;
+  executionMode(request: ApplicationExecutionRequest) {
+    return request.campaign.submissionPolicy.authority === "automatic" ? "submission_capable" as const : "preparation_only" as const;
+  }
+  supports() { return true; }
+  async execute(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult> {
+    if (this.executionMode(request) === "preparation_only") return { state: "ready_to_submit", inspection: inspection() };
+    this.beforeCalls += 1;
+    await request.beforeAutomaticSubmission?.();
+    this.submitCalls += 1;
+    this.outcomeCalls += 1;
+    await request.recordAutomaticSubmissionOutcome?.({ clicked: true, confirmed: false, outcome: "ambiguous", reasonCode: "confirmation-missing", evidence: "test" });
+    return { state: "requires_human", blocker: { kind: "external_verification", unit: "submission", field: "submission-confirmation", question: "Verify submission", reason: "test", evidence: ["test"], resumeAfterHuman: false }, inspection: inspection("needs_input") };
+  }
+}
+
+class PreparedManualSubmissionExecutor implements ApplicationExecutor {
+  readonly id = "prepared-manual-submission-executor";
+  submitPreparedCalls = 0;
+  executionMode() { return "preparation_only" as const; }
+  supports() { return true; }
+  async execute(): Promise<ApplicationExecutorResult> {
+    return { state: "ready_to_submit", inspection: inspection() };
+  }
+  async submitPrepared(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult> {
+    this.submitPreparedCalls += 1;
+    return {
+      state: "submitted",
+      proof: {
+        mode: "external",
+        provider: "test-provider",
+        externalApplicationId: "manual-test-confirmation",
+        submittedAt: request.now,
+        evidence: "test-confirmation",
       },
     };
   }
@@ -259,6 +322,100 @@ async function json(response: Response): Promise<Record<string, unknown>> {
 }
 
 describe("trusted local execution host", () => {
+  it("parses and validates the exact automatic-submission target tuple", () => {
+    const config = resolveExecutionHostConfig({
+      ATELIER_EXECUTION_SUBMISSION_TARGET: "campaign-83493d54-f0c4-416d-92ec-3d78848ce38c|career-job-b2cca791-3181-498b-ac14-59732d799149|application-5682479b-a90f-4d73-8767-9b4034e2bc78",
+    });
+    expect(config.submissionTarget).toEqual({
+      campaignId: "campaign-83493d54-f0c4-416d-92ec-3d78848ce38c",
+      careerJobId: "career-job-b2cca791-3181-498b-ac14-59732d799149",
+      applicationId: "application-5682479b-a90f-4d73-8767-9b4034e2bc78",
+    });
+    expect(() => resolveExecutionHostConfig({ ATELIER_EXECUTION_SUBMISSION_TARGET: "campaign-only" })).toThrow(/campaignId\|careerJobId\|applicationId/);
+  });
+
+  it("supports explicit preparation-only mode and defaults it off", () => {
+    expect(resolveExecutionHostConfig({}).preparationOnly).toBe(false);
+    expect(resolveExecutionHostConfig({ ATELIER_EXECUTION_PREPARATION_ONLY: "true" }).preparationOnly).toBe(true);
+    expect(() => resolveExecutionHostConfig({ ATELIER_EXECUTION_PREPARATION_ONLY: "yes" })).toThrow(/PREPARATION_ONLY/);
+  });
+
+  it("lets an automatic campaign prepare visibly while withholding submit callbacks and fences", async () => {
+    const executor = new PreparationToggleExecutor();
+    const { request } = await fixture("preparation-only", executor);
+    const registry = new ExecutionSessionRegistry({ executor, allowAutomaticSubmission: true, preparationOnly: true, submissionTarget: { campaignId: request.campaign.id, careerJobId: request.careerJob.id, applicationId: request.application.id } });
+    const started = registry.start({ ...request, campaign: { ...request.campaign, submissionPolicy: { authority: "automatic", requireExplicitApproval: false } } });
+    const ready = await registry.waitForStatus(started.id, ["ready_to_submit"]);
+    expect(ready.result?.state).toBe("ready_to_submit");
+    expect(executor.beforeCalls).toBe(0);
+    expect(executor.outcomeCalls).toBe(0);
+    expect(executor.submitCalls).toBe(0);
+  });
+
+  it("permits one exact manual submission in never/preparation-only mode", async () => {
+    const executor = new PreparedManualSubmissionExecutor();
+    const { request } = await fixture("manual-submit", executor);
+    const authority = new DurableSubmissionAuthority("manual-test", {
+      stateFile: `/tmp/atelier-manual-submit-${request.application.id}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+    });
+    const registry = new ExecutionSessionRegistry({
+      executor,
+      allowAutomaticSubmission: false,
+      preparationOnly: true,
+      submissionAuthority: authority,
+    });
+    const started = registry.start(request);
+    const ready = await registry.waitForStatus(started.id, ["ready_to_submit"]);
+    expect(ready.result?.state).toBe("ready_to_submit");
+
+    const submitted = await registry.submitManually(started.id, {
+      approval: "SUBMIT_APPLICATION",
+      campaignId: request.campaign.id,
+      careerJobId: request.careerJob.id,
+      applicationId: request.application.id,
+    });
+    expect(submitted.status).toBe("submitted");
+    expect(submitted.result?.state).toBe("submitted");
+    expect(executor.submitPreparedCalls).toBe(1);
+    expect(authority.reconcile(request.application.id, request.careerJob.id).state).toBe("submitted");
+  });
+
+  it("does not require an automatic target allowlist in preparation-only mode", async () => {
+    for (const submissionTarget of [undefined, { campaignId: "wrong", careerJobId: "wrong", applicationId: "wrong" }]) {
+      const executor = new PreparationToggleExecutor();
+      const { request } = await fixture("preparation-only-target", executor);
+      const registry = new ExecutionSessionRegistry({ executor, allowAutomaticSubmission: true, preparationOnly: true, ...(submissionTarget ? { submissionTarget } : {}) });
+      const started = registry.start({ ...request, campaign: { ...request.campaign, submissionPolicy: { authority: "automatic", requireExplicitApproval: false } } });
+      const ready = await registry.waitForStatus(started.id, ["ready_to_submit"]);
+      expect(ready.result?.state).toBe("ready_to_submit");
+      expect(executor.beforeCalls).toBe(0);
+      expect(executor.outcomeCalls).toBe(0);
+      expect(executor.submitCalls).toBe(0);
+    }
+  });
+
+  it("keeps an automatic request outside the exact allowlist at human review without clicking", async () => {
+    const executor = new SubmittedProofExecutor();
+    executor.completeHumanStep();
+    const { request } = await fixture("target-mismatch", executor);
+    const registry = new ExecutionSessionRegistry({ executor, allowAutomaticSubmission: true, submissionTarget: { campaignId: "other", careerJobId: request.careerJob.id, applicationId: request.application.id } });
+    const started = registry.start({ ...request, campaign: { ...request.campaign, submissionPolicy: { authority: "automatic", requireExplicitApproval: false } } });
+    const blocked = await registry.waitForStatus(started.id, ["needs_input"]);
+    expect(blocked.result?.state).toBe("requires_human");
+    expect(executor.executeCalls).toBe(0);
+  });
+
+  it("requires an exact target allowlist before constructing submission callbacks or a fence", async () => {
+    const executor = new SubmittedProofExecutor();
+    executor.completeHumanStep();
+    const { request } = await fixture("target-missing", executor);
+    const registry = new ExecutionSessionRegistry({ executor, allowAutomaticSubmission: true });
+    const started = registry.start({ ...request, campaign: { ...request.campaign, submissionPolicy: { authority: "automatic", requireExplicitApproval: false } } });
+    const blocked = await registry.waitForStatus(started.id, ["needs_input"]);
+    expect(blocked.result?.state).toBe("requires_human");
+    expect(blocked.result?.state === "requires_human" ? blocked.result.blocker.evidence : []).toContain("submission-target:mismatch");
+    expect(executor.executeCalls).toBe(0);
+  });
   it("trusts a verified Greenhouse destination without confusing it with the discovery source", async () => {
     const fixtureValue = await fixture("greenhouse-destination");
     const greenhouseUrl = "https://job-boards.greenhouse.io/kapitus/jobs/4390052009";
@@ -289,11 +446,74 @@ describe("trusted local execution host", () => {
       application: { ...fixtureValue.application, job: greenhouseJob.job },
     };
     expect(trustedExecutionRequestReason(request)).toBeUndefined();
+    const curatedRequest = {
+      ...request,
+      careerJob: {
+        ...greenhouseJob,
+        sourceId: "curated-live",
+        sourceRecordId: "greenhouse:kapitus:4390052009",
+        job: { ...greenhouseJob.job, sourceUrl: greenhouseUrl },
+      },
+    };
+    expect(trustedExecutionRequestReason({
+      ...curatedRequest,
+      careerJob: {
+        ...curatedRequest.careerJob,
+        job: { ...curatedRequest.careerJob.job, sourceUrl: "https://job-boards.greenhouse.io/kapitus/jobs/4390052010" },
+      },
+      application: {
+        ...curatedRequest.application,
+        job: { ...curatedRequest.application.job, sourceUrl: "https://job-boards.greenhouse.io/kapitus/jobs/4390052010" },
+      },
+    })).toContain("same verified posting");
+    expect(trustedExecutionRequestReason({
+      ...curatedRequest,
+      careerJob: {
+        ...curatedRequest.careerJob,
+        job: { ...curatedRequest.careerJob.job, sourceUrl: "https://job-boards.greenhouse.io/other-board/jobs/4390052009" },
+      },
+      application: {
+        ...curatedRequest.application,
+        job: { ...curatedRequest.application.job, sourceUrl: "https://job-boards.greenhouse.io/other-board/jobs/4390052009" },
+      },
+    })).toContain("same verified posting");
+
+  });
+
+  it("admits an unknown direct form only with official-employer resolution evidence", async () => {
+    const fixtureValue = await fixture("official-direct");
+    const directUrl = "https://careers.h1.example/jobs/cloud-platform/apply";
+    const directJob = {
+      ...fixtureValue.careerJob,
+      sourceId: "curated-live",
+      sourceRecordId: "curated:official-direct",
+      destinationResolution: {
+        status: "resolved" as const,
+        attemptedAt: capturedAt,
+        destinationUrl: directUrl,
+        ats: "Custom" as const,
+        actionable: true,
+        provenance: "official_employer_evidence" as const,
+        evidence: ["official employer application page", "company and role verified"],
+      },
+      job: { ...fixtureValue.careerJob.job, company: "H1", title: "Cloud Platform Engineer", sourceUrl: "https://listing.example/h1/cloud-platform", applicationUrl: directUrl },
+    };
+    const request: ExecutionHostRequest = {
+      ...fixtureValue.request,
+      careerJob: directJob,
+      application: { ...fixtureValue.application, job: directJob.job },
+    };
+    expect(trustedExecutionRequestReason(request)).toBeUndefined();
+    expect(trustedExecutionRequestReason({
+      ...request,
+      careerJob: { ...directJob, destinationResolution: { ...directJob.destinationResolution, provenance: "bounded_public_lookup" as const } },
+    })).toContain("official-employer evidence");
   });
 
   it("trusts a verified Workday destination from bounded employer evidence", async () => {
     const fixtureValue = await fixture("workday-destination");
-    const workdayUrl = "https://homedepot.wd5.myworkdayjobs.com/en-US/CareerDepot/job/TEXAS---VIRTUAL---TX01/Software-Engineer-II--REMOTE-_Req191434/apply";
+    const workdayPostingUrl = "https://homedepot.wd5.myworkdayjobs.com/en-US/CareerDepot/job/TEXAS---VIRTUAL---TX01/Software-Engineer-II--REMOTE-_Req191434";
+    const workdayUrl = `${workdayPostingUrl}/apply`;
     const workdayJob = {
       ...fixtureValue.careerJob,
       sourceId: "himalayas-live",
@@ -311,7 +531,7 @@ describe("trusted local execution host", () => {
         ...fixtureValue.careerJob.job,
         company: "HOME DEPOT U.S.A., INC.",
         title: "Software Engineer II (REMOTE)",
-        sourceUrl: "https://himalayas.app/companies/home-depot-u-s-a-inc/jobs/software-engineer-ii",
+        sourceUrl: workdayPostingUrl,
         applicationUrl: workdayUrl,
       },
     };
@@ -322,6 +542,20 @@ describe("trusted local execution host", () => {
     };
 
     expect(trustedExecutionRequestReason(request)).toBeUndefined();
+
+    const differentJobUrl = "https://homedepot.wd5.myworkdayjobs.com/en-US/CareerDepot/job/TEXAS---VIRTUAL---TX01/Other-Role_Req999999/apply";
+    const mismatchedRequest: ExecutionHostRequest = {
+      ...request,
+      careerJob: {
+        ...workdayJob,
+        job: { ...workdayJob.job, applicationUrl: differentJobUrl },
+      },
+      application: {
+        ...request.application,
+        job: { ...workdayJob.job, applicationUrl: differentJobUrl },
+      },
+    };
+    expect(trustedExecutionRequestReason(mismatchedRequest)).toContain("same verified posting");
   });
 
   it("trusts a verified curated Rippling destination and keeps it on the supported path", async () => {
@@ -354,6 +588,194 @@ describe("trusted local execution host", () => {
       application: { ...fixtureValue.application, job: ripplingJob.job },
     };
     expect(trustedExecutionRequestReason(request)).toBeUndefined();
+  });
+
+  it("trusts only the narrowly verified curated YouHired route", async () => {
+    const fixtureValue = await fixture("youhired-destination");
+    const youHiredUrl = "https://youhired.me/job/1932919574/platform-engineer-remote";
+    const youHiredJob = {
+      ...fixtureValue.careerJob,
+      sourceId: "curated-live",
+      sourceRecordId: "youhired:1932919574",
+      destinationResolution: {
+        status: "resolved" as const,
+        attemptedAt: capturedAt,
+        destinationUrl: youHiredUrl,
+        ats: "Custom" as const,
+        actionable: true,
+        provenance: "existing_external_application_url" as const,
+        evidence: ["curated:explicit-public-posting", "youhired:bounded-job-route"],
+      },
+      job: {
+        ...fixtureValue.careerJob.job,
+        company: "Confidential",
+        title: "Platform Engineer",
+        sourceUrl: youHiredUrl,
+        applicationUrl: youHiredUrl,
+        ats: "Custom",
+      },
+    };
+    const request: ExecutionHostRequest = {
+      ...fixtureValue.request,
+      careerJob: youHiredJob,
+      application: { ...fixtureValue.application, job: youHiredJob.job },
+    };
+
+    expect(trustedExecutionRequestReason(request)).toBeUndefined();
+    expect(trustedExecutionRequestReason({
+      ...request,
+      careerJob: { ...youHiredJob, job: { ...youHiredJob.job, applicationUrl: "https://youhired.me/" } },
+      application: {
+        ...fixtureValue.application,
+        job: { ...youHiredJob.job, applicationUrl: "https://youhired.me/" },
+      },
+    })).toContain("supported verified application destination");
+  });
+
+  it("trusts only the narrowly verified curated Matlen Silver route", async () => {
+    const fixtureValue = await fixture("matlensilver-destination");
+    const matlenUrl = "https://matlensilver.com/job/azure-engineer-60869931";
+    const matlenJob = {
+      ...fixtureValue.careerJob,
+      sourceId: "curated-live",
+      sourceRecordId: "matlensilver:60869931",
+      destinationResolution: {
+        status: "resolved" as const,
+        attemptedAt: capturedAt,
+        destinationUrl: matlenUrl,
+        ats: "Custom" as const,
+        actionable: true,
+        provenance: "existing_external_application_url" as const,
+        evidence: ["curated:explicit-public-posting", "matlensilver:bounded-job-route"],
+      },
+      job: {
+        ...fixtureValue.careerJob.job,
+        company: "Matlen Silver",
+        title: "Cloud Engineer",
+        sourceUrl: matlenUrl,
+        applicationUrl: matlenUrl,
+        ats: "Custom",
+      },
+    };
+    const request: ExecutionHostRequest = {
+      ...fixtureValue.request,
+      careerJob: matlenJob,
+      application: { ...fixtureValue.application, job: matlenJob.job },
+    };
+
+    expect(isVerifiedMatlenApplicationUrl(matlenUrl)).toBe(true);
+    expect(trustedExecutionRequestReason(request)).toBeUndefined();
+    expect(trustedExecutionRequestReason({
+      ...request,
+      // The direct source correlation is invalidated and the resolver no
+      // longer points at this exact application URL.
+      careerJob: {
+        ...matlenJob,
+        sourceRecordId: "matlensilver:wrong",
+        destinationResolution: {
+          ...matlenJob.destinationResolution,
+          destinationUrl: "https://matlensilver.com/job/azure-engineer-00000000",
+        },
+      },
+      application: {
+        ...fixtureValue.application,
+        job: matlenJob.job,
+      },
+    })).toContain("independently verified");
+  });
+
+  it("trusts only the exact current curated Protagona route", async () => {
+    const fixtureValue = await fixture("matlensilver-destination");
+    const protagonaUrl = "https://protagona.applytojob.com/apply/YDO63zlPbH/AWS-Cloud-Engineer";
+    const protagonaJob = {
+      ...fixtureValue.careerJob,
+      sourceId: "curated-live",
+      sourceRecordId: "protagona:YDO63zlPbH",
+      destinationResolution: {
+        status: "resolved" as const,
+        attemptedAt: capturedAt,
+        destinationUrl: protagonaUrl,
+        ats: "Custom" as const,
+        actionable: true,
+        provenance: "existing_external_application_url" as const,
+        evidence: ["curated:explicit-public-posting", "protagona:bounded-job-route"],
+      },
+      job: {
+        ...fixtureValue.careerJob.job,
+        company: "Protagona",
+        title: "AWS Cloud Engineer",
+        sourceUrl: protagonaUrl,
+        applicationUrl: protagonaUrl,
+        ats: "Custom",
+      },
+    };
+    const request: ExecutionHostRequest = {
+      ...fixtureValue.request,
+      careerJob: protagonaJob,
+      application: { ...fixtureValue.application, job: protagonaJob.job },
+    };
+
+    expect(isVerifiedProtagonaApplicationUrl(protagonaUrl)).toBe(true);
+    expect(trustedExecutionRequestReason(request)).toBeUndefined();
+    expect(trustedExecutionRequestReason({
+      ...request,
+      careerJob: {
+        ...protagonaJob,
+        sourceRecordId: "protagona:wrong",
+        destinationResolution: {
+          ...protagonaJob.destinationResolution,
+          destinationUrl: "https://protagona.applytojob.com/apply/YDO63zlPbH/other-role",
+        },
+      },
+    })).toContain("independently verified");
+  });
+
+  it("trusts only the exact Sidekick Gusto posting/form pair", async () => {
+    const fixtureValue = await fixture("gusto-destination");
+    const postingUrl = "https://jobs.gusto.com/postings/sidekick-solutions-llc-cloud-engineer-ac0d6b2b-36c5-4bad-a8d2-91b69546d4ad";
+    const applicationUrl = `${postingUrl}/applicants/new`;
+    const gustoJob = {
+      ...fixtureValue.careerJob,
+      sourceId: "curated-live",
+      sourceRecordId: `gusto:${gustoPostingId(postingUrl)}`,
+      destinationResolution: {
+        status: "resolved" as const,
+        attemptedAt: capturedAt,
+        destinationUrl: applicationUrl,
+        ats: "Custom" as const,
+        actionable: true,
+        provenance: "recognized_ats_evidence" as const,
+        evidence: ["curated:explicit-public-posting", "gusto:bounded-posting-route"],
+      },
+      job: {
+        ...fixtureValue.careerJob.job,
+        company: "Sidekick Solutions LLC",
+        title: "Cloud Engineer",
+        sourceUrl: postingUrl,
+        applicationUrl,
+        ats: "Custom",
+      },
+    };
+    const request: ExecutionHostRequest = {
+      ...fixtureValue.request,
+      careerJob: gustoJob,
+      application: { ...fixtureValue.application, job: gustoJob.job },
+    };
+
+    expect(isVerifiedGustoHostedUrl(postingUrl)).toBe(true);
+    expect(isVerifiedGustoApplicationUrl(applicationUrl)).toBe(true);
+    expect(trustedExecutionRequestReason(request)).toBeUndefined();
+    expect(trustedExecutionRequestReason({
+      ...request,
+      careerJob: {
+        ...gustoJob,
+        sourceRecordId: "gusto:wrong:posting",
+        destinationResolution: {
+          ...gustoJob.destinationResolution,
+          destinationUrl: "https://jobs.gusto.com/postings/other-company-role-ac0d6b2b-36c5-4bad-a8d2-91b69546d4ad/applicants/new",
+        },
+      },
+    })).toContain("independently verified");
   });
 
   it("trusts a directly correlated Rippling posting without destination resolution", async () => {
@@ -521,6 +943,29 @@ describe("trusted local execution host", () => {
     expect(executor.closeCalls).toBe(1);
   });
 
+  it("watches the retained session and resumes immediately after CAPTCHA clearance", async () => {
+    const executor = new BlockingPreparationExecutor(true);
+    const { request } = await fixture("captcha-watch", executor);
+    const registry = new ExecutionSessionRegistry({
+      executor,
+      sessionTimeoutMs: 5_000,
+      captchaPollIntervalMs: 5,
+      captchaWaitTimeoutMs: 500,
+    });
+
+    const started = registry.start(request);
+    const blocked = await registry.waitForStatus(started.id, ["waiting_for_human"]);
+    expect(blocked.result?.state).toBe("requires_human");
+    executor.completeHumanStep();
+
+    const ready = await registry.waitForStatus(started.id, ["ready_to_submit"], 1_000);
+    expect(ready.attempt).toBe(2);
+    expect(ready.result?.state).toBe("ready_to_submit");
+    expect(executor.inspectCalls).toBeGreaterThanOrEqual(3);
+    expect(executor.executeCalls).toBe(1);
+    await registry.closeAll();
+  });
+
   it("rejects untrusted requests before an executor can open a browser", async () => {
     const executor = new BlockingPreparationExecutor();
     const { request } = await fixture("untrusted", executor);
@@ -621,7 +1066,7 @@ describe("trusted local execution host", () => {
         submissionPolicy: { authority: "automatic" as const, requireExplicitApproval: false },
       },
     };
-    const registry = new ExecutionSessionRegistry({ executor, allowAutomaticSubmission: true });
+    const registry = new ExecutionSessionRegistry({ executor, allowAutomaticSubmission: true, submissionTarget: { campaignId: automaticRequest.campaign.id, careerJobId: automaticRequest.careerJob.id, applicationId: automaticRequest.application.id } });
     const started = registry.start(automaticRequest);
     const submitted = await registry.waitForStatus(started.id, ["submitted"]);
     expect(submitted.status).toBe("submitted");
@@ -637,7 +1082,7 @@ describe("trusted local execution host", () => {
       ...request,
       campaign: authorizedCampaign,
     };
-    const registry = new ExecutionSessionRegistry({ executor, allowAutomaticSubmission: true });
+    const registry = new ExecutionSessionRegistry({ executor, allowAutomaticSubmission: true, submissionTarget: { campaignId: automaticRequest.campaign.id, careerJobId: automaticRequest.careerJob.id, applicationId: automaticRequest.application.id } });
     const started = registry.start(automaticRequest);
     const submitted = await registry.waitForStatus(started.id, ["submitted"]);
     expect(service.getApplication(careerJob.applicationId!).status).toBe("ready_for_review");

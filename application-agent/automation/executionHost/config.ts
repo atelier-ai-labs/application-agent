@@ -28,6 +28,17 @@ export interface ExecutionHostEnvironment extends GoogleSheetsEnvironment {
   ATELIER_EXECUTION_SESSION_TIMEOUT_MS?: string;
   /** Server-only final-submission capability. Defaults to never. */
   ATELIER_EXECUTION_SUBMISSION_AUTHORITY?: string;
+  /** Allow browser preparation for review while withholding every submit capability. */
+  ATELIER_EXECUTION_PREPARATION_ONLY?: string;
+  /** Stable identity for the one automatic-submission worker. */
+  ATELIER_EXECUTION_WORKER_ID?: string;
+  ATELIER_EXECUTION_SUBMISSION_STATE_FILE?: string;
+  /** Optional exact campaign|career-job|application tuple allowed to submit. */
+  ATELIER_EXECUTION_SUBMISSION_TARGET?: string;
+  ATELIER_HANDOFF_VIEWER_ENABLED?: string;
+  ATELIER_HANDOFF_VIEWER_PORT?: string;
+  ATELIER_HANDOFF_VIEWER_ORIGIN?: string;
+  ATELIER_HANDOFF_QUICK_TUNNEL_ENABLED?: string;
   /** Server-only Brave Search configuration; never exposed to Vite. */
   ATELIER_BRAVE_SEARCH_API_KEY?: string;
   ATELIER_BRAVE_SEARCH_API_BASE_URL?: string;
@@ -55,6 +66,11 @@ export interface ExecutionHostConfig {
   maxConcurrent: number;
   sessionTimeoutMs: number;
   submissionAuthority: Extract<SubmissionAuthority, "never" | "automatic">;
+  preparationOnly: boolean;
+  submissionWorkerId: string;
+  submissionStateFile?: string;
+  submissionTarget?: { campaignId: string; careerJobId: string; applicationId: string };
+  handoffViewer: { enabled: boolean; port: number; origin: string; quickTunnelEnabled: boolean };
   resumePaths: Partial<Record<ResumeFamilyId, string>>;
   braveSearch: {
     apiKey?: string;
@@ -106,6 +122,15 @@ function submissionAuthority(value: string | undefined): Extract<SubmissionAutho
   const normalized = value?.trim() || "never";
   if (normalized === "never" || normalized === "automatic") return normalized;
   throw new Error("ATELIER_EXECUTION_SUBMISSION_AUTHORITY must be never or automatic.");
+}
+
+function submissionTarget(value: string | undefined): ExecutionHostConfig["submissionTarget"] {
+  if (!value?.trim()) return undefined;
+  const parts = value.split("|").map((part) => part.trim());
+  if (parts.length !== 3 || parts.some((part) => !part)) {
+    throw new Error("ATELIER_EXECUTION_SUBMISSION_TARGET must be campaignId|careerJobId|applicationId.");
+  }
+  return { campaignId: parts[0]!, careerJobId: parts[1]!, applicationId: parts[2]! };
 }
 
 function originList(value: string | undefined): readonly string[] {
@@ -169,6 +194,13 @@ export function resolveExecutionHostConfig(env: ExecutionHostEnvironment): Execu
   const maxConcurrent = positiveInteger(env.ATELIER_EXECUTION_MAX_CONCURRENT, 1, "ATELIER_EXECUTION_MAX_CONCURRENT");
   const sessionTimeoutMs = positiveInteger(env.ATELIER_EXECUTION_SESSION_TIMEOUT_MS, 30 * 60 * 1_000, "ATELIER_EXECUTION_SESSION_TIMEOUT_MS");
   const configuredSubmissionAuthority = submissionAuthority(env.ATELIER_EXECUTION_SUBMISSION_AUTHORITY);
+  const preparationOnly = booleanValue(env.ATELIER_EXECUTION_PREPARATION_ONLY, false, "ATELIER_EXECUTION_PREPARATION_ONLY");
+  const submissionWorkerId = env.ATELIER_EXECUTION_WORKER_ID?.trim() || "local-execution-host";
+  const configuredSubmissionTarget = submissionTarget(env.ATELIER_EXECUTION_SUBMISSION_TARGET);
+  const handoffViewerEnabled = booleanValue(env.ATELIER_HANDOFF_VIEWER_ENABLED, false, "ATELIER_HANDOFF_VIEWER_ENABLED");
+  const handoffViewerPort = positiveInteger(env.ATELIER_HANDOFF_VIEWER_PORT, 8790, "ATELIER_HANDOFF_VIEWER_PORT");
+  const handoffViewerOrigin = env.ATELIER_HANDOFF_VIEWER_ORIGIN?.trim() || `http://127.0.0.1:${handoffViewerPort}`;
+  const quickTunnelEnabled = booleanValue(env.ATELIER_HANDOFF_QUICK_TUNNEL_ENABLED, false, "ATELIER_HANDOFF_QUICK_TUNNEL_ENABLED");
   const braveSearchApiKey = env.ATELIER_BRAVE_SEARCH_API_KEY?.trim() || undefined;
   const braveSearchEndpoint = env.ATELIER_BRAVE_SEARCH_API_BASE_URL?.trim() || undefined;
   return {
@@ -181,6 +213,11 @@ export function resolveExecutionHostConfig(env: ExecutionHostEnvironment): Execu
     maxConcurrent,
     sessionTimeoutMs,
     submissionAuthority: configuredSubmissionAuthority,
+    preparationOnly,
+    submissionWorkerId,
+    ...(env.ATELIER_EXECUTION_SUBMISSION_STATE_FILE?.trim() ? { submissionStateFile: env.ATELIER_EXECUTION_SUBMISSION_STATE_FILE.trim() } : {}),
+    ...(configuredSubmissionTarget ? { submissionTarget: configuredSubmissionTarget } : {}),
+    handoffViewer: { enabled: handoffViewerEnabled, port: handoffViewerPort, origin: handoffViewerOrigin, quickTunnelEnabled },
     resumePaths: resolveResumePathsFromEnv(env),
     braveSearch: {
       ...(braveSearchApiKey ? { apiKey: braveSearchApiKey } : {}),

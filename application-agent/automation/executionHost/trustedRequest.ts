@@ -16,6 +16,17 @@ import {
   isVerifiedRipplingApplicationUrl,
   ripplingApplicationUrl,
   isVerifiedWorkdayApplicationUrl,
+  isVerifiedWorkdayHostedUrl,
+  workdayPostingId,
+  isVerifiedYouHiredApplicationUrl,
+  isVerifiedMatlenApplicationUrl,
+  isVerifiedProtagonaApplicationUrl,
+  isVerifiedGustoHostedUrl,
+  isVerifiedGustoApplicationUrl,
+  gustoPostingId,
+  matlenPostingId,
+  protagonaPostingId,
+  youHiredPostingId,
 } from "../../src/domain/jobUrlClassifier";
 import { isExecutionHostRequest } from "../../src/domain/executionHostValidation";
 
@@ -125,23 +136,26 @@ export function trustedExecutionRequestReason(value: unknown): string | undefine
 
   if (applicationClassification.kind === "greenhouse" &&
     applicationClassification.siteIdentifier && applicationClassification.postingIdentifier) {
-    const resolution = careerJob.destinationResolution;
-    const destinationMatches = resolution?.status === "resolved" &&
-      resolution.actionable === true &&
-      resolution.ats === "Greenhouse" &&
-      resolution.destinationUrl === careerJob.job.applicationUrl;
-    const directGreenhouseSource = sourceId.startsWith("greenhouse:") &&
-      Boolean(careerJob.sourceRecordId) &&
-      isVerifiedGreenhouseHostedUrl(careerJob.job.sourceUrl, sourceId.slice("greenhouse:".length), careerJob.sourceRecordId ?? "");
-    if (!destinationMatches && !directGreenhouseSource) {
-      return "The Greenhouse destination is not independently verified for this posting.";
-    }
-    if (directGreenhouseSource && !isVerifiedGreenhouseApplicationUrl(
+    const curatedGreenhouse = sourceId === "curated-live";
+    if ((curatedGreenhouse && !isVerifiedGreenhouseHostedUrl(
+      careerJob.job.sourceUrl,
+      applicationClassification.siteIdentifier,
+      applicationClassification.postingIdentifier,
+    )) || !isVerifiedGreenhouseApplicationUrl(
       careerJob.job.applicationUrl,
       applicationClassification.siteIdentifier,
       applicationClassification.postingIdentifier,
     )) {
-      return "The application URL is not the verified Greenhouse application path for this provider ID.";
+      return "The Greenhouse source and application URLs are not the same verified posting.";
+    }
+    if (!curatedGreenhouse && !careerJob.destinationResolution && !sourceId.startsWith("greenhouse:")) {
+      return "The Greenhouse destination is not independently verified for this posting.";
+    }
+    const expectedSourceRecordId = curatedGreenhouse
+      ? `greenhouse:${applicationClassification.siteIdentifier}:${applicationClassification.postingIdentifier}`
+      : sourceId.startsWith("greenhouse:") ? applicationClassification.postingIdentifier : undefined;
+    if (expectedSourceRecordId !== undefined && careerJob.sourceRecordId !== expectedSourceRecordId) {
+      return "The Greenhouse source provenance does not match the verified posting identity.";
     }
     return undefined;
   }
@@ -202,15 +216,114 @@ export function trustedExecutionRequestReason(value: unknown): string | undefine
   if (applicationClassification.kind === "workday" &&
     applicationClassification.siteIdentifier &&
     isVerifiedWorkdayApplicationUrl(careerJob.job.applicationUrl, applicationClassification.siteIdentifier)) {
+    const sourcePostingId = workdayPostingId(careerJob.job.sourceUrl);
+    const applicationPostingId = workdayPostingId(careerJob.job.applicationUrl);
+    if (!isVerifiedWorkdayHostedUrl(careerJob.job.sourceUrl, applicationClassification.siteIdentifier) ||
+      !sourcePostingId || sourcePostingId !== applicationPostingId) {
+      return "The Workday source and application URLs are not the same verified posting.";
+    }
     const resolution = careerJob.destinationResolution;
     const destinationMatches = resolution?.status === "resolved" &&
       resolution.actionable === true &&
       resolution.ats === "Workday" &&
-      resolution.destinationUrl === careerJob.job.applicationUrl;
+      resolution.destinationUrl === careerJob.job.applicationUrl &&
+      workdayPostingId(resolution.destinationUrl) === applicationPostingId;
     if (!destinationMatches) {
       return "The Workday destination is not independently verified for this posting.";
     }
     return undefined;
+  }
+
+  if (isVerifiedYouHiredApplicationUrl(careerJob.job.applicationUrl)) {
+    const postingId = youHiredPostingId(careerJob.job.applicationUrl);
+    const resolution = careerJob.destinationResolution;
+    const destinationMatches = resolution?.status === "resolved" &&
+      resolution.actionable === true &&
+      resolution.ats === "Custom" &&
+      resolution.destinationUrl === careerJob.job.applicationUrl;
+    const directCuratedSource = sourceId === "curated-live" &&
+      Boolean(postingId) &&
+      careerJob.sourceRecordId === `youhired:${postingId}` &&
+      careerJob.job.sourceUrl === careerJob.job.applicationUrl;
+    if (!destinationMatches && !directCuratedSource) {
+      return "The YouHired destination is not independently verified for this posting.";
+    }
+    return undefined;
+  }
+
+  if (isVerifiedMatlenApplicationUrl(careerJob.job.applicationUrl)) {
+    const postingId = matlenPostingId(careerJob.job.applicationUrl);
+    const resolution = careerJob.destinationResolution;
+    const destinationMatches = resolution?.status === "resolved" &&
+      resolution.actionable === true &&
+      resolution.ats === "Custom" &&
+      resolution.destinationUrl === careerJob.job.applicationUrl;
+    const directCuratedSource = sourceId === "curated-live" &&
+      Boolean(postingId) &&
+      careerJob.sourceRecordId === `matlensilver:${postingId}` &&
+      careerJob.job.sourceUrl === careerJob.job.applicationUrl;
+    if (!destinationMatches && !directCuratedSource) {
+      return "The Matlen Silver destination is not independently verified for this posting.";
+    }
+    if (!postingId || careerJob.job.sourceUrl !== careerJob.job.applicationUrl) {
+      return "The Matlen Silver source and application URL must be the same verified job route.";
+    }
+    return undefined;
+  }
+
+  if (isVerifiedProtagonaApplicationUrl(careerJob.job.applicationUrl)) {
+    const postingId = protagonaPostingId(careerJob.job.applicationUrl);
+    const resolution = careerJob.destinationResolution;
+    const destinationMatches = resolution?.status === "resolved" &&
+      resolution.actionable === true &&
+      resolution.ats === "Custom" &&
+      resolution.destinationUrl === careerJob.job.applicationUrl;
+    const directCuratedSource = sourceId === "curated-live" &&
+      Boolean(postingId) &&
+      careerJob.sourceRecordId === `protagona:${postingId}` &&
+      careerJob.job.sourceUrl === careerJob.job.applicationUrl;
+    if (!destinationMatches && !directCuratedSource) {
+      return "The Protagona destination is not independently verified for this posting.";
+    }
+    if (!postingId || careerJob.job.sourceUrl !== careerJob.job.applicationUrl) {
+      return "The Protagona source and application URL must be the same verified job route.";
+    }
+    return undefined;
+  }
+
+  if (isVerifiedGustoApplicationUrl(careerJob.job.applicationUrl)) {
+    const postingId = gustoPostingId(careerJob.job.applicationUrl);
+    const resolution = careerJob.destinationResolution;
+    const destinationMatches = resolution?.status === "resolved" &&
+      resolution.actionable === true &&
+      resolution.ats === "Custom" &&
+      resolution.destinationUrl === careerJob.job.applicationUrl;
+    const directCuratedSource = sourceId === "curated-live" &&
+      Boolean(postingId) &&
+      careerJob.sourceRecordId === `gusto:${postingId}` &&
+      isVerifiedGustoHostedUrl(careerJob.job.sourceUrl) &&
+      gustoPostingId(careerJob.job.sourceUrl) === postingId;
+    if (!destinationMatches && !directCuratedSource) {
+      return "The Gusto destination is not independently verified for this posting.";
+    }
+    if (!postingId || !isVerifiedGustoHostedUrl(careerJob.job.sourceUrl) ||
+      gustoPostingId(careerJob.job.sourceUrl) !== postingId) {
+      return "The Gusto posting and application URLs do not match the same verified posting.";
+    }
+    return undefined;
+  }
+
+  // Unknown ATS/direct forms are admitted only after the destination resolver
+  // records explicit official-employer evidence for this exact URL. Aggregator
+  // links never satisfy this branch because they do not produce this provenance.
+  if (applicationClassification.kind === "custom") {
+    const resolution = careerJob.destinationResolution;
+    if (resolution?.status === "resolved" && resolution.actionable === true &&
+      resolution.ats === "Custom" && resolution.provenance === "official_employer_evidence" &&
+      resolution.destinationUrl === careerJob.job.applicationUrl) {
+      return undefined;
+    }
+    return "The direct application destination lacks independently verified official-employer evidence; the posting does not have a supported verified application destination.";
   }
 
   return "The posting does not have a supported verified application destination.";

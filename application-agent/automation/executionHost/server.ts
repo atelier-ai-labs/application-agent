@@ -15,8 +15,16 @@ import {
   UnavailableJobTracker,
   type JobTracker,
 } from "../../src/domain/tracker";
-import { ExecutionHostRegistryError, ExecutionSessionRegistry, type ExecutionSessionRegistryOptions } from "./sessionRegistry";
+import {
+  ExecutionHostRegistryError,
+  ExecutionSessionRegistry,
+  MANUAL_SUBMISSION_APPROVAL,
+  type ExecutionSessionRegistryOptions,
+  type ManualSubmissionApproval,
+} from "./sessionRegistry";
 import { createConfiguredGoogleSheetsJobTracker } from "../googleSheetsJobTracker";
+import { HandoffBoundary, type HandoffGrant } from "./handoffBoundary";
+import { createHandoffViewerServer, type HandoffViewerServer } from "./handoffViewer";
 import {
   DEFAULT_EXECUTION_ALLOWED_ORIGINS,
   resolveExecutionHostConfig,
@@ -34,6 +42,8 @@ export interface ExecutionHostServerOptions extends Partial<Omit<ExecutionSessio
   allowedOrigins?: readonly string[];
   maxBodyBytes?: number;
   allowNonLoopback?: boolean;
+  /** Optional isolated loopback viewer; it is never part of the execution API. */
+  handoffViewer?: { port: number; origin: string; quickTunnelEnabled?: boolean; boundary?: HandoffBoundary };
 }
 
 export interface ExecutionHostServer {
@@ -43,6 +53,8 @@ export interface ExecutionHostServer {
   port: number;
   allowedOrigins: readonly string[];
   close(): Promise<void>;
+  issueHandoff(executionId: string): HandoffGrant;
+  handoffViewer?: HandoffViewerServer;
 }
 
 const DEFAULT_ALLOWED_ORIGINS = DEFAULT_EXECUTION_ALLOWED_ORIGINS;
@@ -152,6 +164,10 @@ export function createExecutionHostServer(options: ExecutionHostServerOptions): 
   const registry = options.registry ?? new ExecutionSessionRegistry({
     executor: options.executor ?? (() => { throw new Error("An application executor is required."); })(),
     ...(options.allowAutomaticSubmission !== undefined ? { allowAutomaticSubmission: options.allowAutomaticSubmission } : {}),
+    ...(options.preparationOnly !== undefined ? { preparationOnly: options.preparationOnly } : {}),
+    ...(options.submissionWorkerId ? { submissionWorkerId: options.submissionWorkerId } : {}),
+    ...(options.submissionStateFile ? { submissionStateFile: options.submissionStateFile } : {}),
+    ...(options.submissionTarget ? { submissionTarget: options.submissionTarget } : {}),
     ...(options.now ? { now: options.now } : {}),
     ...(options.createId ? { createId: options.createId } : {}),
     ...(options.maxConcurrent !== undefined ? { maxConcurrent: options.maxConcurrent } : {}),
@@ -161,6 +177,16 @@ export function createExecutionHostServer(options: ExecutionHostServerOptions): 
   const tracker = options.tracker ?? new UnavailableJobTracker(
     "Google Sheets tracker is not configured; no canonical tracker write occurred.",
   );
+  const handoffBoundary = options.handoffViewer?.boundary ?? new HandoffBoundary();
+  const handoffViewer = options.handoffViewer
+    ? createHandoffViewerServer({
+        boundary: handoffBoundary,
+        host: "127.0.0.1",
+        port: options.handoffViewer.port,
+        origin: options.handoffViewer.origin,
+        bridgeForExecution: (executionId) => registry.getHandoffBridge(executionId),
+      })
+    : undefined;
 
   const server = createServer(async (request, response) => {
     const origin = requestOrigin(request);
@@ -249,6 +275,17 @@ export function createExecutionHostServer(options: ExecutionHostServerOptions): 
         return;
       }
 
+      if (parts[0] === "career-agent" && parts[1] === "executions" && parts[2] === "by-application" && parts.length === 5 && parts[4] === "handoff" && request.method === "POST") {
+        if (!handoffViewer) throw new ExecutionHostRegistryError("The handoff viewer is not enabled.", "state");
+        if (options.handoffViewer?.quickTunnelEnabled && handoffViewer.getPublicOrigin() === new URL(options.handoffViewer.origin).origin) throw new ExecutionHostRegistryError("The protected public handoff origin is not ready yet.", "conflict");
+        const active = registry.getActiveForApplication(parts[3]!);
+        if (!active) throw new ExecutionHostRegistryError("No active execution exists for that application.", "not_found");
+        if (active.status !== "waiting_for_human" || active.result?.state !== "requires_human") throw new ExecutionHostRegistryError("A handoff may only be issued for an active human-verification boundary.", "state");
+        const grant = handoffBoundary.issue(active.id);
+        sendJson(response, 200, { url: `${handoffViewer.getPublicOrigin()}/handoff#token=${encodeURIComponent(grant.token)}`, expiresAt: grant.expiresAt }, origin, allowedOrigins);
+        return;
+      }
+
       if (parts[0] !== "career-agent" || parts[1] !== "executions") {
         sendJson(response, 404, { error: "Route not found." }, origin, allowedOrigins);
         return;
@@ -260,6 +297,16 @@ export function createExecutionHostServer(options: ExecutionHostServerOptions): 
           throw new ExecutionHostRegistryError("Execution start requires a valid campaign, career job, application packet, and profile.", "invalid_request");
         }
         sendJson(response, 202, registry.start(body), origin, allowedOrigins);
+        return;
+      }
+
+      if (request.method === "GET" && parts.length === 4 && parts[2] === "by-application") {
+        const snapshot = registry.getActiveForApplication(decodeURIComponent(parts[3]));
+        if (!snapshot) {
+          sendJson(response, 404, { error: "No active execution exists for that application." }, origin, allowedOrigins);
+          return;
+        }
+        sendJson(response, 200, snapshot, origin, allowedOrigins);
         return;
       }
 
@@ -284,6 +331,20 @@ export function createExecutionHostServer(options: ExecutionHostServerOptions): 
         sendJson(response, 200, await registry.cancel(executionId), origin, allowedOrigins);
         return;
       }
+      if (request.method === "POST" && parts.length === 4 && parts[3] === "submit") {
+        const body = await readJsonBody(request, maxBodyBytes);
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+          throw new ExecutionHostRegistryError("Manual submission requires an explicit approval object.", "invalid_request");
+        }
+        const candidate = body as Partial<ManualSubmissionApproval>;
+        if (candidate.approval !== MANUAL_SUBMISSION_APPROVAL ||
+          typeof candidate.campaignId !== "string" || typeof candidate.careerJobId !== "string" ||
+          typeof candidate.applicationId !== "string") {
+          throw new ExecutionHostRegistryError("Manual submission requires SUBMIT_APPLICATION and the exact campaign, job, and application IDs.", "invalid_request");
+        }
+        sendJson(response, 200, await registry.submitManually(executionId, candidate as ManualSubmissionApproval), origin, allowedOrigins);
+        return;
+      }
       sendJson(response, 404, { error: "Route not found." }, origin, allowedOrigins);
     } catch (error) {
       sendJson(response, errorStatus(error), { error: safeError(error, "The local execution host could not complete the request.") }, origin, allowedOrigins);
@@ -296,8 +357,18 @@ export function createExecutionHostServer(options: ExecutionHostServerOptions): 
     host,
     port,
     allowedOrigins,
+    ...(handoffViewer ? { handoffViewer } : {}),
+    issueHandoff: (executionId: string) => {
+      const snapshot = registry.get(executionId);
+      if (snapshot.status !== "waiting_for_human" || snapshot.result?.state !== "requires_human") {
+        throw new ExecutionHostRegistryError("A handoff may only be issued for an active human-verification boundary.", "state");
+      }
+      return handoffBoundary.issue(executionId);
+    },
     close: async () => {
+      handoffBoundary.revokeAll?.();
       await registry.closeAll();
+      if (handoffViewer) await handoffViewer.close();
       await new Promise<void>((resolve) => {
         if (!server.listening) {
           resolve();
@@ -324,7 +395,7 @@ export function createConfiguredExecutionHostServer(
     headless: config.headless,
     timeoutMs: config.browserTimeoutMs,
     ...(Object.keys(config.resumePaths).length > 0 ? { resumePaths: config.resumePaths } : {}),
-    allowAutomaticSubmission: config.submissionAuthority === "automatic",
+    allowAutomaticSubmission: config.submissionAuthority === "automatic" && !config.preparationOnly,
     ...(options.now ? { now: options.now } : {}),
   });
   return createExecutionHostServer({
@@ -340,7 +411,12 @@ export function createConfiguredExecutionHostServer(
     allowNonLoopback: config.allowNonLoopback,
     maxConcurrent: config.maxConcurrent,
     sessionTimeoutMs: config.sessionTimeoutMs,
-    allowAutomaticSubmission: config.submissionAuthority === "automatic",
+    allowAutomaticSubmission: config.submissionAuthority === "automatic" && !config.preparationOnly,
+    preparationOnly: config.preparationOnly,
+    submissionWorkerId: config.submissionWorkerId,
+    ...(config.submissionStateFile ? { submissionStateFile: config.submissionStateFile } : {}),
+    ...(config.submissionTarget ? { submissionTarget: config.submissionTarget } : {}),
+    ...(config.handoffViewer.enabled ? { handoffViewer: { port: config.handoffViewer.port, origin: config.handoffViewer.origin, quickTunnelEnabled: config.handoffViewer.quickTunnelEnabled } } : {}),
     ...(options.now ? { now: options.now } : {}),
     ...(options.logger ? { logger: options.logger } : {}),
   });
