@@ -172,6 +172,31 @@ describe("Application Agent job intake and grounding", () => {
     expect(fit).not.toHaveProperty("score");
   });
 
+  it("routes frontend roles to the verified frontend family and fails closed when it is absent", () => {
+    const frontend = assessFit(canonicalPosting({ company: "Reddit", title: "Frontend Engineer, Ads", requiredSkills: ["React", "TypeScript"] }), exampleCandidateProfile);
+    expect(frontend.recommendedResumeFamily).toBe("frontend-software");
+
+    const cloudOnly = { ...exampleCandidateProfile, resumeFamilies: exampleCandidateProfile.resumeFamilies.filter((family) => family.id === "cloud-platform") };
+    expect(() => assessFit(canonicalPosting({ company: "Reddit", title: "Frontend Engineer, Ads", requiredSkills: ["React"] }), cloudOnly)).toThrow("No verified frontend/software resume family");
+  });
+
+  it("routes an AI platform posting by dominant role signals, not supporting cloud keywords", () => {
+    const fit = assessFit(canonicalPosting({
+      title: "AI Platform Engineer",
+      description: "Build production APIs and microservices for Bedrock AgentCore and Strands agents with observability.",
+      requiredSkills: ["AWS", "Terraform", "CloudFormation"],
+      preferredSkills: ["LLM", "agentic systems"],
+    }), exampleCandidateProfile);
+    expect(fit.recommendedResumeFamily).toBe("ai-platform-agentic");
+  });
+
+  it("fails closed when configured families tie on the posting focus", () => {
+    const profile = cloneExampleProfile();
+    const cloud = profile.resumeFamilies.find((family) => family.id === "cloud-platform")!;
+    profile.resumeFamilies = [cloud, { ...cloud, label: "Cloud / Platform (alternate)" }];
+    expect(() => assessFit(canonicalPosting({ title: "Cloud Engineer", description: "Build cloud services.", requiredSkills: [], preferredSkills: [] }), profile)).toThrow(/ties between/);
+  });
+
   it("matches explicit technologies inside bounded compound skill labels", () => {
     const profile = cloneExampleProfile();
     profile.skills = [
@@ -266,6 +291,38 @@ describe("Application Agent answer policy", () => {
     ]));
     expect(DEFAULT_ANSWER_POLICIES.legal_attestations).toBe("never_auto");
   });
+
+  it("uses an explicitly configured sponsorship fact without turning it into a guessed answer", async () => {
+    const profile = cloneExampleProfile();
+    profile.workAuthorization = {
+      status: "authorized",
+      countries: ["United States"],
+      sponsorshipRequired: false,
+    };
+    profile.answerPolicies = {
+      ...profile.answerPolicies,
+      sponsorship: "auto",
+    };
+    const job = canonicalPosting();
+    const fit = assessFit(job, profile);
+    const resume = tailorResume(job, profile, fit, capturedAt);
+    const answers = await prepareApplicationAnswers(
+      job,
+      profile,
+      fit,
+      resume,
+      async (context) => buildDraftAnswer(context),
+    );
+    const sponsorship = answers.find((answer) => answer.field === "sponsorship");
+
+    expect(sponsorship).toMatchObject({
+      policy: "auto",
+      status: "resolved",
+      value: "No",
+      provenance: ["profile:workAuthorization.sponsorshipRequired"],
+    });
+    expect(blockersFromAnswers(answers).some((blocker) => blocker.field === "sponsorship")).toBe(false);
+  });
 });
 
 describe("Application Agent lifecycle, events, and persistence", () => {
@@ -305,6 +362,21 @@ describe("Application Agent lifecycle, events, and persistence", () => {
       "application.needs_input",
       "application.ready_for_review",
     ]);
+  });
+
+  it("allows career-only demographic controls to reopen under the aggregate application blocker", async () => {
+    const repository = new InMemoryApplicationRepository();
+    const service = new ApplicationService(repository, cloneExampleProfile(), undefined, runtime());
+    let application = await service.prepareFromIntake({ ...postingInput, isExample: true });
+    for (const blocker of application.blockers.filter((candidate) => candidate.status === "open")) {
+      application = service.resolveHumanField(application.id, blocker.id, `Explicit answer for ${blocker.field}`);
+    }
+    const reopened = service.reopenFieldsForManualHandoff(application.id, ["430", "431", "gdpr_demographic_data_consent_given_1"]);
+    expect(reopened.status).toBe("ready_for_review");
+    expect(reopened.blockers.every((blocker) => blocker.status === "resolved")).toBe(true);
+    expect(reopened.blockers.find((blocker) => blocker.field === "demographic_disclosure")?.value).toBe("Explicit answer for demographic_disclosure");
+    expect(() => service.reopenFieldsForManualHandoff(application.id, ["unknown-browser-field"]))
+      .toThrow("A requested manual field is missing or not resolved.");
   });
 
   it("round-trips independent application records and events through replaceable storage", () => {

@@ -7,7 +7,10 @@ import {
   renameSync,
   unlinkSync,
   writeFileSync,
+  statSync,
+  utimesSync,
 } from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { dirname, resolve } from "node:path";
 import type { KeyValueStorage } from "../../src/persistence/storage";
 
@@ -15,6 +18,8 @@ export const DEFAULT_CAREER_AGENT_STATE_FILE = ".local/career-agent/state.json";
 
 const STATE_VERSION = 1;
 let temporaryFileSequence = 0;
+const lockWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
+const exclusiveLockContext = new AsyncLocalStorage<FileKeyValueStorage>();
 
 interface StateEnvelope {
   version: typeof STATE_VERSION;
@@ -89,6 +94,71 @@ export class FileKeyValueStorage implements KeyValueStorage {
     next.delete(key);
     this.persist(next);
     this.values = next;
+  }
+
+  reload(): void {
+    this.values = new Map(Object.entries(readEnvelope(this.filePath).values));
+  }
+
+  /** Execute a read/modify/write transaction under an OS-visible lock. */
+  withExclusiveLock<T>(operation: () => T): T {
+    // A synchronous repository/authority transaction may be called from an
+    // async transaction on this same storage instance. Re-entering here is
+    // safe because AsyncLocalStorage proves it is the owning async context;
+    // another process still contends on the OS-visible lock below.
+    if (exclusiveLockContext.getStore() === this) return operation();
+    const directory = dirname(this.filePath);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const lockPath = `${this.filePath}.lock`;
+    let descriptor: number | undefined;
+    for (;;) {
+      try {
+        descriptor = openSync(lockPath, "wx", 0o600);
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        try {
+          if (Date.now() - statSync(lockPath).mtimeMs > 30_000) unlinkSync(lockPath);
+        } catch { /* Another process owns or is replacing the lock. */ }
+        Atomics.wait(lockWaitBuffer, 0, 0, 5);
+      }
+    }
+    try {
+      this.reload();
+      return operation();
+    } finally {
+      try { closeSync(descriptor); } finally { try { unlinkSync(lockPath); } catch { /* already released */ } }
+    }
+  }
+
+  /** Async counterpart used by one-shot maintenance commands. */
+  async withExclusiveLockAsync<T>(operation: () => Promise<T>): Promise<T> {
+    if (exclusiveLockContext.getStore() === this) return operation();
+    const directory = dirname(this.filePath);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const lockPath = `${this.filePath}.lock`;
+    let descriptor: number | undefined;
+    for (;;) {
+      try {
+        descriptor = openSync(lockPath, "wx", 0o600);
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        try {
+          if (Date.now() - statSync(lockPath).mtimeMs > 30_000) unlinkSync(lockPath);
+        } catch { /* Another process owns or is replacing the lock. */ }
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+      }
+    }
+    const heartbeat = setInterval(() => {
+      try { utimesSync(lockPath, new Date(), new Date()); } catch { /* The owner or cleanup already released the lock. */ }
+    }, 5_000);
+    try {
+      return await exclusiveLockContext.run(this, operation);
+    } finally {
+      clearInterval(heartbeat);
+      try { closeSync(descriptor); } finally { try { unlinkSync(lockPath); } catch { /* already released */ } }
+    }
   }
 
   private persist(values: ReadonlyMap<string, string>): void {

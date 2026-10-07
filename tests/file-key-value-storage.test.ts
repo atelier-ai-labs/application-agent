@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { FileKeyValueStorage } from "../application-agent/automation/runtime/fileKeyValueStorage";
+import { DurableSubmissionAuthority } from "../application-agent/automation/executionHost/submissionAuthority";
 
 const directories: string[] = [];
 function location() {
@@ -54,5 +55,22 @@ describe("durable local state failures", () => {
     const storage = new FileKeyValueStorage(path);
     storage.setItem("__proto__", "value");
     expect(new FileKeyValueStorage(path).getItem("__proto__")).toBe("value");
+  });
+
+  it("re-enters the same async lock for a synchronous fence transaction without losing updates", async () => {
+    const { path } = location();
+    const storage = new FileKeyValueStorage(path);
+    const authority = new DurableSubmissionAuthority("nested-lock-worker", { storage });
+    await storage.withExclusiveLockAsync(async () => {
+      storage.setItem("career-state", "before-fence");
+      const fence = authority.claim("application-nested", "job-nested", "2026-09-25T00:00:00.000Z");
+      authority.beforeClick(fence, "2026-09-25T00:00:01.000Z");
+      authority.markUnknown(fence, "2026-09-25T00:00:02.000Z");
+      storage.setItem("career-state", "after-fence");
+      await Promise.resolve();
+    });
+    const persisted = new FileKeyValueStorage(path);
+    expect(persisted.getItem("career-state")).toBe("after-fence");
+    expect(new DurableSubmissionAuthority("nested-lock-worker", { storage: persisted }).get("application-nested", "job-nested")?.state).toBe("unknown");
   });
 });

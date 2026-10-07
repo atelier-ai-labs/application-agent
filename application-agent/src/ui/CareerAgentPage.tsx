@@ -19,6 +19,12 @@ import type {
 } from "../domain/campaignTypes";
 import { HIMALAYAS_SOURCE_ID } from "../domain/campaignTypes";
 import { discoveryCoverageRatios } from "../domain/jobDiscovery";
+import {
+  isVerifiedGustoApplicationUrl,
+  isVerifiedMatlenApplicationUrl,
+  isVerifiedProtagonaApplicationUrl,
+  isVerifiedYouHiredApplicationUrl,
+} from "../domain/jobUrlClassifier";
 import { eventLabel } from "../domain/notifications";
 import type { ExecutionRunTrace } from "../domain/executionTrace";
 import { useCareerAgentWorkspace } from "./useCareerAgentWorkspace";
@@ -1002,9 +1008,30 @@ export function BrowserExecutionControls({
     job.destinationResolution.ats === "Ashby" &&
     job.destinationResolution.actionable === true &&
     job.destinationResolution.destinationUrl === job.job.applicationUrl;
+  const isVerifiedYouHiredDestination = job.destinationResolution?.status === "resolved" &&
+    job.destinationResolution.ats === "Custom" &&
+    job.destinationResolution.actionable === true &&
+    job.destinationResolution.destinationUrl === job.job.applicationUrl &&
+    isVerifiedYouHiredApplicationUrl(job.job.applicationUrl);
+  const isVerifiedMatlenDestination = job.destinationResolution?.status === "resolved" &&
+    job.destinationResolution.ats === "Custom" &&
+    job.destinationResolution.actionable === true &&
+    job.destinationResolution.destinationUrl === job.job.applicationUrl &&
+    isVerifiedMatlenApplicationUrl(job.job.applicationUrl);
+  const isVerifiedProtagonaDestination = job.destinationResolution?.status === "resolved" &&
+    job.destinationResolution.ats === "Custom" &&
+    job.destinationResolution.actionable === true &&
+    job.destinationResolution.destinationUrl === job.job.applicationUrl &&
+    isVerifiedProtagonaApplicationUrl(job.job.applicationUrl);
+  const isVerifiedGustoDestination = job.destinationResolution?.status === "resolved" &&
+    job.destinationResolution.ats === "Custom" &&
+    job.destinationResolution.actionable === true &&
+    job.destinationResolution.destinationUrl === job.job.applicationUrl &&
+    isVerifiedGustoApplicationUrl(job.job.applicationUrl);
   const isSupportedBrowserDestination = job.sourceId.startsWith("lever:") || job.sourceId.startsWith("greenhouse:") ||
     isVerifiedGreenhouseDestination || isVerifiedRipplingDestination ||
-    isVerifiedLeverDestination || isVerifiedAshbyDestination || isVerifiedWorkdayDestination;
+    isVerifiedLeverDestination || isVerifiedAshbyDestination || isVerifiedWorkdayDestination ||
+    isVerifiedYouHiredDestination || isVerifiedMatlenDestination || isVerifiedProtagonaDestination || isVerifiedGustoDestination;
   if (!job.applicationId || job.actionability !== "actionable" || !job.job.applicationUrl || !isSupportedBrowserDestination) return null;
 
   const execution = job.execution;
