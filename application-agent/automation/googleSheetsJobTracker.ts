@@ -25,6 +25,7 @@ export interface GoogleSheetMetadata {
   sheets: readonly {
     title: string;
     sheetId: number;
+    gridProperties?: { columnCount?: number; rowCount?: number };
   }[];
 }
 
@@ -47,6 +48,7 @@ export interface GoogleSheetsApiTransport {
     spreadsheetId: string,
     data: readonly GoogleSheetValueRange[],
   ): Promise<GoogleSheetUpdateAcknowledgement>;
+  batchUpdate?(spreadsheetId: string, requests: readonly Record<string, unknown>[]): Promise<void>;
 }
 
 export interface GoogleSheetsJobTrackerConfig {
@@ -56,7 +58,7 @@ export interface GoogleSheetsJobTrackerConfig {
   timeoutMs: number;
 }
 
-interface AccessTokenProvider {
+export interface AccessTokenProvider {
   getAccessToken(): Promise<string>;
 }
 
@@ -165,7 +167,12 @@ function parseMetadata(value: unknown): GoogleSheetMetadata {
     if (!isRecord(sheet) || !isRecord(sheet.properties) || !nonEmptyString(sheet.properties.title) || !nonNegativeInteger(sheet.properties.sheetId)) {
       throw new Error("Google Sheets returned malformed sheet metadata.");
     }
-    return { title: sheet.properties.title, sheetId: sheet.properties.sheetId };
+    const grid = isRecord(sheet.properties.gridProperties) ? sheet.properties.gridProperties : undefined;
+    const columnCount = grid?.columnCount;
+    const rowCount = grid?.rowCount;
+    if (columnCount !== undefined && !nonNegativeInteger(columnCount)) throw new Error("Google Sheets returned malformed sheet column metadata.");
+    if (rowCount !== undefined && !nonNegativeInteger(rowCount)) throw new Error("Google Sheets returned malformed sheet row metadata.");
+    return { title: sheet.properties.title, sheetId: sheet.properties.sheetId, ...(grid ? { gridProperties: { ...(columnCount !== undefined ? { columnCount } : {}), ...(rowCount !== undefined ? { rowCount } : {}) } } : {}) };
   });
   return {
     spreadsheetId: value.spreadsheetId,
@@ -335,6 +342,12 @@ export class GoogleSheetsHttpTransport implements GoogleSheetsApiTransport {
       },
     );
     return parseUpdateAcknowledgement(body);
+  }
+
+  async batchUpdate(spreadsheetId: string, requests: readonly Record<string, unknown>[]): Promise<void> {
+    await this.request(`${GOOGLE_SHEETS_API_ROOT}/spreadsheets/${encodePathPart(spreadsheetId)}:batchUpdate`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ requests }),
+    });
   }
 
   private async request(url: string, init: RequestInit): Promise<unknown> {
@@ -659,6 +672,25 @@ export interface GoogleSheetsEnvironment extends GoogleAuthEnvironment {
   ATELIER_GOOGLE_SHEET_NAME?: string;
   ATELIER_GOOGLE_SHEET_TAB?: string;
   ATELIER_GOOGLE_SHEETS_TIMEOUT_MS?: string;
+}
+
+/** Server-side transport factory shared by the legacy tracker and standalone queue. */
+export function createConfiguredGoogleSheetsTransport(env: GoogleSheetsEnvironment): GoogleSheetsHttpTransport {
+  const timeoutMs = timeoutFromEnv(env.ATELIER_GOOGLE_SHEETS_TIMEOUT_MS);
+  const authSelection = resolveGoogleAuthMode(env);
+  if (authSelection.error) throw new Error(authSelection.error);
+  if (!authSelection.mode) throw new Error("Google Sheets credentials are not configured; set ATELIER_GOOGLE_AUTH_MODE=oauth and run npm run career-agent:google-auth, or configure an explicit legacy credential mode.");
+  const token = env.ATELIER_GOOGLE_ACCESS_TOKEN?.trim();
+  const credentialPath = env.ATELIER_GOOGLE_APPLICATION_CREDENTIALS?.trim();
+  const provider = authSelection.mode === "oauth"
+    ? createGoogleOAuthAccessTokenProvider(env, timeoutMs)
+    : authSelection.mode === "access_token" && token
+      ? new StaticAccessTokenProvider(token)
+      : authSelection.mode === "service_account" && credentialPath
+        ? new ServiceAccountAccessTokenProvider(credentialPath, timeoutMs)
+        : undefined;
+  if (!provider) throw new Error(`Google Sheets auth mode '${authSelection.mode}' is missing its required credential configuration.`);
+  return new GoogleSheetsHttpTransport({ accessTokenProvider: provider, timeoutMs });
 }
 
 function timeoutFromEnv(value: string | undefined): number {
