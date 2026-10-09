@@ -1,0 +1,15 @@
+[Unit]
+Description=Atelier HQ Career Agent Slack attention runtime
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/atelier-hq
+ExecStart=/usr/bin/env npm run career-agent:runtime
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=default.target

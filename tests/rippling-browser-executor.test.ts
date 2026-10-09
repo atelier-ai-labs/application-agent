@@ -220,6 +220,24 @@ function request(currentJob: JobPosting): ApplicationExecutionRequest {
 }
 
 describe("Rippling browser routing", () => {
+  it("keeps an existing primary resume and skips a second generic dropzone", async () => {
+    const primary = new FakeField({ id: "field-1", label: "nate-magera-agentic-ai-resume-review.docx uploaded successfully", type: "file" });
+    const duplicate = new FakeField({ id: "field-12--2", label: "Drop or select (.doc / .docx / .pdf)", type: "file" });
+    const session = new FakeSession([primary, duplicate]);
+    const result = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      provider: "rippling",
+      resumePaths: { "cloud-platform": "/tmp/cloud-platform.pdf" },
+      resumeFileExists: () => true,
+    }).execute(request(job()));
+    expect(result.state).toBe("ready_to_submit");
+    expect(primary.current).toBeNull();
+    expect(duplicate.current).toBeNull();
+    expect(result.state === "ready_to_submit" && result.inspection.resumeUsed).toBe("cloud-platform");
+    expect(result.state === "ready_to_submit" && result.inspection.evidence).toContain("resume-existing:field-1");
+    expect(result.state === "ready_to_submit" && result.inspection.evidence).toContain("resume-upload-skipped:field-12--2");
+  });
+
   it("derives the verified form route, fills safe contact data, and stops at the first human field", async () => {
     const firstName = new FakeField({ id: "first-name", label: "First name", type: "text", required: true });
     const salary = new FakeField({

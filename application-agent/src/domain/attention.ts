@@ -1,25 +1,13 @@
-import type {
-  CareerBlocker,
-  CareerBlockerKind,
-  QuestionProvenance,
-} from "./campaignTypes";
+import type { CareerBlocker, CareerBlockerKind, QuestionProvenance } from "./campaignTypes";
 import type { JobCompensation } from "./types";
 
 export type AttentionEventType = "needs_input" | "configuration_required";
 export type AttentionEventStatus = "open" | "resolved" | "cancelled" | "expired";
 export type AttentionQuestionKind = "single_choice" | "free_text";
 export type AttentionDeliveryFailureCode = "provider_error" | "unknown";
-export type AttentionClosureReason =
-  | "legacy_unreplyable_replaced"
-  | "legacy_unreplyable_superseded"
-  | "reclassified_non_blocking";
+export type AttentionClosureReason = "legacy_unreplyable_replaced" | "legacy_unreplyable_superseded" | "reclassified_non_blocking";
 export type AttentionConfigurationReason = "missing_resume_family" | "missing_resume_artifact";
-export type AttentionDescriptorSource =
-  | "fieldset_legend"
-  | "aria_labelledby"
-  | "question_container"
-  | "nearby_text"
-  | "unavailable";
+export type AttentionDescriptorSource = "fieldset_legend" | "aria_labelledby" | "question_container" | "nearby_text" | "unavailable";
 
 export interface AttentionOption {
   id: string;
@@ -34,6 +22,13 @@ export interface AttentionQuestion {
   fieldLabel?: string;
   /** Requiredness copied from the inspected application control, when known. */
   required?: boolean;
+}
+
+/** A local model suggestion shown for human review; it is never an answer approval. */
+export interface AttentionDraft {
+  answer: string;
+  evidence: readonly string[];
+  provider: "ollama";
 }
 
 export interface AttentionEventContext {
@@ -64,6 +59,12 @@ export interface AttentionEvent {
   /** Semantic origin; only ATS_FORM may be rendered as an employer question. */
   questionProvenance?: QuestionProvenance;
   blockerType?: CareerBlockerKind;
+  /** True only when blocker evidence proves Submit already crossed the boundary. */
+  submissionAlreadyClicked?: boolean;
+  /** Optional review-only answer suggestion for an exact ATS free-text question. */
+  draft?: AttentionDraft;
+  /** The exact answer persisted for this blocker after an explicit response. */
+  answerUsed?: string;
   message?: string;
   remediation?: string;
   reasonCode?: AttentionConfigurationReason;
@@ -112,18 +113,37 @@ export interface PersistedAttentionEvent extends AttentionEvent {
 
 export interface NotificationAdapter {
   publishAttentionEvent(event: AttentionEvent): Promise<AttentionProviderDelivery | void>;
+  /** Re-publish one already-delivered open event as a fresh top-level alert. */
+  reannounceAttentionEvent?(event: AttentionEvent): Promise<AttentionProviderDelivery | void>;
+  /** Forget a stale application conversation root before starting a new review. */
+  startFreshApplicationReview?(applicationId: string): void;
+  /** Refreshes an already-published message without creating a duplicate event or thread. */
+  updateAttentionEvent?(event: AttentionEvent): Promise<void>;
   closeAttentionEvent?(event: AttentionEvent): Promise<void>;
+  /** Replaces a verification handoff with an explicit expired-session notice. */
+  publishExpiredSessionNotice?(event: AttentionEvent): Promise<void>;
 }
 
 /** Deterministic adapter used by local acceptance tests. */
 export class InMemoryNotificationAdapter implements NotificationAdapter {
   readonly publishedEvents: AttentionEvent[] = [];
+  readonly updatedEvents: AttentionEvent[] = [];
   readonly closedEventIds: string[] = [];
+
+  startFreshApplicationReview(_applicationId: string): void {
+    // Deterministic adapter has no transport-local conversation state.
+  }
 
   async publishAttentionEvent(event: AttentionEvent): Promise<AttentionProviderDelivery | void> {
     if (!this.publishedEvents.some((candidate) => candidate.id === event.id)) {
       this.publishedEvents.push(clone(event));
     }
+  }
+
+  async updateAttentionEvent(event: AttentionEvent): Promise<void> {
+    const index = this.publishedEvents.findIndex((candidate) => candidate.id === event.id);
+    if (index >= 0) this.publishedEvents[index] = clone(event);
+    this.updatedEvents.push(clone(event));
   }
 
   async closeAttentionEvent(event: AttentionEvent): Promise<void> {
@@ -136,19 +156,30 @@ export const ATTENTION_EVENT_HISTORY_LIMIT = 64;
 const MAX_PROMPT_LENGTH = 240;
 const MAX_RESPONSE_LENGTH = 512;
 const MAX_CONTEXT_LENGTH = 160;
-const MAX_SIGNATURE_LENGTH = 512;
+// The signature includes the exact inspected prompt plus bounded field,
+// section, option, and provenance metadata. Keep the serialized identity
+// bounded, but large enough for legitimate employer questions.
+const MAX_SIGNATURE_LENGTH = 1_024;
 const MAX_DELIVERY_FAILURE_COUNT = 1_000;
 const MAX_MESSAGE_LENGTH = 320;
 const MAX_REMEDIATION_LENGTH = 320;
 const MAX_COMPENSATION_TEXT_LENGTH = 32;
+const MAX_DRAFT_ANSWER_LENGTH = 512;
+const MAX_ANSWER_USED_LENGTH = 512;
+const MAX_DRAFT_EVIDENCE_COUNT = 6;
+const MAX_DRAFT_EVIDENCE_LENGTH = 160;
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
 function boundedText(value: unknown, maximum: number): value is string {
-  return typeof value === "string" && value.trim().length > 0 && value.length <= maximum &&
-    !/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(value);
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    value.length <= maximum &&
+    !/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(value)
+  );
 }
 
 function timestamp(value: unknown): value is string {
@@ -163,12 +194,8 @@ function safeString(value: string | undefined, maximum: number): string | undefi
 
 function safePostingCompensation(value: JobCompensation | undefined): JobCompensation | undefined {
   if (!value) return undefined;
-  const minimum = typeof value.minimum === "number" && Number.isFinite(value.minimum) && value.minimum >= 0
-    ? value.minimum
-    : undefined;
-  const maximum = typeof value.maximum === "number" && Number.isFinite(value.maximum) && value.maximum >= 0
-    ? value.maximum
-    : undefined;
+  const minimum = typeof value.minimum === "number" && Number.isFinite(value.minimum) && value.minimum >= 0 ? value.minimum : undefined;
+  const maximum = typeof value.maximum === "number" && Number.isFinite(value.maximum) && value.maximum >= 0 ? value.maximum : undefined;
   if (minimum === undefined && maximum === undefined) return undefined;
   const currency = safeString(value.currency, MAX_COMPENSATION_TEXT_LENGTH);
   const period = safeString(value.period, MAX_COMPENSATION_TEXT_LENGTH);
@@ -178,6 +205,16 @@ function safePostingCompensation(value: JobCompensation | undefined): JobCompens
     ...(currency ? { currency } : {}),
     ...(period ? { period } : {}),
   };
+}
+
+function safeAttentionDraft(value: AttentionDraft | undefined): AttentionDraft | undefined {
+  if (!value || value.provider !== "ollama" || !Array.isArray(value.evidence)) return undefined;
+  const answer = safeString(value.answer, MAX_DRAFT_ANSWER_LENGTH);
+  const evidence = value.evidence
+    .map((item) => safeString(item, MAX_DRAFT_EVIDENCE_LENGTH))
+    .filter((item): item is string => Boolean(item));
+  if (!answer || evidence.length === 0 || evidence.length > MAX_DRAFT_EVIDENCE_COUNT) return undefined;
+  return { answer, evidence: [...new Set(evidence)], provider: "ollama" };
 }
 
 const COMPENSATION_PERIOD_LABELS: Readonly<Record<string, string>> = {
@@ -209,7 +246,11 @@ function compensationCurrencyPrefix(currency: string | undefined): string {
 
 function compensationPeriodSuffix(period: string | undefined): string {
   if (!period) return "";
-  const normalized = period.trim().toLowerCase().replace(/[._-]+/g, " ").replace(/\s+/g, " ");
+  const normalized = period
+    .trim()
+    .toLowerCase()
+    .replace(/[._-]+/g, " ")
+    .replace(/\s+/g, " ");
   return COMPENSATION_PERIOD_LABELS[normalized] ?? `per ${normalized}`;
 }
 
@@ -240,17 +281,29 @@ function evidenceValue(blocker: CareerBlocker, prefix: string, maximum: number):
 
 function descriptorMetadata(blocker: CareerBlocker): AttentionDescriptorMetadata | undefined {
   const source = evidenceValue(blocker, "question-source:", 40);
-  const safeSource = source === "fieldset_legend" || source === "aria_labelledby" || source === "question_container" ||
-    source === "nearby_text" || source === "unavailable" ? source : undefined;
+  const safeSource =
+    source === "fieldset_legend" ||
+    source === "aria_labelledby" ||
+    source === "question_container" ||
+    source === "nearby_text" ||
+    source === "unavailable"
+      ? source
+      : undefined;
   const rawConfidence = evidenceValue(blocker, "question-confidence:", 20);
-  const confidence = rawConfidence === "high" || rawConfidence === "medium" || rawConfidence === "uncertain"
-    ? rawConfidence
+  const confidence = rawConfidence === "high" || rawConfidence === "medium" || rawConfidence === "uncertain" ? rawConfidence : undefined;
+  return safeSource || confidence
+    ? {
+        ...(safeSource ? { source: safeSource } : {}),
+        ...(confidence ? { confidence } : {}),
+      }
     : undefined;
-  return safeSource || confidence ? { ...(safeSource ? { source: safeSource } : {}), ...(confidence ? { confidence } : {}) } : undefined;
 }
 
 function optionId(label: string, index: number): string {
-  const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const slug = label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
   const base = (slug || "option").slice(0, 24);
   return `${base}-${index + 1}`;
 }
@@ -258,9 +311,17 @@ function optionId(label: string, index: number): string {
 function structuredOptions(blocker: CareerBlocker): readonly AttentionOption[] | undefined {
   const raw = evidenceValue(blocker, "options:", 240);
   if (!raw) return undefined;
-  const labels = raw.split("|").map((value) => safeString(value, 64)).filter((value): value is string => Boolean(value));
-  if (labels.length === 0 || labels.length > 16 || new Set(labels.map((value) => value.toLowerCase())).size !== labels.length) return undefined;
-  if (labels.length === 2 && labels.some((value) => value.toLowerCase() === "yes") && labels.some((value) => value.toLowerCase() === "no")) {
+  const labels = raw
+    .split("|")
+    .map((value) => safeString(value, 64))
+    .filter((value): value is string => Boolean(value));
+  if (labels.length === 0 || labels.length > 16 || new Set(labels.map((value) => value.toLowerCase())).size !== labels.length)
+    return undefined;
+  if (
+    labels.length === 2 &&
+    labels.some((value) => value.toLowerCase() === "yes") &&
+    labels.some((value) => value.toLowerCase() === "no")
+  ) {
     return [
       { id: "yes", label: "Yes" },
       { id: "no", label: "No" },
@@ -270,8 +331,7 @@ function structuredOptions(blocker: CareerBlocker): readonly AttentionOption[] |
 }
 
 function fieldLabelFor(blocker: CareerBlocker): string | undefined {
-  return evidenceValue(blocker, "field-label:", MAX_CONTEXT_LENGTH) ??
-    evidenceValue(blocker, "question-label:", MAX_CONTEXT_LENGTH);
+  return evidenceValue(blocker, "field-label:", MAX_CONTEXT_LENGTH) ?? evidenceValue(blocker, "question-label:", MAX_CONTEXT_LENGTH);
 }
 
 function requiredFor(blocker: CareerBlocker): boolean | undefined {
@@ -282,13 +342,11 @@ function requiredFor(blocker: CareerBlocker): boolean | undefined {
 }
 
 function promptFor(blocker: CareerBlocker): string | undefined {
-  return evidenceValue(blocker, "question-prompt:", MAX_PROMPT_LENGTH) ??
-    safeString(blocker.question, MAX_PROMPT_LENGTH);
+  return evidenceValue(blocker, "question-prompt:", MAX_PROMPT_LENGTH) ?? safeString(blocker.question, MAX_PROMPT_LENGTH);
 }
 
 function sectionFor(blocker: CareerBlocker): string | undefined {
-  return evidenceValue(blocker, "question-section:", MAX_CONTEXT_LENGTH) ??
-    evidenceValue(blocker, "field-section:", MAX_CONTEXT_LENGTH);
+  return evidenceValue(blocker, "question-section:", MAX_CONTEXT_LENGTH) ?? evidenceValue(blocker, "field-section:", MAX_CONTEXT_LENGTH);
 }
 
 function questionMetadata(blocker: CareerBlocker): Pick<AttentionQuestion, "fieldLabel" | "required"> {
@@ -322,9 +380,23 @@ function questionForBlocker(blocker: CareerBlocker): AttentionQuestion | undefin
 }
 
 const CAREER_BLOCKER_KINDS: ReadonlySet<string> = new Set([
-  "salary", "sponsorship", "relocation", "travel", "legal_attestation", "demographic_disclosure",
-  "unknown_fact", "subjective_answer", "external_login", "captcha", "external_verification",
-  "unknown_form_field", "unsupported_widget", "resume_missing", "required_file_missing", "submission_approval", "other",
+  "salary",
+  "sponsorship",
+  "relocation",
+  "travel",
+  "legal_attestation",
+  "demographic_disclosure",
+  "unknown_fact",
+  "subjective_answer",
+  "external_login",
+  "captcha",
+  "external_verification",
+  "unknown_form_field",
+  "unsupported_widget",
+  "resume_missing",
+  "required_file_missing",
+  "submission_approval",
+  "other",
 ]);
 
 /**
@@ -355,11 +427,17 @@ function isHumanAttentionBlockerKind(kind: CareerBlockerKind): boolean {
 }
 
 /** Classifies older blockers safely when their explicit provenance is absent. */
-export function questionProvenanceForBlocker(
-  blocker: Pick<CareerBlocker, "questionProvenance" | "unit" | "evidence">,
-): QuestionProvenance {
+export function questionProvenanceForBlocker(blocker: Pick<CareerBlocker, "questionProvenance" | "unit" | "evidence">): QuestionProvenance {
   if (blocker.questionProvenance) return blocker.questionProvenance;
-  if (blocker.evidence.some((item) => item === "executor:lever-browser" || item === "executor:greenhouse-browser" || item.startsWith("field-id:") || item.startsWith("classification:"))) {
+  if (
+    blocker.evidence.some(
+      (item) =>
+        item === "executor:lever-browser" ||
+        item === "executor:greenhouse-browser" ||
+        item.startsWith("field-id:") ||
+        item.startsWith("classification:"),
+    )
+  ) {
     return "ATS_FORM";
   }
   if (blocker.evidence.some((item) => item === "executor:unavailable")) return "CONFIGURATION";
@@ -369,15 +447,10 @@ export function questionProvenanceForBlocker(
 }
 
 /** Stable safe signature used to reject a response for a changed blocker. */
-export function attentionDescriptorSignature(
-  blocker: CareerBlocker,
-  postingCompensation?: JobCompensation,
-): string | undefined {
+export function attentionDescriptorSignature(blocker: CareerBlocker, postingCompensation?: JobCompensation): string | undefined {
   const question = questionForBlocker(blocker);
   if (!question) return undefined;
-  const normalizedCompensation = blocker.kind === "salary"
-    ? safePostingCompensation(postingCompensation)
-    : undefined;
+  const normalizedCompensation = blocker.kind === "salary" ? safePostingCompensation(postingCompensation) : undefined;
   const signature = JSON.stringify({
     blockerType: blocker.kind,
     field: blocker.field,
@@ -403,18 +476,18 @@ export function attentionEventForCareerBlocker(input: {
   jobId: string;
   blocker: CareerBlocker;
   postingCompensation?: JobCompensation;
+  draft?: AttentionDraft;
   createdAt: string;
   createId: (prefix: string) => string;
 }): { event: AttentionEvent; record: PersistedAttentionEvent } | undefined {
   const { blocker } = input;
   const question = questionForBlocker(blocker);
-  const postingCompensation = blocker.kind === "salary"
-    ? safePostingCompensation(input.postingCompensation)
-    : undefined;
+  const postingCompensation = blocker.kind === "salary" ? safePostingCompensation(input.postingCompensation) : undefined;
   const descriptorSignature = attentionDescriptorSignature(blocker, postingCompensation);
   if (!question || !descriptorSignature || !blocker.context.applicationId) return undefined;
 
   const section = sectionFor(blocker);
+  const draft = safeAttentionDraft(input.draft);
   const event: AttentionEvent = {
     id: input.createId("attention"),
     type: "needs_input",
@@ -433,6 +506,10 @@ export function attentionEventForCareerBlocker(input: {
     question,
     questionProvenance: questionProvenanceForBlocker(blocker),
     blockerType: blocker.kind,
+    ...(blocker.resumeAfterHuman === false && blocker.evidence.some((evidence) => /submit:clicked/i.test(evidence))
+      ? { submissionAlreadyClicked: true }
+      : {}),
+    ...(draft ? { draft } : {}),
     ...(descriptorMetadata(blocker) ? { descriptor: descriptorMetadata(blocker) } : {}),
   };
   return {
@@ -456,12 +533,14 @@ export function attentionEventForConfiguration(input: {
   createId: (prefix: string) => string;
   reasonCode: AttentionConfigurationReason;
 }): { event: AttentionEvent; record: PersistedAttentionEvent } {
-  const message = input.reasonCode === "missing_resume_artifact"
-    ? "I can't prepare applications because no usable local resume artifact is configured for your private profile."
-    : "I can't evaluate jobs because your private profile has no resume families.";
-  const remediation = input.reasonCode === "missing_resume_artifact"
-    ? "Place a PDF or DOCX under .local/career-agent/resumes/ and map it to a resume family, then rerun the campaign."
-    : "Add at least one resume family to your local Career Agent profile, then rerun the campaign.";
+  const message =
+    input.reasonCode === "missing_resume_artifact"
+      ? "I can't prepare applications because no usable local resume artifact is configured for your private profile."
+      : "I can't evaluate jobs because your private profile has no resume families.";
+  const remediation =
+    input.reasonCode === "missing_resume_artifact"
+      ? "Place a PDF or DOCX under .local/career-agent/resumes/ and map it to a resume family, then rerun the campaign."
+      : "Add at least one resume family to your local Career Agent profile, then rerun the campaign.";
   const event: AttentionEvent = {
     id: input.createId("attention"),
     type: "configuration_required",
@@ -508,33 +587,57 @@ export function publicAttentionEvent(record: PersistedAttentionEvent): Attention
 }
 
 export function isAttentionOption(value: unknown): value is AttentionOption {
-  return Boolean(value && typeof value === "object" &&
-    boundedText((value as { id?: unknown }).id, 32) && boundedText((value as { label?: unknown }).label, 64));
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    boundedText((value as { id?: unknown }).id, 32) &&
+    boundedText((value as { label?: unknown }).label, 64),
+  );
 }
 
 function isQuestionProvenance(value: unknown): value is QuestionProvenance {
-  return value === "ATS_FORM" || value === "APPLICATION_PREPARATION" || value === "POLICY" ||
-    value === "CONFIGURATION" || value === "UNKNOWN";
+  return (
+    value === "ATS_FORM" || value === "APPLICATION_PREPARATION" || value === "POLICY" || value === "CONFIGURATION" || value === "UNKNOWN"
+  );
 }
 
 function isPostingCompensation(value: unknown): value is JobCompensation {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const candidate = value as Partial<JobCompensation>;
   const hasAmount = candidate.minimum !== undefined || candidate.maximum !== undefined;
-  return hasAmount &&
-    (candidate.minimum === undefined || (typeof candidate.minimum === "number" && Number.isFinite(candidate.minimum) && candidate.minimum >= 0)) &&
-    (candidate.maximum === undefined || (typeof candidate.maximum === "number" && Number.isFinite(candidate.maximum) && candidate.maximum >= 0)) &&
+  return (
+    hasAmount &&
+    (candidate.minimum === undefined ||
+      (typeof candidate.minimum === "number" && Number.isFinite(candidate.minimum) && candidate.minimum >= 0)) &&
+    (candidate.maximum === undefined ||
+      (typeof candidate.maximum === "number" && Number.isFinite(candidate.maximum) && candidate.maximum >= 0)) &&
     (candidate.currency === undefined || boundedText(candidate.currency, MAX_COMPENSATION_TEXT_LENGTH)) &&
-    (candidate.period === undefined || boundedText(candidate.period, MAX_COMPENSATION_TEXT_LENGTH));
+    (candidate.period === undefined || boundedText(candidate.period, MAX_COMPENSATION_TEXT_LENGTH))
+  );
+}
+
+function isAttentionDraft(value: unknown): value is AttentionDraft {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Partial<AttentionDraft>;
+  return (
+    candidate.provider === "ollama" &&
+    boundedText(candidate.answer, MAX_DRAFT_ANSWER_LENGTH) &&
+    Array.isArray(candidate.evidence) &&
+    candidate.evidence.length > 0 &&
+    candidate.evidence.length <= MAX_DRAFT_EVIDENCE_COUNT &&
+    candidate.evidence.every((item) => boundedText(item, MAX_DRAFT_EVIDENCE_LENGTH))
+  );
 }
 
 function isAttentionProviderDelivery(value: unknown): value is AttentionProviderDelivery {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const candidate = value as Partial<AttentionProviderDelivery>;
-  return candidate.provider === "slack" &&
+  return (
+    candidate.provider === "slack" &&
     boundedText(candidate.messageTs, 128) &&
     boundedText(candidate.channelId, 128) &&
-    (candidate.threadTs === undefined || boundedText(candidate.threadTs, 128));
+    (candidate.threadTs === undefined || boundedText(candidate.threadTs, 128))
+  );
 }
 
 export function isAttentionEvent(value: unknown): value is AttentionEvent {
@@ -542,70 +645,123 @@ export function isAttentionEvent(value: unknown): value is AttentionEvent {
   const candidate = value as Partial<AttentionEvent>;
   const context = candidate.context;
   const question = candidate.question;
-  const common = boundedText(candidate.id, 128) &&
+  const common =
+    boundedText(candidate.id, 128) &&
     (candidate.type === "needs_input" || candidate.type === "configuration_required") &&
     candidate.source === "career-agent" &&
     boundedText(candidate.campaignId, 128) &&
     timestamp(candidate.createdAt) &&
-    (candidate.status === "open" || candidate.status === "resolved" || candidate.status === "cancelled" || candidate.status === "expired") &&
+    (candidate.status === "open" ||
+      candidate.status === "resolved" ||
+      candidate.status === "cancelled" ||
+      candidate.status === "expired") &&
     boundedText(candidate.title, MAX_CONTEXT_LENGTH) &&
+    (candidate.answerUsed === undefined || boundedText(candidate.answerUsed, MAX_ANSWER_USED_LENGTH)) &&
     (candidate.questionProvenance === undefined || isQuestionProvenance(candidate.questionProvenance)) &&
-    Boolean(context && typeof context === "object" && boundedText(context.company, MAX_CONTEXT_LENGTH) &&
+    Boolean(
+      context &&
+      typeof context === "object" &&
+      boundedText(context.company, MAX_CONTEXT_LENGTH) &&
       boundedText(context.role, MAX_CONTEXT_LENGTH) &&
       (context.section === undefined || boundedText(context.section, MAX_CONTEXT_LENGTH)) &&
-      (context.postingCompensation === undefined || isPostingCompensation(context.postingCompensation))) &&
-    (candidate.descriptor === undefined || (candidate.descriptor !== null && typeof candidate.descriptor === "object" &&
-      (candidate.descriptor.source === undefined || candidate.descriptor.source === "fieldset_legend" ||
-        candidate.descriptor.source === "aria_labelledby" || candidate.descriptor.source === "question_container" ||
-        candidate.descriptor.source === "nearby_text" || candidate.descriptor.source === "unavailable") &&
-      (candidate.descriptor.confidence === undefined || candidate.descriptor.confidence === "high" ||
-        candidate.descriptor.confidence === "medium" || candidate.descriptor.confidence === "uncertain")));
+      (context.postingCompensation === undefined || isPostingCompensation(context.postingCompensation)),
+    ) &&
+    (candidate.descriptor === undefined ||
+      (candidate.descriptor !== null &&
+        typeof candidate.descriptor === "object" &&
+        (candidate.descriptor.source === undefined ||
+          candidate.descriptor.source === "fieldset_legend" ||
+          candidate.descriptor.source === "aria_labelledby" ||
+          candidate.descriptor.source === "question_container" ||
+          candidate.descriptor.source === "nearby_text" ||
+          candidate.descriptor.source === "unavailable") &&
+        (candidate.descriptor.confidence === undefined ||
+          candidate.descriptor.confidence === "high" ||
+          candidate.descriptor.confidence === "medium" ||
+          candidate.descriptor.confidence === "uncertain")));
   if (!common) return false;
   if (candidate.type === "needs_input") {
-    const validQuestion = question && typeof question === "object" && boundedText(question.prompt, MAX_PROMPT_LENGTH) &&
+    const validQuestion =
+      question &&
+      typeof question === "object" &&
+      boundedText(question.prompt, MAX_PROMPT_LENGTH) &&
       Array.isArray(question.options) &&
       (question.fieldLabel === undefined || boundedText(question.fieldLabel, MAX_CONTEXT_LENGTH)) &&
       (question.required === undefined || typeof question.required === "boolean") &&
       (question.kind === "free_text"
         ? question.options.length === 0
         : question.kind === "single_choice" && question.options.length > 0 && question.options.every(isAttentionOption));
-    return boundedText(candidate.applicationId, 128) && Boolean(validQuestion) &&
-      typeof candidate.blockerType === "string" && CAREER_BLOCKER_KINDS.has(candidate.blockerType) &&
-      candidate.message === undefined && candidate.remediation === undefined && candidate.reasonCode === undefined;
+    return (
+      boundedText(candidate.applicationId, 128) &&
+      Boolean(validQuestion) &&
+      typeof candidate.blockerType === "string" &&
+      CAREER_BLOCKER_KINDS.has(candidate.blockerType) &&
+      (candidate.submissionAlreadyClicked === undefined || typeof candidate.submissionAlreadyClicked === "boolean") &&
+      (candidate.draft === undefined ||
+        Boolean(question &&
+          question.kind === "free_text" &&
+          candidate.blockerType === "subjective_answer" &&
+          candidate.questionProvenance === "ATS_FORM" &&
+          isAttentionDraft(candidate.draft))) &&
+      candidate.message === undefined &&
+      candidate.remediation === undefined &&
+      candidate.reasonCode === undefined
+    );
   }
-  return candidate.applicationId === undefined && candidate.question === undefined && candidate.blockerType === undefined &&
+  return (
+    candidate.applicationId === undefined &&
+    candidate.question === undefined &&
+    candidate.blockerType === undefined &&
     boundedText(candidate.message, MAX_MESSAGE_LENGTH) &&
     boundedText(candidate.remediation, MAX_REMEDIATION_LENGTH) &&
-    (candidate.reasonCode === "missing_resume_family" || candidate.reasonCode === "missing_resume_artifact");
+    (candidate.reasonCode === "missing_resume_family" || candidate.reasonCode === "missing_resume_artifact")
+  );
 }
 
 export function isAttentionResponse(value: unknown): value is AttentionResponse {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<AttentionResponse>;
   const actor = candidate.actorIdentity;
-  return boundedText(candidate.eventId, 128) &&
+  return (
+    boundedText(candidate.eventId, 128) &&
     boundedText(candidate.selectedOption, MAX_RESPONSE_LENGTH) &&
     timestamp(candidate.respondedAt) &&
-    Boolean(actor && typeof actor === "object" && boundedText(actor.provider, 32) && boundedText(actor.userId, 128) &&
-      (actor.workspaceId === undefined || boundedText(actor.workspaceId, 128)));
+    Boolean(
+      actor &&
+      typeof actor === "object" &&
+      boundedText(actor.provider, 32) &&
+      boundedText(actor.userId, 128) &&
+      (actor.workspaceId === undefined || boundedText(actor.workspaceId, 128)),
+    )
+  );
 }
 
 export function isPersistedAttentionEvent(value: unknown): value is PersistedAttentionEvent {
   if (!isAttentionEvent(value)) return false;
   const candidate = value as Partial<PersistedAttentionEvent>;
-  const internalCareerLink = candidate.type === "needs_input"
-    ? boundedText(candidate.jobId, 128) && boundedText(candidate.blockerId, 128)
-    : candidate.jobId === undefined && candidate.blockerId === undefined;
-  return internalCareerLink &&
+  const internalCareerLink =
+    candidate.type === "needs_input"
+      ? boundedText(candidate.jobId, 128) && boundedText(candidate.blockerId, 128)
+      : candidate.jobId === undefined && candidate.blockerId === undefined;
+  return (
+    internalCareerLink &&
     boundedText(candidate.descriptorSignature, MAX_SIGNATURE_LENGTH) &&
     (candidate.publishedAt === undefined || timestamp(candidate.publishedAt)) &&
     (candidate.deliveryFailureCount === undefined ||
-      (Number.isInteger(candidate.deliveryFailureCount) && candidate.deliveryFailureCount >= 0 && candidate.deliveryFailureCount <= MAX_DELIVERY_FAILURE_COUNT)) &&
+      (Number.isInteger(candidate.deliveryFailureCount) &&
+        candidate.deliveryFailureCount >= 0 &&
+        candidate.deliveryFailureCount <= MAX_DELIVERY_FAILURE_COUNT)) &&
     (candidate.lastDeliveryFailureAt === undefined || timestamp(candidate.lastDeliveryFailureAt)) &&
-    (candidate.lastDeliveryFailureCode === undefined || candidate.lastDeliveryFailureCode === "provider_error" || candidate.lastDeliveryFailureCode === "unknown") &&
+    (candidate.lastDeliveryFailureCode === undefined ||
+      candidate.lastDeliveryFailureCode === "provider_error" ||
+      candidate.lastDeliveryFailureCode === "unknown") &&
     (candidate.providerDelivery === undefined || isAttentionProviderDelivery(candidate.providerDelivery)) &&
     (candidate.resolvedAt === undefined || timestamp(candidate.resolvedAt)) &&
     (candidate.response === undefined || (isAttentionResponse(candidate.response) && candidate.response.eventId === candidate.id)) &&
-    (candidate.closureReason === undefined || candidate.closureReason === "legacy_unreplyable_replaced" || candidate.closureReason === "legacy_unreplyable_superseded" || candidate.closureReason === "reclassified_non_blocking") &&
-    (candidate.replacementEventId === undefined || boundedText(candidate.replacementEventId, 128));
+    (candidate.closureReason === undefined ||
+      candidate.closureReason === "legacy_unreplyable_replaced" ||
+      candidate.closureReason === "legacy_unreplyable_superseded" ||
+      candidate.closureReason === "reclassified_non_blocking") &&
+    (candidate.replacementEventId === undefined || boundedText(candidate.replacementEventId, 128))
+  );
 }

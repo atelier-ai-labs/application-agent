@@ -406,6 +406,11 @@ export interface CareerJob {
   sourceExpiresAt?: string;
   dedupeKeys?: readonly string[];
   sourceObservations?: readonly JobSourceObservation[];
+  /** Explicit queue provenance retained so a proof-free packet can be refreshed safely. */
+  queueSelected?: boolean;
+  queueResumeFamily?: string;
+  queueFit?: string;
+  queuePriority?: string;
   /** Destination resolution is independent of fit/pursuit and provider provenance. */
   destinationResolution?: DestinationResolution;
   job: JobPosting;

@@ -51,7 +51,9 @@ export function extractRipplingPromptFromCandidates(
 export function extractRipplingAncestorPrompt(control: Element): string | undefined {
   const candidates: RipplingPromptCandidate[] = [];
   let cursor: Element | null = control;
-  for (let depth = 0; depth < 6 && cursor; depth += 1) {
+  // Rippling's question text can sit beside the field wrapper several
+  // layout containers above the actual combobox.
+  for (let depth = 0; depth < 10 && cursor; depth += 1) {
     const previous = cursor.previousElementSibling;
     if (previous) {
       candidates.push({

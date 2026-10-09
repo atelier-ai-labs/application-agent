@@ -275,6 +275,46 @@ export class ApplicationService {
     }
   }
 
+  /** Recompute a proof-free packet against the current profile and model. */
+  async reprepareExistingApplication(applicationId: string, knownFit?: FitAssessment, refreshedJob?: JobPosting): Promise<Application> {
+    const application = this.getApplication(applicationId);
+    if (application.status === "applied" || application.submissionProof) {
+      throw new Error("An applied or proof-bearing application cannot be re-prepared.");
+    }
+    if (application.status === "preparing") {
+      throw new Error("An application already being prepared cannot be re-prepared concurrently.");
+    }
+    const job = refreshedJob ?? application.job;
+    const fit = knownFit ?? await this.assessJob(job);
+    const resume = await this.model.draftResume(job, this.profile, fit, this.now());
+    const generated = await prepareApplicationAnswers(
+      job,
+      this.profile,
+      fit,
+      resume,
+      (context) => this.model.draftAnswer(context),
+    );
+    const preserved = application.answers.filter((answer) => answer.status === "resolved" && answer.policy !== "draft_review");
+    const answers = generated.map((answer) => preserved.find((candidate) => candidate.field === answer.field) ?? answer);
+    const blockers = blockersFromAnswers(answers);
+    const status: ApplicationStatus = blockers.length > 0 ? "needs_input" : "ready_for_review";
+    const updated: Application = {
+      ...application,
+      job,
+      fit,
+      resume,
+      answers,
+      blockers,
+      status,
+      failureReason: undefined,
+      updatedAt: this.now(),
+    };
+    this.repository.saveApplication(updated);
+    this.appendEvent(applicationId, "application.evaluated", { classification: fit.classification, resumeFamily: fit.recommendedResumeFamily, recovery: "profile_resume_family_refresh" });
+    this.appendEvent(applicationId, "application.prepared", { blockerCount: String(blockers.length), recovery: "profile_resume_family_refresh" });
+    return updated;
+  }
+
   async prepareFromIntake(input: JobIntakeInput): Promise<Application> {
     const created = await this.createApplication(input);
     const evaluated = await this.evaluateApplication(created.id);
@@ -300,15 +340,16 @@ export class ApplicationService {
    */
   reopenFailedApplicationForExecution(applicationId: string): Application {
     const application = this.getApplication(applicationId);
-    if (application.status !== "failed") {
-      throw new Error("Only a failed application packet can be reopened for browser execution.");
+    if (application.status !== "failed" && application.status !== "ready_for_review") {
+      throw new Error("Only a failed or already-recovered application packet can be reopened for browser execution.");
     }
-    if (!application.fit || !application.resume) {
+    if (application.status === "failed" && (!application.fit || !application.resume)) {
       throw new Error("A failed application must retain grounded fit and resume outputs before browser recovery.");
     }
-    if (application.blockers.some((blocker) => blocker.status === "open")) {
+    if (application.status === "failed" && application.blockers.some((blocker) => blocker.status === "open")) {
       throw new Error("A failed application with unresolved preparation blockers cannot be reopened for browser execution.");
     }
+    if (application.status === "ready_for_review") return application;
     assertTransition(application.status, "ready_for_review");
     const reopened: Application = {
       ...application,
@@ -321,6 +362,37 @@ export class ApplicationService {
       recovery: "retryable_browser_execution",
     });
     return reopened;
+  }
+
+  /** Reopens only explicitly selected form fields for a manual browser handoff. */
+  reopenFieldsForManualHandoff(applicationId: string, fields: readonly string[]): Application {
+    const application = this.getApplication(applicationId);
+    if (application.status !== "ready_for_review" && !(application.status === "needs_input" && application.blockers.every((blocker) => blocker.status === "resolved"))) throw new Error("Only a ready application can reopen manual fields.");
+    const selected = new Set(fields);
+    if (selected.size === 0) throw new Error("At least one manual field is required.");
+    const blockers = application.blockers.map((blocker) => selected.has(blocker.field) || selected.has(blocker.id)
+      ? { ...blocker, status: "open" as const, resolvedAt: undefined, value: undefined }
+      : blocker);
+    const aggregateDemographic = application.blockers.some((blocker) => blocker.field === "demographic_disclosure" && blocker.status === "resolved");
+    const careerOnlyBrowserField = (field: string): boolean => /^(?:\d+|question_\d+|gdpr_[a-z0-9_]+)$/i.test(field);
+    if (!fields.every((field) => application.blockers.some((blocker) => (blocker.field === field || blocker.id === field) && blocker.status === "resolved") || (aggregateDemographic && careerOnlyBrowserField(field)))) throw new Error("A requested manual field is missing or not resolved.");
+    const reopened: Application = { ...application, blockers, status: "ready_for_review", updatedAt: this.now() };
+    this.repository.saveApplication(reopened);
+    return reopened;
+  }
+
+  /** Defer generic preparation placeholders until the real ATS form is inspected. */
+  deferGenericPreparationBlockersForInspection(applicationId: string): Application {
+    const application = this.getApplication(applicationId);
+    if (application.status !== "needs_input") return application;
+    const genericFields = new Set(["salary_expectations", "relocation", "travel", "demographic_disclosure", "legal_attestations"]);
+    const remaining = application.blockers.filter((blocker) => blocker.status !== "open" || !genericFields.has(blocker.field));
+    if (remaining.some((blocker) => blocker.status === "open")) return application;
+    assertTransition(application.status, "ready_for_review");
+    const updated = { ...application, blockers: remaining, status: "ready_for_review" as const, updatedAt: this.now() };
+    this.repository.saveApplication(updated);
+    this.appendEvent(applicationId, "application.ready_for_review", { deferred: "generic_preparation_until_ats_inspection" });
+    return updated;
   }
 
   recordApplied(applicationId: string, submissionProof: SubmissionProof): Application {
@@ -374,6 +446,30 @@ export class ApplicationService {
       provider: "user-confirmed",
     });
     return applied;
+  }
+
+  /**
+   * Correct a manual confirmation that was recorded in error. This is an
+   * explicit operator repair path; executor submission proof can never be
+   * retracted through it.
+   */
+  retractManualSubmissionConfirmation(applicationId: string, reason: string): Application {
+    const application = this.getApplication(applicationId);
+    if ((application.status !== "applied" && application.status !== "ready_for_review") || !application.manualSubmissionConfirmation || application.submissionProof) {
+      throw new Error("Only an Applied or inconsistent ready-for-review application with manual confirmation and no submission proof can be corrected.");
+    }
+    const restored: Application = {
+      ...application,
+      status: "ready_for_review",
+      manualSubmissionConfirmation: undefined,
+      updatedAt: this.now(),
+    };
+    this.repository.saveApplication(restored);
+    this.appendEvent(applicationId, "application.failed", {
+      reason,
+      correction: "manual_submission_confirmation_retracted",
+    });
+    return restored;
   }
 
   resolveHumanField(applicationId: string, blockerId: string, value: AnswerValue): Application {

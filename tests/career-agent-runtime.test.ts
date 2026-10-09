@@ -30,10 +30,27 @@ import {
 } from "../application-agent/src";
 import {
   BackgroundCareerAgentRuntimeImpl,
+  shouldConfigureExecutionHost,
   type CareerAgentExecutionHostPort,
 } from "../application-agent/automation/runtime/careerAgentRuntime";
+
+describe("configured Career Agent execution host wiring", () => {
+  it("keeps the handoff-capable host configured for a non-browser Slack listener", () => {
+    expect(shouldConfigureExecutionHost(false, true)).toBe(true);
+  });
+
+  it("does not enable host wiring when both browser execution and handoff viewer are disabled", () => {
+    expect(shouldConfigureExecutionHost(false, false)).toBe(false);
+  });
+
+  it("keeps browser execution wiring enabled independently of the viewer", () => {
+    expect(shouldConfigureExecutionHost(true, false)).toBe(true);
+  });
+});
 import { FileKeyValueStorage } from "../application-agent/automation/runtime/fileKeyValueStorage";
+import { DurableSubmissionAuthority } from "../application-agent/automation/executionHost/submissionAuthority";
 import { ExecutionHostResponseError } from "../application-agent/src/service/executionHostClient";
+import { createCareerServiceQueueProcessor } from "../application-agent/automation/standaloneJobQueueWorker";
 
 const capturedAt = "2026-09-01T12:00:00.000Z";
 const fieldId = "cards_question__field0_";
@@ -215,6 +232,43 @@ class RipplingSalaryExecutor implements ApplicationExecutor {
   }
 }
 
+function sequentialSubjectiveBlocker(index: number): CareerBlockerDraft {
+  return {
+    kind: "subjective_answer",
+    unit: "submission",
+    questionProvenance: "ATS_FORM",
+    field: `subjective-${index}`,
+    question: `Describe your relevant experience (${index}).`,
+    reason: "The employer question requires candidate review.",
+    evidence: [
+      "executor:sequential-test",
+      `field-id:subjective-${index}`,
+      "field-type:text",
+      "field-required:true",
+      "classification:subjective_answer",
+      `question-prompt:Describe your relevant experience (${index}).`,
+      "question-source:question_container",
+      "question-confidence:high",
+    ],
+    resumeAfterHuman: true,
+  };
+}
+
+class SequentialSubjectiveExecutor implements ApplicationExecutor {
+  readonly id = "sequential-subjective-test-executor";
+  executionMode(): "preparation_only" { return "preparation_only"; }
+
+  async execute(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult> {
+    const first = sequentialSubjectiveBlocker(1);
+    const second = sequentialSubjectiveBlocker(2);
+    const firstResolved = request.careerJob.blockers.some((candidate) => candidate.field === first.field && candidate.status === "resolved");
+    const secondResolved = request.careerJob.blockers.some((candidate) => candidate.field === second.field && candidate.status === "resolved");
+    if (!firstResolved) return { state: "requires_human", blocker: first, blockers: [first, second], inspection: inspection("needs_input", [first, second]) };
+    if (!secondResolved) return { state: "requires_human", blocker: second, blockers: [second], inspection: inspection("needs_input", [second]) };
+    return { state: "ready_to_submit", inspection: inspection("inspected") };
+  }
+}
+
 function runtimeClock() {
   let tick = 0;
   let sequence = 0;
@@ -331,6 +385,159 @@ class RestartedHost implements CareerAgentExecutionHostPort {
 }
 
 describe("background Career Agent runtime", () => {
+  it("reconciles a durable submitted fence through the production consumer without restarting the host", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "atelier-career-reconcile-"));
+    try {
+      const statePath = join(directory, "state.json");
+      const adapter = new InMemoryNotificationAdapter();
+      let starts = 0;
+      const authority = new DurableSubmissionAuthority("runtime-worker", { stateFile: join(directory, "submission.json") });
+      const runtime = new BackgroundCareerAgentRuntimeImpl({
+        ...runtimeOptions(statePath, new ReadyExecutor(), adapter),
+        submissionAuthority: authority,
+        executionHost: { start: async () => { starts += 1; throw new Error("host must not start during reconciliation"); }, get: async () => { throw new Error("unused"); }, resume: async () => { throw new Error("unused"); } },
+      });
+      const campaign = runtime.createCampaign({ ...campaignInput(), submissionPolicy: { authority: "automatic", requireExplicitApproval: false } });
+      runtime.service.activateCampaign(campaign.id);
+      const curatedInput = { ...listing().input, isExample: false, sourceUrl: "https://jobs.lever.co/acme/post-1", applicationUrl: "https://jobs.lever.co/acme/post-1/apply", rawText: "Acme\nData Platform Engineer\nRemote United States\n" };
+      await runtime.service.processCuratedJob(campaign.id, curatedInput);
+      const job = runtime.service.listJobs(campaign.id)[0]!;
+      const applicationId = job.applicationId!;
+      const fence = authority.claim(applicationId, job.id, capturedAt);
+      authority.beforeClick(fence, capturedAt);
+      authority.markSubmitted(fence, "external-recovered", capturedAt);
+      const recovered = await runtime.processCuratedJobThroughHost(campaign.id, curatedInput);
+      expect(starts).toBe(0);
+      expect(recovered.status).toBe("applied");
+      expect(runtime.service.getApplication(applicationId).submissionProof?.externalApplicationId).toBe("external-recovered");
+      await runtime.stop();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+  it("reconciles clicking and unknown durable fences to Needs Input without starting the host", async () => {
+    for (const fenceState of ["clicking", "unknown"] as const) {
+      const directory = mkdtempSync(join(tmpdir(), `atelier-career-${fenceState}-`));
+      try {
+        const authority = new DurableSubmissionAuthority("runtime-worker", { stateFile: join(directory, "submission.json") });
+        let starts = 0;
+        const runtime = new BackgroundCareerAgentRuntimeImpl({
+          ...runtimeOptions(join(directory, "state.json"), new ReadyExecutor(), new InMemoryNotificationAdapter()),
+          submissionAuthority: authority,
+          executionHost: { start: async () => { starts += 1; throw new Error("host must not start during fence recovery"); }, get: async () => { throw new Error("unused"); }, resume: async () => { throw new Error("unused"); } },
+        });
+        const campaign = runtime.createCampaign({ ...campaignInput(), submissionPolicy: { authority: "automatic", requireExplicitApproval: false } });
+        runtime.service.activateCampaign(campaign.id);
+        const input = { ...listing().input, isExample: false, sourceUrl: "https://jobs.lever.co/acme/post-1", applicationUrl: "https://jobs.lever.co/acme/post-1/apply", rawText: "Acme\nData Platform Engineer\nRemote United States\n" };
+        await runtime.service.processCuratedJob(campaign.id, input);
+        const job = runtime.service.listJobs(campaign.id)[0]!;
+        const fence = authority.claim(job.applicationId!, job.id, capturedAt);
+        authority.beforeClick(fence, capturedAt);
+        if (fenceState === "unknown") authority.markUnknown(fence, capturedAt);
+        const recovered = await runtime.processCuratedJobThroughHost(campaign.id, input);
+        expect(starts).toBe(0);
+        expect(recovered.status).toBe("needs_input");
+        expect(recovered.execution?.status).toBe("needs_input");
+        await runtime.stop();
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("exposes unknown-fence manual confirmation through the production runtime boundary", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "atelier-career-manual-confirm-"));
+    try {
+      const authority = new DurableSubmissionAuthority("runtime-worker", { stateFile: join(directory, "submission.json") });
+      const tracker = new InMemoryJobTracker();
+      let starts = 0;
+      const runtime = new BackgroundCareerAgentRuntimeImpl({
+        ...runtimeOptions(join(directory, "state.json"), new ReadyExecutor(), new InMemoryNotificationAdapter()),
+        tracker,
+        submissionAuthority: authority,
+        executionHost: { start: async () => { starts += 1; throw new Error("host must not start during manual confirmation"); }, get: async () => { throw new Error("unused"); }, resume: async () => { throw new Error("unused"); } },
+      });
+      const campaign = runtime.createCampaign({ ...campaignInput(), submissionPolicy: { authority: "automatic", requireExplicitApproval: false } });
+      runtime.service.activateCampaign(campaign.id);
+      const input = { ...listing().input, isExample: false, sourceUrl: "https://jobs.lever.co/acme/post-1", applicationUrl: "https://jobs.lever.co/acme/post-1/apply", rawText: "Acme\nData Platform Engineer\nRemote United States\n" };
+      await runtime.service.processCuratedJob(campaign.id, input);
+      const original = runtime.service.listJobs(campaign.id)[0]!;
+      const blocker = { id: "submission-confirmation", kind: "external_verification" as const, unit: "submission" as const, field: "submission-confirmation", questionProvenance: "POLICY" as const, question: "Verify whether the application was submitted", context: { jobId: original.id, applicationId: original.applicationId, company: original.job.company, role: original.job.title }, reason: "Unknown result", evidence: ["submit:clicked"], status: "open" as const, createdAt: capturedAt, resumeAfterHuman: false };
+      runtime.careerRepository.saveJob({ ...original, status: "needs_input", blockers: [blocker] });
+      const fence = authority.claim(original.applicationId!, original.id, capturedAt);
+      authority.beforeClick(fence, capturedAt);
+      authority.markUnknown(fence, capturedAt);
+
+      const applied = await runtime.confirmManualApplication(campaign.id, original.id);
+      expect(applied.status).toBe("applied");
+      expect(runtime.service.getApplication(original.applicationId!).status).toBe("applied");
+      expect(runtime.service.getApplication(original.applicationId!).manualSubmissionConfirmation?.evidence).toBe("user_confirmed_successful_manual_submission");
+      expect(tracker.listUpdates()).toHaveLength(1);
+      expect(authority.reconcile(original.applicationId!, original.id)).toMatchObject({ state: "submitted", externalApplicationId: "user-confirmed:application received successfully" });
+      expect(starts).toBe(0);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts the persisted Mastra queue identity with mixed-case Ashby URLs before host execution", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "atelier-career-ashby-queue-"));
+    try {
+      let starts = 0;
+      const runtime = new BackgroundCareerAgentRuntimeImpl({
+        ...runtimeOptions(join(directory, "state.json"), new ReadyExecutor(), new InMemoryNotificationAdapter()),
+        executionHost: {
+          start: async (request) => { starts += 1; return { id: "ashby-queue-host", mode: "real_local", applicationId: request.application.id, jobId: request.careerJob.id, campaignId: request.campaign.id, status: "ready_to_submit", startedAt: capturedAt, updatedAt: capturedAt, result: { state: "ready_to_submit", inspection: inspection("inspected") } }; },
+          get: async () => { throw new Error("unused"); },
+          resume: async () => { throw new Error("unused"); },
+        },
+      });
+      const campaign = runtime.createCampaign(campaignInput());
+      runtime.service.activateCampaign(campaign.id);
+      const processor = createCareerServiceQueueProcessor(runtime, campaign.id);
+      const result = await processor.process({
+        jobId: "tracker-url:e3dec897",
+        company: "Mastra",
+        role: "Platform Engineer",
+        jobLink: "https://jobs.ashbyhq.com/Mastra/3b06208b-34fe-4dda-b409-ee3fd9305cc3",
+        status: "Ready",
+        workerId: "queue-worker",
+        leaseUntil: "2026-09-20T00:00:00.000Z",
+        attemptId: "attempt-1",
+        description: "Mastra\nPlatform Engineer\nLocation: Remote - United States\nEmployment Type: Full-time",
+      });
+      expect(result.status).toBe("Ready to Submit");
+      expect(starts).toBe(1);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+  it("processes a daily-hunt snapshot through the existing runtime without creating a campaign", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "atelier-career-daily-hunt-"));
+    try {
+      const adapter = new InMemoryNotificationAdapter();
+      const runtime = new BackgroundCareerAgentRuntimeImpl({
+        ...runtimeOptions(join(directory, "state.json"), new UnavailableApplicationExecutor(), adapter),
+      });
+      const campaign = runtime.createCampaign(campaignInput());
+      runtime.service.activateCampaign(campaign.id);
+
+      const before = runtime.service.listCampaigns();
+      const result = await runtime.processDailyHuntMessage(campaign.id, `
+**[Northstar Cloud](https://jobs.lever.co/northstar/abc123) — Cloud Engineer — Remote US.**
+Build production cloud infrastructure with Terraform and Kubernetes.
+
+[Apply directly — Northstar Cloud](https://jobs.lever.co/northstar/abc123/apply)
+`);
+
+      expect(result.processed).toBe(1);
+      expect(runtime.service.listCampaigns()).toHaveLength(before.length);
+      expect(runtime.service.listJobs(campaign.id)).toHaveLength(1);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("recovers the same failed packet and reconciles stale CAPTCHA attention before publishing the next form blocker", async () => {
     const directory = mkdtempSync(join(tmpdir(), "atelier-career-runtime-"));
     try {
@@ -457,6 +664,64 @@ describe("background Career Agent runtime", () => {
       expect(runtime.service.getJob(originalJob.id).blockers.some((blocker) => blocker.kind === "captcha" && blocker.status === "open")).toBe(false);
       expect(runtime.service.getApplication(originalApplication.id).status).not.toBe("applied");
       await runtime.stop();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("closes a published attention event when its blocker is reclassified as non-blocking", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "atelier-career-runtime-"));
+    try {
+      const statePath = join(directory, "state.json");
+      const adapter = new InMemoryNotificationAdapter();
+      const runtime = new BackgroundCareerAgentRuntimeImpl(runtimeOptions(statePath, new ReadyExecutor(), adapter));
+      const campaign = runtime.createCampaign(campaignInput());
+      runtime.service.activateCampaign(campaign.id);
+      await runtime.runCampaign(campaign.id);
+
+      const job = runtime.service.listJobs(campaign.id)[0];
+      const application = runtime.service.getApplication(job.applicationId!);
+      const staleBlocker: CareerBlocker = {
+        id: "unsupported-qualification-stale",
+        kind: "unknown_fact",
+        unit: "submission",
+        questionProvenance: "POLICY",
+        question: "Unsupported required qualifications",
+        context: {
+          jobId: job.id,
+          applicationId: application.id,
+          company: job.job.company,
+          role: job.job.title,
+        },
+        reason: "The posting contains required qualifications not supported by the verified profile.",
+        evidence: ["fit:unsupported-required-qualification"],
+        status: "resolved",
+        createdAt: capturedAt,
+        resolvedAt: capturedAt,
+      };
+      const staleEvent = attentionEventForCareerBlocker({
+        campaignId: campaign.id,
+        jobId: job.id,
+        blocker: staleBlocker,
+        createdAt: capturedAt,
+        createId: (prefix) => `${prefix}-unsupported-stale`,
+      });
+      expect(staleEvent).toBeDefined();
+
+      runtime.careerRepository.saveJob({ ...job, blockers: [staleBlocker] });
+      runtime.careerRepository.saveCampaign({
+        ...runtime.service.getCampaign(campaign.id),
+        attentionEvents: [staleEvent!.record],
+      });
+
+      await runtime.service.publishPendingAttentionEvents(campaign.id);
+
+      const stored = runtime.service.getCampaign(campaign.id).attentionEvents ?? [];
+      expect(stored.find((event) => event.id === staleEvent!.record.id)).toMatchObject({
+        status: "cancelled",
+        closureReason: "reclassified_non_blocking",
+      });
+      expect(adapter.closedEventIds).toContain(staleEvent!.record.id);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
@@ -633,6 +898,56 @@ describe("background Career Agent runtime", () => {
     }
   });
 
+  it("reconciles a same-status host result when the next blocker has not been published yet", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "atelier-career-runtime-"));
+    try {
+      const statePath = join(directory, "state.json");
+      const adapter = new InMemoryNotificationAdapter();
+      const runtime = new BackgroundCareerAgentRuntimeImpl(runtimeOptions(statePath, new UnknownThenReadyExecutor(), adapter));
+      const campaign = runtime.createCampaign(campaignInput());
+      runtime.service.activateCampaign(campaign.id);
+      await runtime.runCampaign(campaign.id);
+
+      const originalJob = runtime.service.getJob(runtime.service.listJobs(campaign.id)[0].id);
+      const currentBlocker = originalJob.blockers.find((candidate) => candidate.status === "open");
+      expect(currentBlocker).toBeDefined();
+      adapter.publishedEvents.length = 0;
+      runtime.careerRepository.saveCampaign({
+        ...runtime.service.getCampaign(campaign.id),
+        attentionEvents: [],
+      });
+      runtime.careerRepository.saveJob(makeResumable(originalJob));
+
+      const nextSnapshot: ExecutionHostSnapshot = {
+        id: "runtime-host-1",
+        mode: "real_local",
+        applicationId: originalJob.applicationId!,
+        jobId: originalJob.id,
+        campaignId: campaign.id,
+        status: "needs_input",
+        startedAt: capturedAt,
+        updatedAt: capturedAt,
+        result: {
+          state: "requires_human",
+          blocker: blocker(),
+          blockers: [blocker()],
+          inspection: inspection("needs_input", [blocker()]),
+        },
+      };
+
+      await runtime.service.recordExecutionHostSnapshot(campaign.id, originalJob.id, nextSnapshot);
+      expect(runtime.service.listAttentionEvents(campaign.id)).toHaveLength(1);
+      expect(adapter.publishedEvents).toHaveLength(1);
+
+      await runtime.service.recordExecutionHostSnapshot(campaign.id, originalJob.id, nextSnapshot);
+      expect(runtime.service.listAttentionEvents(campaign.id)).toHaveLength(1);
+      expect(adapter.publishedEvents).toHaveLength(1);
+      await runtime.stop();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("starts prepared direct Greenhouse jobs through the host without destination-resolution metadata", async () => {
     const directory = mkdtempSync(join(tmpdir(), "atelier-career-runtime-"));
     const host = new ReadyHost();
@@ -703,6 +1018,98 @@ describe("background Career Agent runtime", () => {
       expect(second.service.getApplication(originalJob.applicationId!).status).toBe("ready_for_review");
       expect(second.service.listEvents(campaign.id).some((candidate) => candidate.type === "application.applied")).toBe(false);
       await second.stop();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("retries an exact proof-free pre-submit failure through the never-submit restart path", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "atelier-career-runtime-"));
+    try {
+      const host = new RestartedHost();
+      const runtime = new BackgroundCareerAgentRuntimeImpl({
+        ...runtimeOptions(join(directory, "state.json"), new ReadyExecutor(), new InMemoryNotificationAdapter()),
+        executionHost: host,
+      });
+      const campaign = runtime.createCampaign(campaignInput());
+      runtime.service.activateCampaign(campaign.id);
+      await runtime.runCampaign(campaign.id);
+      const original = runtime.service.listJobs(campaign.id)[0]!;
+      const application = runtime.service.getApplication(original.applicationId!);
+      runtime.applicationRepository.saveApplication({
+        ...application,
+        status: "failed",
+        failureReason: "Resume upload failed before submission.",
+        updatedAt: capturedAt,
+      });
+      runtime.careerRepository.saveJob({
+        ...original,
+        status: "failed",
+        execution: {
+          status: "failed",
+          fieldsDetected: ["input-resume"],
+          fieldsFilled: [],
+          unresolvedFields: ["Résumé"],
+          evidence: ["submit:not-clicked", "submission:manual-only"],
+          startedAt: capturedAt,
+          updatedAt: capturedAt,
+        },
+      });
+
+      const retried = await runtime.restartExistingApplication(campaign.id, original.id, original.applicationId!);
+      expect(host.startCalls).toBe(1);
+      expect(retried.id).toBe(original.id);
+      expect(retried.applicationId).toBe(original.applicationId);
+      expect(retried.status).toBe("ready_to_submit");
+      expect(runtime.service.getApplication(original.applicationId!).status).toBe("ready_for_review");
+      await runtime.stop();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("sequences real-local attention blockers before resuming the browser host", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "atelier-career-runtime-"));
+    try {
+      const adapter = new InMemoryNotificationAdapter();
+      const host = new ReadyHost();
+      const runtime = new BackgroundCareerAgentRuntimeImpl({
+        ...runtimeOptions(join(directory, "state.json"), new SequentialSubjectiveExecutor(), adapter),
+        executionHost: host,
+      });
+      const campaign = runtime.createCampaign(campaignInput());
+      runtime.service.activateCampaign(campaign.id);
+      await runtime.runCampaign(campaign.id);
+
+      const initial = runtime.service.getJob(runtime.service.listJobs(campaign.id)[0].id);
+      runtime.careerRepository.saveJob(makeResumable(initial));
+      const first = runtime.service.listAttentionEvents(campaign.id)[0];
+      expect(first.question?.prompt).toContain("(1)");
+
+      await runtime.service.resolveAttentionResponse({
+        eventId: first.id,
+        selectedOption: "first grounded answer",
+        actorIdentity: { provider: "test", userId: "human-1" },
+        respondedAt: "2026-09-01T12:30:00.000Z",
+      });
+
+      expect(host.resumeCalls).toBe(0);
+      expect(adapter.publishedEvents).toHaveLength(2);
+      const afterFirst = runtime.service.listAttentionEvents(campaign.id);
+      expect(afterFirst.map((event) => event.status)).toEqual(["resolved", "open"]);
+      expect(afterFirst[1].question?.prompt).toContain("(2)");
+
+      await runtime.service.resolveAttentionResponse({
+        eventId: afterFirst[1].id,
+        selectedOption: "second grounded answer",
+        actorIdentity: { provider: "test", userId: "human-1" },
+        respondedAt: "2026-09-01T12:31:00.000Z",
+      });
+
+      expect(host.resumeCalls).toBe(1);
+      expect(runtime.service.getJob(initial.id).execution?.status).toBe("ready_to_submit");
+      expect(runtime.service.listEvents(campaign.id).some((event) => event.type === "application.applied")).toBe(false);
+      await runtime.stop();
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
@@ -911,6 +1318,48 @@ describe("background Career Agent runtime", () => {
         },
       });
       expect(runtime.service.listEvents(campaign.id).some((candidate) => candidate.type === "application.applied")).toBe(false);
+      await runtime.stop();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("publishes one canonical blocker and advances only after its response", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "atelier-career-runtime-"));
+    try {
+      const adapter = new InMemoryNotificationAdapter();
+      const runtime = new BackgroundCareerAgentRuntimeImpl(runtimeOptions(join(directory, "state.json"), new SequentialSubjectiveExecutor(), adapter));
+      const campaign = runtime.createCampaign(campaignInput());
+      runtime.service.activateCampaign(campaign.id);
+      await runtime.runCampaign(campaign.id);
+
+      const job = runtime.service.listJobs(campaign.id)[0];
+      await runtime.service.publishNextAttentionEvent(campaign.id, job.id);
+      expect(adapter.publishedEvents).toHaveLength(1);
+      expect(adapter.publishedEvents[0].question?.prompt).toContain("(1)");
+      expect(runtime.service.listAttentionEvents(campaign.id).filter((event) => event.status === "open")).toHaveLength(1);
+
+      const first = runtime.service.listAttentionEvents(campaign.id)[0];
+      await runtime.service.resolveAttentionResponse({
+        eventId: first.id,
+        selectedOption: "first grounded answer",
+        actorIdentity: { provider: "test", userId: "human-1" },
+        respondedAt: "2026-09-01T12:30:00.000Z",
+      });
+      const afterResponse = runtime.service.getJob(job.id);
+      const next = afterResponse.blockers.find((blocker) => blocker.field === "subjective-2");
+      expect(next).toBeDefined();
+      runtime.careerRepository.saveJob({
+        ...afterResponse,
+        status: "needs_input",
+        blockers: afterResponse.blockers.map((blocker) => blocker.id === next!.id
+          ? { ...blocker, status: "open" as const, resolvedAt: undefined, value: undefined }
+          : blocker),
+      });
+      await runtime.service.publishNextAttentionEvent(campaign.id, job.id);
+      expect(adapter.publishedEvents).toHaveLength(2);
+      expect(adapter.publishedEvents[1].question?.prompt).toContain("(2)");
+      expect(runtime.service.listAttentionEvents(campaign.id).filter((event) => event.status === "open")).toHaveLength(1);
       await runtime.stop();
     } finally {
       rmSync(directory, { recursive: true, force: true });

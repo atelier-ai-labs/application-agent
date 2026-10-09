@@ -112,13 +112,66 @@ function selectResumeFamily(job: JobPosting, profile: CandidateProfile): {
     family,
     index,
     matches: family.focusKeywords.filter((keyword) => containsKeyword(jobText, keyword)),
+    score: family.focusKeywords.filter((keyword) => containsKeyword(jobText, keyword)).length,
   }));
 
-  ranked.sort((a, b) => b.matches.length - a.matches.length || a.index - b.index);
-  const selected = ranked[0];
-  const signals = selected.matches.slice(0, 3);
+  // A resume family is selected from the posting's dominant work, not from
+  // whichever infrastructure keyword happens to occur most often.  AI
+  // platform postings commonly mention AWS/Terraform as implementation
+  // details; those are supporting signals when the title/description is
+  // clearly about agents, models, or AI platforms.
+  const title = job.title.toLowerCase();
+  const descriptionAndSkills = `${job.description} ${job.requiredSkills.join(" ")} ${job.preferredSkills.join(" ")}`.toLowerCase();
+  const familyScore = (family: ResumeFamily): number => {
+    const id = family.id;
+    const configured = family.focusKeywords.filter((keyword) => containsKeyword(jobText, keyword)).length;
+    if (id === "ai-platform-agentic") {
+      const titleSignals = (title.match(/\b(?:ai|ml|machine learning|llm|agentic|agents?|genai|generative ai)\b/g) ?? []).length;
+      const roleSignals = (title.match(/\b(?:ai|ml|agentic|llm)\s+platform\b/g) ?? []).length * 2;
+      const bodySignals = (descriptionAndSkills.match(/\b(?:agent(?:ic|core)?|bedrock|strands|llm|machine learning|model inference|generative ai|genai|prompt engineering|rag)\b/g) ?? []).length;
+      return configured + titleSignals * 5 + roleSignals * 4 + bodySignals * 2;
+    }
+    if (id === "cloud-platform") {
+      const titleSignals = (title.match(/\b(?:cloud|infrastructure|devops|platform)\b/g) ?? []).length;
+      const bodySignals = (descriptionAndSkills.match(/\b(?:aws|azure|gcp|kubernetes|terraform|cloudformation|infrastructure|devops|observability|ci\/cd)\b/g) ?? []).length;
+      return configured + titleSignals * 3 + bodySignals;
+    }
+    return configured;
+  };
+  for (const candidate of ranked) candidate.score = familyScore(candidate.family);
+
+  const frontendPosting = /\b(frontend|front[- ]end|ui|web|react)\b/i.test(job.title) ||
+    job.requiredSkills.concat(job.preferredSkills).some((skill) => /\b(frontend|react|web)\b/i.test(skill));
+  if (frontendPosting && !ranked.some((candidate) => candidate.matches.some((match) =>
+    /frontend|react|typescript|javascript|web|software/i.test(match)))) {
+    throw new Error("No verified frontend/software resume family is available for this frontend posting.");
+  }
+
+  const eligible = frontendPosting
+    ? ranked.filter((candidate) => candidate.matches.some((match) => /frontend|react|typescript|javascript|web|software/i.test(match)))
+    : ranked;
+  eligible.sort((a, b) => b.score - a.score || b.matches.length - a.matches.length || a.index - b.index);
+  const selected = eligible[0] ?? ranked[0];
+  if (!selected) throw new Error("No verified resume family is available for this posting.");
+  const tied = eligible.filter((candidate) => candidate.score === selected.score && candidate.score > 0);
+  if (tied.length > 1) {
+    throw new Error(`Resume family selection requires review because the posting ties between: ${tied.map((candidate) => candidate.family.id).join(", ")}.`);
+  }
+  const semanticSignals = selected.family.id === "cloud-platform"
+    ? [
+        /\b(?:cloud|infrastructure|devops|platform)\b/i.test(title) ? "platform/infrastructure role" : "",
+        /\b(?:aws|azure|gcp|kubernetes|terraform|cloudformation)\b/i.test(descriptionAndSkills) ? "cloud/IaC requirements" : "",
+        /\b(?:ci\/cd|observability|deployment pipelines?|developer tooling)\b/i.test(descriptionAndSkills) ? "delivery/operations requirements" : "",
+      ]
+    : selected.family.id === "ai-platform-agentic"
+      ? [
+          /\b(?:ai|ml|llm|agentic|agents?|genai|generative ai)\b/i.test(title) ? "AI/agentic role" : "",
+          /\b(?:ai|ml|llm|agentic|agents?|model inference|prompt engineering|rag)\b/i.test(descriptionAndSkills) ? "AI platform requirements" : "",
+        ]
+      : [];
+  const signals = [...selected.matches, ...semanticSignals.filter(Boolean)].slice(0, 3);
   const reason = signals.length > 0
-    ? `${selected.family.label} matches the posting's configured focus signals: ${signals.join(", ")}.`
+    ? `${selected.family.label} matches the posting signals: ${signals.join(", ")}.`
     : `${selected.family.label} is the first configured family because the posting has no matching family focus signal.`;
 
   return { family: selected.family, reason };

@@ -18,6 +18,7 @@ import type {
   ExecutionHostStatus,
 } from "../../src/domain/executionHostTypes";
 import { assertTrustedExecutionRequest } from "./trustedRequest";
+import { DurableSubmissionAuthority, type SubmissionFence } from "./submissionAuthority";
 
 export interface ExecutionHostLogEntry {
   event: "started" | "status" | "closed" | "failed";
@@ -32,11 +33,22 @@ export interface ExecutionSessionRegistryOptions {
   executor: ApplicationExecutor;
   /** Server-only capability gate; never inferred from a browser request. */
   allowAutomaticSubmission?: boolean;
+  /** Preparation-only takes precedence over campaign automatic authority. */
+  preparationOnly?: boolean;
   now?: () => string;
   createId?: () => string;
   maxConcurrent?: number;
   sessionTimeoutMs?: number;
+  /** How often a retained real browser session checks for CAPTCHA clearance. */
+  captchaPollIntervalMs?: number;
+  /** Maximum time to watch a CAPTCHA before leaving the session manually resumable. */
+  captchaWaitTimeoutMs?: number;
   logger?: (entry: ExecutionHostLogEntry) => void;
+  /** Stable host identity used by the durable automatic-submission fence. */
+  submissionWorkerId?: string;
+  submissionStateFile?: string;
+  submissionAuthority?: DurableSubmissionAuthority;
+  submissionTarget?: { campaignId: string; careerJobId: string; applicationId: string };
 }
 
 export class ExecutionHostRegistryError extends Error {
@@ -49,6 +61,16 @@ export class ExecutionHostRegistryError extends Error {
   }
 }
 
+/** Explicit action-time approval required by the local manual-submit route. */
+export const MANUAL_SUBMISSION_APPROVAL = "SUBMIT_APPLICATION" as const;
+
+export interface ManualSubmissionApproval {
+  approval: typeof MANUAL_SUBMISSION_APPROVAL;
+  campaignId: string;
+  careerJobId: string;
+  applicationId: string;
+}
+
 interface ExecutionSession {
   readonly id: string;
   request: ExecutionHostRequest;
@@ -58,6 +80,8 @@ interface ExecutionSession {
   running: boolean;
   terminal: boolean;
   attempt: number;
+  captchaWatchToken: number;
+  captchaWatchRunning: boolean;
 }
 
 const ACTIVE_STATUSES: ReadonlySet<ExecutionHostStatus> = new Set([
@@ -94,13 +118,18 @@ function isBoundaryBlocker(result: Extract<ExecutionHostResult, { state: "requir
     result.blocker.kind === "external_verification";
 }
 
-function requestForHost(request: ExecutionHostRequest, now: string): ApplicationExecutionRequest {
+function requestForHost(
+  request: ExecutionHostRequest,
+  now: string,
+  hooks: Pick<ApplicationExecutionRequest, "beforeAutomaticSubmission" | "recordAutomaticSubmissionOutcome"> = {},
+): ApplicationExecutionRequest {
   return {
     campaign: request.campaign,
     careerJob: request.careerJob,
     application: request.application,
     profile: request.profile,
     now,
+    ...hooks,
   };
 }
 
@@ -115,11 +144,13 @@ function unsupportedFromInspection(inspection: ExecutionInspection): ExecutionHo
 }
 
 function failedFromInspection(inspection: ExecutionInspection): ExecutionHostResult {
+  const terminalPostingState = inspection.diagnostic?.reasonCode === "posting_not_found" ||
+    inspection.diagnostic?.reasonCode === "posting_closed";
   return {
     state: "failed",
     reason: inspection.evidence.find((item) => item.startsWith("error:"))?.slice("error:".length) ??
       "The browser executor could not inspect this application form.",
-    retryable: true,
+    retryable: !terminalPostingState,
     inspection,
   };
 }
@@ -146,14 +177,31 @@ function statusForResult(result: ExecutionHostResult): ExecutionHostStatus {
   return "failed";
 }
 
+function isActiveCaptchaResult(result: ExecutionHostResult): boolean {
+  return result.state === "requires_human" &&
+    result.blocker.kind === "captcha" &&
+    (result.inspection?.captcha?.state === "active_challenge" || result.inspection?.captcha?.state === "uncertain");
+}
+
+function inspectionStillHasCaptcha(inspection: ExecutionInspection): boolean {
+  return inspection.blockers.some((blocker) => blocker.kind === "captcha") ||
+    inspection.captcha?.state === "active_challenge" ||
+    inspection.captcha?.state === "uncertain";
+}
+
 export class ExecutionSessionRegistry {
   private readonly now: () => string;
   private readonly createId: () => string;
   private readonly executor: ApplicationExecutor;
   private readonly allowAutomaticSubmission: boolean;
+  private readonly preparationOnly: boolean;
   private readonly maxConcurrent: number;
   private readonly sessionTimeoutMs: number;
+  private readonly captchaPollIntervalMs: number;
+  private readonly captchaWaitTimeoutMs: number;
   private readonly logger?: (entry: ExecutionHostLogEntry) => void;
+  private readonly submissionAuthority?: DurableSubmissionAuthority;
+  private readonly submissionTarget?: ExecutionSessionRegistryOptions["submissionTarget"];
   private readonly sessions = new Map<string, ExecutionSession>();
 
   constructor(options: ExecutionSessionRegistryOptions) {
@@ -161,14 +209,28 @@ export class ExecutionSessionRegistry {
     this.createId = options.createId ?? defaultCreateId;
     this.executor = options.executor;
     this.allowAutomaticSubmission = options.allowAutomaticSubmission === true;
+    this.preparationOnly = options.preparationOnly === true;
     this.maxConcurrent = options.maxConcurrent ?? 1;
     this.sessionTimeoutMs = options.sessionTimeoutMs ?? 30 * 60 * 1_000;
+    this.captchaPollIntervalMs = options.captchaPollIntervalMs ?? 250;
+    this.captchaWaitTimeoutMs = options.captchaWaitTimeoutMs ?? this.sessionTimeoutMs;
     this.logger = options.logger;
+    this.submissionAuthority = options.submissionAuthority ?? new DurableSubmissionAuthority(
+      options.submissionWorkerId ?? "local-execution-host",
+      { stateFile: options.submissionStateFile },
+    );
+    this.submissionTarget = options.submissionTarget;
     if (!Number.isInteger(this.maxConcurrent) || this.maxConcurrent <= 0) {
       throw new Error("Execution host concurrency must be a positive integer.");
     }
     if (!Number.isInteger(this.sessionTimeoutMs) || this.sessionTimeoutMs <= 0) {
       throw new Error("Execution host session timeout must be a positive integer.");
+    }
+    if (!Number.isInteger(this.captchaPollIntervalMs) || this.captchaPollIntervalMs <= 0) {
+      throw new Error("Execution host CAPTCHA poll interval must be a positive integer.");
+    }
+    if (!Number.isInteger(this.captchaWaitTimeoutMs) || this.captchaWaitTimeoutMs <= 0) {
+      throw new Error("Execution host CAPTCHA wait timeout must be a positive integer.");
     }
   }
 
@@ -230,6 +292,8 @@ export class ExecutionSessionRegistry {
       running: false,
       terminal: false,
       attempt: 1,
+      captchaWatchToken: 0,
+      captchaWatchRunning: false,
     };
     this.sessions.set(id, session);
     this.touch(session);
@@ -242,6 +306,69 @@ export class ExecutionSessionRegistry {
     const session = this.sessions.get(id);
     if (!session) throw new ExecutionHostRegistryError("Execution session was not found.", "not_found");
     return this.snapshot(session);
+  }
+
+  /** Exposes only the isolated semantic handoff bridge, never the browser handle. */
+  getHandoffBridge(id: string) {
+    const session = this.sessions.get(id);
+    if (!session || session.terminal || session.snapshot.status !== "waiting_for_human" || !this.executor.getHandoffBridge) return undefined;
+    return this.executor.getHandoffBridge(session.request.application.id);
+  }
+
+  async submitManually(id: string, approval: ManualSubmissionApproval): Promise<ExecutionHostSnapshot> {
+    const session = this.sessions.get(id);
+    if (!session) throw new ExecutionHostRegistryError("Execution session was not found.", "not_found");
+    if (approval.approval !== MANUAL_SUBMISSION_APPROVAL) {
+      throw new ExecutionHostRegistryError("Manual submission requires an explicit action-time approval.", "invalid_request");
+    }
+    if (approval.campaignId !== session.request.campaign.id ||
+      approval.careerJobId !== session.request.careerJob.id ||
+      approval.applicationId !== session.request.application.id) {
+      throw new ExecutionHostRegistryError("The manual submission approval does not match this exact execution target.", "invalid_request");
+    }
+    if (session.terminal) throw new ExecutionHostRegistryError("That execution session is closed and cannot be submitted.", "state");
+    if (session.running) throw new ExecutionHostRegistryError("The browser execution is still running; manual submission is not available yet.", "conflict");
+    if (session.snapshot.status !== "ready_to_submit" || session.snapshot.result?.state !== "ready_to_submit" ||
+      session.snapshot.inspection?.status !== "inspected") {
+      throw new ExecutionHostRegistryError("Manual submission requires a current verified ready_to_submit snapshot.", "state");
+    }
+    if (session.request.application.submissionProof || session.request.application.manualSubmissionConfirmation ||
+      session.request.careerJob.submissionProof || session.request.careerJob.manualSubmissionConfirmation) {
+      throw new ExecutionHostRegistryError("This exact application already has submission evidence; no retry is permitted.", "conflict");
+    }
+    if (!this.executor.submitPrepared) {
+      throw new ExecutionHostRegistryError("The configured executor cannot submit an existing prepared browser session.", "state");
+    }
+
+    let fence: SubmissionFence;
+    try {
+      fence = this.submissionAuthority!.claim(session.request.application.id, session.request.careerJob.id, this.now());
+      this.submissionAuthority!.beforeClick(fence, this.now());
+    } catch (error) {
+      throw new ExecutionHostRegistryError(safeReason(error, "The durable submission fence rejected this action."), "conflict");
+    }
+    session.running = true;
+    try {
+      const result = await this.executor.submitPrepared(requestForHost(session.request, this.now()));
+      if (result.state === "submitted") {
+        this.submissionAuthority!.markSubmitted(fence, result.proof.externalApplicationId, this.now());
+        session.snapshot = { ...session.snapshot, manualSubmission: true, updatedAt: this.now() };
+        await this.finish(session, result);
+      } else {
+        // Once the action-time fence crosses beforeClick, every non-submitted
+        // result is permanently fenced. Even a reported pre-click failure is
+        // conservative here because the browser outcome cannot be retried
+        // safely without external verification.
+        this.submissionAuthority!.markUnknown(fence, this.now());
+        await this.finish(session, result);
+      }
+      return this.snapshot(session);
+    } catch (error) {
+      this.submissionAuthority!.markUnknown(fence, this.now());
+      throw new ExecutionHostRegistryError(safeReason(error, "The submission outcome is unknown; verify externally and do not retry."), "state");
+    } finally {
+      session.running = false;
+    }
   }
 
   resume(id: string, replacement?: ExecutionHostRequest): ExecutionHostSnapshot {
@@ -265,6 +392,7 @@ export class ExecutionSessionRegistry {
       }
       session.request = replacement;
     }
+    this.stopCaptchaWatch(session);
     session.attempt += 1;
     session.snapshot = {
       ...session.snapshot,
@@ -281,6 +409,7 @@ export class ExecutionSessionRegistry {
     if (!session) throw new ExecutionHostRegistryError("Execution session was not found.", "not_found");
     if (session.terminal) return this.snapshot(session);
     session.terminal = true;
+    this.stopCaptchaWatch(session);
     this.addTelemetry(session, { cancellationCount: 1 });
     session.snapshot = { ...session.snapshot, failureReasonCode: "cancelled" };
     this.clearTimer(session);
@@ -299,6 +428,7 @@ export class ExecutionSessionRegistry {
     await Promise.all([...this.sessions.values()].map(async (session) => {
       if (session.terminal) return;
       session.terminal = true;
+      this.stopCaptchaWatch(session);
       this.clearTimer(session);
       await this.closeExecutor(session);
       this.update(session, "closed", "The local execution host closed; the browser session is no longer recoverable.");
@@ -323,6 +453,11 @@ export class ExecutionSessionRegistry {
 
   private snapshot(session: ExecutionSession): ExecutionHostSnapshot {
     return clone(session.snapshot);
+  }
+
+  getActiveForApplication(applicationId: string): ExecutionHostSnapshot | undefined {
+    const session = [...this.sessions.values()].find((candidate) => !candidate.terminal && candidate.request.application.id === applicationId);
+    return session ? clone(session.snapshot) : undefined;
   }
 
   private update(session: ExecutionSession, status: ExecutionHostStatus, error?: string): void {
@@ -365,6 +500,7 @@ export class ExecutionSessionRegistry {
   private async expire(session: ExecutionSession): Promise<void> {
     if (session.terminal || !ACTIVE_STATUSES.has(session.snapshot.status)) return;
     session.terminal = true;
+    this.stopCaptchaWatch(session);
     session.snapshot = { ...session.snapshot, failureReasonCode: "timeout" };
     await this.closeExecutor(session);
     this.update(session, "failed", "The local browser execution session timed out; no application was submitted.");
@@ -394,8 +530,38 @@ export class ExecutionSessionRegistry {
     session.running = true;
     const browserPreparationStartedAt = monotonicNow();
     try {
-      const request = () => requestForHost(session.request, this.now());
-      if (session.request.campaign.submissionPolicy.authority === "automatic" && !this.allowAutomaticSubmission) {
+      let submissionFence: SubmissionFence | undefined;
+      const automaticTargetAuthorized = session.request.campaign.submissionPolicy.authority !== "automatic" || (
+        this.submissionTarget !== undefined &&
+        this.submissionTarget.campaignId === session.request.campaign.id &&
+        this.submissionTarget.careerJobId === session.request.careerJob.id &&
+        this.submissionTarget.applicationId === session.request.application.id
+      );
+      const hostRequest = this.preparationOnly && session.request.campaign.submissionPolicy.authority === "automatic"
+        ? {
+            ...session.request,
+            campaign: { ...session.request.campaign, submissionPolicy: { ...session.request.campaign.submissionPolicy, authority: "never" as const } },
+          }
+        : session.request;
+      const request = () => requestForHost(hostRequest, this.now(), {
+        beforeAutomaticSubmission: !this.preparationOnly && automaticTargetAuthorized && this.submissionAuthority && session.request.campaign.submissionPolicy.authority === "automatic"
+          ? async () => {
+              if (!submissionFence) submissionFence = this.submissionAuthority!.claim(session.request.application.id, session.request.careerJob.id, this.now());
+              this.submissionAuthority!.beforeClick(submissionFence, this.now());
+            }
+          : undefined,
+        recordAutomaticSubmissionOutcome: !this.preparationOnly && automaticTargetAuthorized && this.submissionAuthority && session.request.campaign.submissionPolicy.authority === "automatic"
+          ? async (outcome) => {
+              if (!submissionFence) return;
+              if (outcome.confirmed && outcome.externalApplicationId) {
+                this.submissionAuthority!.markSubmitted(submissionFence, outcome.externalApplicationId, this.now());
+              } else if (outcome.clicked) {
+                this.submissionAuthority!.markUnknown(submissionFence, this.now());
+              }
+            }
+          : undefined,
+      });
+      if (session.request.campaign.submissionPolicy.authority === "automatic" && !this.preparationOnly && !this.allowAutomaticSubmission) {
         await this.finish(session, {
           state: "requires_human",
           blocker: {
@@ -407,6 +573,22 @@ export class ExecutionSessionRegistry {
             reason: "The persisted campaign allows automatic submission, but the local execution host has not been explicitly enabled for it.",
             evidence: ["submission-authority:automatic", "execution-host-authority:never", "submit:not-clicked"],
             resumeAfterHuman: true,
+          },
+        });
+        return;
+      }
+      if (session.request.campaign.submissionPolicy.authority === "automatic" && !this.preparationOnly && !automaticTargetAuthorized) {
+        await this.finish(session, {
+          state: "requires_human",
+          blocker: {
+            kind: "submission_approval",
+            unit: "submission",
+            questionProvenance: "CONFIGURATION",
+            field: "submission-target-allowlist",
+            question: "Allow this exact application target for automatic submission",
+            reason: "The trusted execution host automatic-submission allowlist does not match this campaign, career job, and application tuple.",
+            evidence: ["submission-target:mismatch", "submit:not-clicked"],
+            resumeAfterHuman: false,
           },
         });
         return;
@@ -447,6 +629,7 @@ export class ExecutionSessionRegistry {
         const inspectionResult = blockerFromInspection(inspection);
         if (inspectionResult) {
           await this.finish(session, inspectionResult);
+          this.startCaptchaWatch(session, inspectionResult);
           return;
         }
       }
@@ -479,6 +662,7 @@ export class ExecutionSessionRegistry {
         return;
       }
       await this.finish(session, result);
+      this.startCaptchaWatch(session, result);
     } catch (error) {
       const diagnostic = browserDiagnosticForError(
         error,
@@ -533,6 +717,57 @@ export class ExecutionSessionRegistry {
     } else {
       this.touch(session);
       this.log(session, "status");
+    }
+  }
+
+  private stopCaptchaWatch(session: ExecutionSession): void {
+    session.captchaWatchRunning = false;
+    session.captchaWatchToken += 1;
+  }
+
+  private startCaptchaWatch(session: ExecutionSession, result: ExecutionHostResult): void {
+    if (!isActiveCaptchaResult(result) || session.terminal || session.captchaWatchRunning || !this.executor.inspect) return;
+    session.captchaWatchRunning = true;
+    const token = ++session.captchaWatchToken;
+    void this.watchForCaptchaClearance(session, token);
+  }
+
+  /**
+   * CAPTCHA is the one human boundary that can be observed without asking the
+   * user to provide an answer. Keep the existing browser session alive and
+   * poll its normal read-only inspection path. No CAPTCHA token or challenge
+   * content is read, stored, or forwarded.
+   */
+  private async watchForCaptchaClearance(session: ExecutionSession, token: number): Promise<void> {
+    const deadline = Date.now() + this.captchaWaitTimeoutMs;
+    try {
+      while (!session.terminal && session.captchaWatchRunning && session.captchaWatchToken === token && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, this.captchaPollIntervalMs));
+        if (session.terminal || !session.captchaWatchRunning || session.captchaWatchToken !== token) return;
+
+        let inspection: ExecutionInspection;
+        try {
+          inspection = await this.executor.inspect!(requestForHost(session.request, this.now()));
+        } catch {
+          // A transient page/iframe read failure is not evidence that the user
+          // completed the challenge. Keep the session manually resumable.
+          continue;
+        }
+        if (inspectionStillHasCaptcha(inspection)) continue;
+
+        session.captchaWatchRunning = false;
+        session.attempt += 1;
+        session.snapshot = {
+          ...session.snapshot,
+          attempt: session.attempt,
+          retryReasonCode: "human_gate",
+        };
+        this.update(session, "resuming");
+        await this.run(session, true);
+        return;
+      }
+    } finally {
+      if (session.captchaWatchToken === token) session.captchaWatchRunning = false;
     }
   }
 

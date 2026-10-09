@@ -114,6 +114,13 @@ export interface ScoutedJob {
   /** Primary identity plus safe URL/content aliases used for cross-source history checks. */
   dedupeKeys: readonly string[];
   sourceObservations: readonly JobSourceObservation[];
+  /** Explicit user/queue selection provenance; not inferred from a URL. */
+  queueSelected?: boolean;
+  /** Explicit queue resume family used for narrow role-lane mapping. */
+  queueResumeFamily?: string;
+  /** Explicit queue fit/priority metadata; never inferred from posting text. */
+  queueFit?: string;
+  queuePriority?: string;
 }
 
 export interface ScoutFailure {

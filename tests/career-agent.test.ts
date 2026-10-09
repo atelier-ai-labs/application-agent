@@ -36,8 +36,8 @@ import {
   type ModelClient,
   type SubmissionProof,
 } from "../application-agent/src";
-import { applyHardFilters, verifyPreparedApplication } from "../application-agent/src/domain/policies";
-import { CareerAgentService } from "../application-agent/src/service/careerAgentService";
+import { applyHardFilters, canonicalQueueResumeFamily, criteriaForQueueSelection, verifyPreparedApplication } from "../application-agent/src/domain/policies";
+import { CareerAgentService, trustedQueueFitAssessment } from "../application-agent/src/service/careerAgentService";
 import { LocalStorageApplicationRepository } from "../application-agent/src/persistence/applicationRepository";
 import { CAMPAIGNS_STORAGE_KEY, LocalStorageCareerRepository } from "../application-agent/src/persistence/careerRepository";
 
@@ -328,6 +328,115 @@ describe("Autonomous Career Agent domain seams", () => {
     expect(decidePursuit({ ...fit, classification: "weak" }, { strong: "pursue", good: "pursue", stretch: "hold", weak: "reject" }).decision).toBe("reject");
   });
 
+  it("maps only the explicit Agentic-AI queue resume to the narrow approved title aliases", () => {
+    const criteria = {
+      roleLanes: ["frontend"], locations: [], remoteOnly: false, employmentTypes: [], excludedSeniorities: [], excludedCompanies: [],
+    };
+    const mapped = criteriaForQueueSelection(criteria, true, "agentic-ai");
+    expect(mapped.roleLanes).toContain("forward deployed engineer");
+    expect(mapped.roleLanes).toContain("ai engineer");
+    expect(applyHardFilters(posting("LiteLLM", "Forward Deployed Engineer (New Grad)", ["Python"], "agentic-queue"), mapped).decision).toBe("pass");
+    expect(applyHardFilters(posting("MeridianLink", "AI Engineer II (AI Platform)", ["Python"], "meridianlink-ai-platform"), mapped).decision).toBe("pass");
+    expect(applyHardFilters(posting("LiteLLM", "Forward Deployed Engineer (New Grad)", ["Python"], "agentic-queue"), criteriaForQueueSelection(criteria, false, "agentic-ai")).decision).toBe("reject");
+    expect(applyHardFilters(posting("MeridianLink", "AI Engineer II (AI Platform)", ["Python"], "meridianlink-ai-platform"), criteriaForQueueSelection(criteria, false, "agentic-ai")).decision).toBe("reject");
+    expect(applyHardFilters({ ...posting("LiteLLM", "Forward Deployed Engineer (New Grad)", ["Python"], "agentic-queue"), employmentType: "1099" }, mapped).decision).toBe("reject");
+  });
+
+  it("accepts narrow trusted queue fit metadata without weakening ordinary fit policy", () => {
+    const profile = fullyAuthorizedTestProfile();
+    const job = posting("LiteLLM", "Forward Deployed Engineer", ["COBOL", "Fortran"], "queue-fit");
+    const weak = { ...assessFit(job, profile), classification: "weak" as const };
+    expect(trustedQueueFitAssessment(weak, true, "Excellent", "High", "agentic-ai", profile).classification).toBe("strong");
+    expect(trustedQueueFitAssessment(weak, false, "Excellent", "High", "agentic-ai", profile).classification).toBe("weak");
+    expect(trustedQueueFitAssessment(weak, true, "Excellent", "High", "cloud-platform", profile).classification).toBe("weak");
+    expect(trustedQueueFitAssessment(weak, true, "Excellent", "High", "cloud-platform", profile).recommendedResumeFamily).toBe("cloud-platform");
+    expect(trustedQueueFitAssessment(weak, true, "Excellent", "High", "frontend-software", profile).recommendedResumeFamily).toBe("frontend-software");
+    expect(trustedQueueFitAssessment(weak, true, "Excellent", "urgent", "cloud-platform", profile).recommendedResumeFamily).toBe(weak.recommendedResumeFamily);
+    expect(trustedQueueFitAssessment({ ...weak, classification: "weak" }, true, "Excellent", "High", "agentic-ai", profile).classification).toBe("strong");
+    expect(trustedQueueFitAssessment(weak, true, "Excellent", "High", "agentic-ai", profile).recommendedResumeFamily).toBe("ai-platform-agentic");
+  });
+
+  it("lets grounded platform-posting signals override a stale queue resume hint", () => {
+    const profile = fullyAuthorizedTestProfile();
+    const job = posting(
+      "GC AI",
+      "Member of Technical Staff, Platform Engineering",
+      ["GCP", "Terraform", "CI/CD", "Observability", "TypeScript"],
+      "gc-ai-platform",
+      "Own infrastructure, deployment pipelines, observability, and internal platform tooling for an AI company.",
+    );
+    const fit = assessFit(job, profile);
+    expect(fit.recommendedResumeFamily).toBe("cloud-platform");
+    expect(fit.resumeFamilyReason).toContain("platform/infrastructure role");
+    expect(trustedQueueFitAssessment(fit, true, "Excellent", "High", "ai-platform-agentic", profile).recommendedResumeFamily).toBe("cloud-platform");
+  });
+
+  it("recovers an aged proof-free inspecting host only with exact pre-submit evidence", async () => {
+    const { service, applicationService, careerRepository, clock } = makeService();
+    const campaign = service.createCampaign(campaignInput({ submissionPolicy: { authority: "never", requireExplicitApproval: false } }));
+    const job = posting("Example Cloud Systems", "Cloud Platform Engineer", ["AWS"], "stale-host");
+    const application = await applicationService.prepareFromNormalizedJob(job);
+    const careerJob: CareerJob = {
+      id: "career-job-stale-host",
+      campaignId: campaign.id,
+      isExample: true,
+      sourceMode: "live",
+      actionability: "actionable",
+      fingerprint: "stale-host-fingerprint",
+      sourceId: "curated-live",
+      job,
+      discoveredAt: capturedAt,
+      fit: application.fit,
+      applicationId: application.id,
+      status: "preparing",
+      blockers: [],
+      execution: {
+        mode: "real_local",
+        status: "inspecting",
+        hostExecutionId: "execution-stale-host",
+        fieldsDetected: ["resume"],
+        fieldsFilled: ["resume"],
+        unresolvedFields: [],
+        evidence: ["submit:not-clicked", "submission:manual-only"],
+        startedAt: "2026-08-30T10:00:00.000Z",
+        updatedAt: "2026-08-30T10:00:00.000Z",
+      },
+      createdAt: capturedAt,
+      updatedAt: capturedAt,
+    };
+    careerRepository.saveJob(careerJob);
+
+    const recovered = await service.recoverStalePreSubmitApplication(
+      campaign.id,
+      careerJob.id,
+      application.id,
+      "execution-stale-host",
+      "not_found",
+    );
+    expect(recovered.status).toBe("preparing");
+    expect(recovered.execution?.hostExecutionId).toBeUndefined();
+    expect(recovered.execution?.status).toBe("not_started");
+    expect(recovered.execution?.evidence).toEqual(expect.arrayContaining([
+      "submit:not-clicked",
+      "execution:stale-host-not_found",
+      "execution:stale-pre-submit-reprepared",
+    ]));
+
+    const fresh = { ...careerJob, execution: { ...careerJob.execution!, updatedAt: clock.now() } };
+    careerRepository.saveJob(fresh);
+    await expect(service.recoverStalePreSubmitApplication(campaign.id, careerJob.id, application.id, "execution-stale-host", "not_found"))
+      .rejects.toThrow("not stale enough");
+  });
+
+  it("normalizes the canonical AI Platform / Agentic queue family label", () => {
+    const profile = fullyAuthorizedTestProfile();
+    const job = posting("LiteLLM", "Forward Deployed Engineer", ["COBOL"], "queue-canonical-family");
+    const weak = { ...assessFit(job, profile), classification: "weak" as const };
+    expect(canonicalQueueResumeFamily("AI Platform / Agentic")).toBe("ai-platform-agentic");
+    expect(criteriaForQueueSelection({ roleLanes: ["frontend"], locations: [], remoteOnly: false, employmentTypes: [], excludedSeniorities: [], excludedCompanies: [] }, true, "AI Platform / Agentic").roleLanes).toContain("forward deployed engineer");
+    expect(trustedQueueFitAssessment(weak, true, "Excellent", "High", "AI Platform / Agentic", profile).classification).toBe("strong");
+  });
+
   it("preserves the submission gate and requires proof before applied state", async () => {
     const profile = fullyAuthorizedTestProfile();
     const repository = new InMemoryApplicationRepository();
@@ -357,6 +466,46 @@ describe("Autonomous Career Agent domain seams", () => {
     await expect(applicationService.submitApplication(application.id, { approved: true, approvedAt: capturedAt })).rejects.toThrow("submission is disabled");
   });
 
+  it("keeps unsupported qualifications as fit metadata without blocking execution policy", async () => {
+    const profile = fullyAuthorizedTestProfile();
+    const applicationRepository = new InMemoryApplicationRepository();
+    const applicationService = new ApplicationService(applicationRepository, profile, undefined, runtime());
+    const stretchPosting = posting("Example Cloud Systems", "Cloud Platform Engineer", ["AWS", "Ruby"], "stretch-preparation-1");
+    const knownFit = assessFit({ ...stretchPosting, requiredSkills: ["AWS", "Ruby"] }, profile);
+    const application = await applicationService.prepareFromNormalizedJob(stretchPosting, true, knownFit);
+    expect(application.fit?.classification).toBe("stretch");
+    expect(application.fit?.unsupportedRequiredQualifications).toEqual(["Ruby"]);
+    expect(application.status).toBe("ready_for_review");
+
+    const { service } = makeService({ profile });
+    const preparationCampaign = service.createCampaign(campaignInput({
+      submissionPolicy: { authority: "never", requireExplicitApproval: true },
+    }));
+    const preparationGate = verifyPreparedApplication(
+      application,
+      preparationCampaign.applicationPolicy,
+      preparationCampaign.submissionPolicy,
+      preparationCampaign,
+      new Set(),
+      true,
+    );
+    expect(preparationGate.allowed).toBe(true);
+    expect(preparationGate.blockers).toEqual([]);
+
+    const automaticCampaign = {
+      ...preparationCampaign,
+      submissionPolicy: { authority: "automatic" as const, requireExplicitApproval: false },
+    };
+    const automaticGate = verifyPreparedApplication(
+      application,
+      automaticCampaign.applicationPolicy,
+      automaticCampaign.submissionPolicy,
+      automaticCampaign,
+    );
+    expect(automaticGate.allowed).toBe(true);
+    expect(automaticGate.blockers).toEqual([]);
+  });
+
   it("persists explicit automatic-submission authorization without changing search or fit policy", () => {
     const { service } = makeService({ profile: fullyAuthorizedTestProfile() });
     const campaign = service.createCampaign(campaignInput({
@@ -384,6 +533,36 @@ describe("Autonomous Career Agent domain seams", () => {
     expect(result.held).toBe(1);
     expect(applicationRepository.listApplications()).toHaveLength(1);
     expect(service.listJobs(campaign.id).some((job) => job.status === "held" && job.decisionReason?.includes("cap"))).toBe(true);
+  });
+
+  it("skips one prepared application through the service without submission or attention residue", async () => {
+    const { service, applicationService, careerRepository } = makeService({ executor: new UnavailableApplicationExecutor() });
+    const campaign = service.createCampaign(campaignInput({
+      submissionPolicy: { authority: "never", requireExplicitApproval: false },
+    }));
+    service.activateCampaign(campaign.id);
+    await service.runCampaign(campaign.id);
+
+    const selected = service.listJobs(campaign.id)[0];
+    expect(selected.status).toBe("needs_input");
+    expect(selected.applicationId).toBeDefined();
+
+    const skipped = await service.skipApplication(campaign.id, selected.id);
+
+    expect(skipped.status).toBe("rejected");
+    expect(skipped.blockers.every((blocker) => blocker.status === "resolved")).toBe(true);
+    if (skipped.execution) {
+      expect(skipped.execution.status).toBe("closed");
+      expect(skipped.execution.evidence).toEqual(expect.arrayContaining(["application:skipped", "submit:not-clicked"]));
+    }
+    expect(applicationService.getApplication(selected.applicationId!).status).toBe("failed");
+    expect(service.snapshot(campaign.id).counts.needsYou).toBe(0);
+    expect(careerRepository.listEvents(campaign.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "job.rejected", metadata: expect.objectContaining({ jobId: selected.id }) }),
+    ]));
+    expect(careerRepository.listEvents(campaign.id).some((event) => event.type === "application.applied")).toBe(false);
+
+    expect(await service.skipApplication(campaign.id, selected.id)).toEqual(skipped);
   });
 
   it("creates structured blocker state, resolves it, and resumes without rebuilding the packet", async () => {

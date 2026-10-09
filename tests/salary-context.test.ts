@@ -133,6 +133,50 @@ function durableJob(job: JobPosting): CareerJob {
 }
 
 describe("grounded salary context", () => {
+  it("does not turn technical acronyms or experience ranges into compensation", () => {
+    const job = normalizeJobPosting({
+      companyHint: "D.A. Davidson & Co.",
+      titleHint: "Azure Cloud Engineer",
+      rawText: `D.A. Davidson & Co.
+Azure Cloud Engineer
+Build and operate Azure platform services.
+Requirements: 3-5+ years of hands-on Microsoft Azure experience, including AKS.
+`,
+    }, capturedAt);
+
+    expect(job.compensation).toBeUndefined();
+  });
+
+  it("parses an explicit compensation line without widening into arbitrary posting text", () => {
+    const job = normalizeJobPosting({
+      companyHint: "Example Cloud Co",
+      titleHint: "Platform Engineer",
+      rawText: `Example Cloud Co
+Platform Engineer
+Build dependable platform services.
+Compensation: USD 95,000-120,000 per year
+Requirements: 3-5+ years of platform engineering experience.
+`,
+    }, capturedAt);
+
+    expect(job.compensation).toEqual({ minimum: 95000, maximum: 120000, currency: "USD", period: "annual" });
+  });
+
+  it("prefers trusted structured compensation supplied at intake", () => {
+    const job = normalizeJobPosting({
+      companyHint: "D.A. Davidson & Co.",
+      titleHint: "Azure Cloud Engineer",
+      compensation: { minimum: 95000, maximum: 120000, currency: "USD", period: "annual" },
+      rawText: `D.A. Davidson & Co.
+Azure Cloud Engineer
+Build and operate Azure platform services.
+Requirements: 3-5+ years of hands-on Microsoft Azure experience, including AKS.
+`,
+    }, capturedAt);
+
+    expect(job.compensation).toEqual({ minimum: 95000, maximum: 120000, currency: "USD", period: "annual" });
+  });
+
   it("formats ranges, one-sided bounds, currency, and pay periods without conversion", () => {
     expect(formatPostedCompensation({ minimum: 85000, maximum: 120000, currency: "USD", period: "annual" }))
       .toBe("$85,000–$120,000 per year");

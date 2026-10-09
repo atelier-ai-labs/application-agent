@@ -1,41 +1,26 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import {
-  ApplicationService,
-  type ApplicationServiceOptions,
-} from "../../src/service/applicationService";
+import { ApplicationService, type ApplicationServiceOptions } from "../../src/service/applicationService";
 import {
   CareerAgentService,
   type CareerAgentServiceOptions,
+  type LegacyAttentionRepairOptions,
   type LegacyAttentionRepairResult,
 } from "../../src/service/careerAgentService";
 import type { ApplicationExecutor } from "../../src/domain/executor";
 import { UnavailableApplicationExecutor } from "../../src/domain/executor";
-import {
-  BraveSearchDiscoveryProvider,
-} from "../../src/domain/braveSearchDiscoveryProvider";
+import { BraveSearchDiscoveryProvider } from "../../src/domain/braveSearchDiscoveryProvider";
 import {
   BoundedApplicationDestinationResolver,
   parseDestinationCandidates,
   StaticDestinationEvidenceLookup,
   type ApplicationDestinationResolver,
 } from "../../src/domain/applicationDestinationResolver";
-import type {
-  Campaign,
-  CampaignRunResult,
-  CreateCampaignInput,
-} from "../../src/domain/campaignTypes";
+import type { Campaign, CampaignRunResult, CareerJob, CreateCampaignInput } from "../../src/domain/campaignTypes";
+import type { DailyHuntProcessingResult } from "../../src/service/careerAgentService";
 import { HIMALAYAS_SOURCE_ID } from "../../src/domain/campaignTypes";
-import type {
-  ExecutionHostRequest,
-  ExecutionHostSnapshot,
-  ExecutionHostStatus,
-} from "../../src/domain/executionHostTypes";
-import {
-  createGreenhouseJobSources,
-  DEFAULT_GREENHOUSE_API_BASE_URL,
-  parseGreenhouseBoards,
-} from "../../src/domain/greenhouseJobSource";
+import type { ExecutionHostRequest, ExecutionHostSnapshot, ExecutionHostStatus } from "../../src/domain/executionHostTypes";
+import { createGreenhouseJobSources, DEFAULT_GREENHOUSE_API_BASE_URL, parseGreenhouseBoards } from "../../src/domain/greenhouseJobSource";
 import { JobReferenceResolver, JobReferenceSource } from "../../src/domain/jobReferenceResolver";
 import {
   createLeverJobSources,
@@ -45,16 +30,10 @@ import {
   parseLeverSites,
   createLiveCampaignInput,
 } from "../../src/domain/leverJobSource";
-import {
-  createRemotiveJobSource,
-  DEFAULT_REMOTIVE_API_BASE_URL,
-} from "../../src/domain/remotiveJobSource";
-import {
-  createHimalayasJobSource,
-  DEFAULT_HIMALAYAS_API_BASE_URL,
-} from "../../src/domain/himalayasJobSource";
+import { createRemotiveJobSource, DEFAULT_REMOTIVE_API_BASE_URL } from "../../src/domain/remotiveJobSource";
+import { createHimalayasJobSource, DEFAULT_HIMALAYAS_API_BASE_URL } from "../../src/domain/himalayasJobSource";
 import { JobScout, type JobSource } from "../../src/domain/scout";
-import type { CandidateProfile, ResumeFamilyId } from "../../src/domain/types";
+import type { CandidateProfile, JobIntakeInput, ResumeFamilyId } from "../../src/domain/types";
 import { parseCandidateProfile } from "../../src/domain/profile";
 import type { JobTracker } from "../../src/domain/tracker";
 import type { CareerRepository } from "../../src/persistence/careerRepository";
@@ -67,38 +46,17 @@ import {
   ExecutionHostResponseError,
   type ExecutionHostClientOptions,
 } from "../../src/service/executionHostClient";
-import {
-  createConfiguredGoogleSheetsJobTracker,
-  type GoogleSheetsEnvironment,
-} from "../googleSheetsJobTracker";
-import {
-  resolveExecutionHostConfig,
-  resolveResumePathsFromEnv,
-  type ExecutionHostEnvironment,
-} from "../executionHost/config";
-import {
-  SlackNotificationAdapter,
-} from "../slack/slackNotificationAdapter";
-import {
-  resolveSlackConfig,
-  type SlackEnvironment,
-} from "../slack/config";
+import { createConfiguredGoogleSheetsJobTracker, type GoogleSheetsEnvironment } from "../googleSheetsJobTracker";
+import { resolveExecutionHostConfig, resolveResumePathsFromEnv, type ExecutionHostEnvironment } from "../executionHost/config";
+import { SlackNotificationAdapter } from "../slack/slackNotificationAdapter";
+import { resolveSlackConfig, type SlackEnvironment } from "../slack/config";
 import { createPlaywrightLeverBrowserExecutor } from "../createLeverBrowserExecutor";
+import { OllamaApplicationAnswerDraftGenerator } from "../answerDraft/ollamaApplicationAnswerDraftGenerator";
 import { isUsableResumeArtifact } from "../resume/resumeArtifact";
-import {
-  normalizeJobSearchIntent,
-  type JobSearchIntent,
-} from "../../src/domain/searchIntent";
-import {
-  DEFAULT_CAREER_AGENT_STATE_FILE,
-  FileKeyValueStorage,
-} from "./fileKeyValueStorage";
-import type {
-  AttentionEvent,
-  AttentionResponse,
-  NotificationAdapter,
-  PersistedAttentionEvent,
-} from "../../src/domain/attention";
+import { normalizeJobSearchIntent, type JobSearchIntent } from "../../src/domain/searchIntent";
+import { DEFAULT_CAREER_AGENT_STATE_FILE, FileKeyValueStorage } from "./fileKeyValueStorage";
+import type { AttentionEvent, AttentionResponse, NotificationAdapter, PersistedAttentionEvent } from "../../src/domain/attention";
+import { DurableSubmissionAuthority } from "../executionHost/submissionAuthority";
 
 export interface BackgroundCareerAgentEnvironment extends ExecutionHostEnvironment, SlackEnvironment {
   VITE_REMOTIVE_API_BASE_URL?: string;
@@ -118,10 +76,19 @@ export interface BackgroundCareerAgentEnvironment extends ExecutionHostEnvironme
   ATELIER_CAREER_AGENT_DESTINATION_EVIDENCE_FILE?: string;
   ATELIER_CAREER_AGENT_BROWSER_ENABLED?: string;
   ATELIER_CAREER_AGENT_CAMPAIGN_ID?: string;
+  /** Optional one-shot server-local snapshot of the Daily job hunt report. */
+  ATELIER_CAREER_AGENT_DAILY_HUNT_FILE?: string;
+  /** Close the process after a one-shot Daily job hunt intake. */
+  ATELIER_CAREER_AGENT_EXIT_AFTER_DAILY_HUNT?: string;
   ATELIER_CAREER_AGENT_RUN_ON_START?: string;
   ATELIER_CAREER_AGENT_CREATE_CAMPAIGN?: string;
   ATELIER_CAREER_AGENT_HOST_POLL_INTERVAL_MS?: string;
   ATELIER_CAREER_AGENT_HOST_POLL_TIMEOUT_MS?: string;
+  /** Optional server-only local Ollama drafting for exact ATS free-text questions. */
+  ATELIER_CAREER_AGENT_ANSWER_DRAFT_MODE?: string;
+  ATELIER_CAREER_AGENT_OLLAMA_BASE_URL?: string;
+  ATELIER_CAREER_AGENT_OLLAMA_MODEL?: string;
+  ATELIER_CAREER_AGENT_OLLAMA_TIMEOUT_MS?: string;
 }
 
 export interface RuntimeNotificationTransport {
@@ -136,6 +103,7 @@ export interface CareerAgentExecutionHostPort {
   start(request: ExecutionHostRequest): Promise<ExecutionHostSnapshot>;
   get(executionId: string): Promise<ExecutionHostSnapshot>;
   resume(executionId: string, request?: ExecutionHostRequest): Promise<ExecutionHostSnapshot>;
+  submitManually?(executionId: string, target: { campaignId: string; careerJobId: string; applicationId: string }): Promise<ExecutionHostSnapshot>;
 }
 
 export interface BackgroundCareerAgentRuntimeOptions {
@@ -147,6 +115,7 @@ export interface BackgroundCareerAgentRuntimeOptions {
   applicationService?: ApplicationService;
   scout?: JobScout;
   destinationResolver?: ApplicationDestinationResolver;
+  officialDestinationCandidates?: readonly import("../../src/domain/applicationDestinationResolver").DestinationCandidate[];
   executor?: ApplicationExecutor;
   tracker?: JobTracker;
   notification?: RuntimeNotificationTransport;
@@ -156,9 +125,11 @@ export interface BackgroundCareerAgentRuntimeOptions {
   hostPollIntervalMs?: number;
   hostPollTimeoutMs?: number;
   resumeArtifactAvailable?: (familyId: ResumeFamilyId) => boolean;
+  applicationAnswerDraftGenerator?: import("../../src/domain/applicationAnswerDraft").ApplicationAnswerDraftGenerator;
   defaultCampaignInput?: CreateCampaignInput;
   now?: () => string;
   createId?: CareerAgentServiceOptions["createId"];
+  submissionAuthority?: DurableSubmissionAuthority;
 }
 
 export interface BackgroundCareerAgentRuntime {
@@ -172,20 +143,41 @@ export interface BackgroundCareerAgentRuntime {
   stop(): Promise<void>;
   createCampaign(input: CreateCampaignInput): Campaign;
   runCampaign(campaignId: string): Promise<CampaignRunResult>;
+  processDailyHuntMessage(campaignId: string, message: string): Promise<DailyHuntProcessingResult>;
   publishPendingAttentionEvents(campaignId?: string): Promise<number>;
-  repairLegacyAttentionEvents(campaignId?: string): Promise<LegacyAttentionRepairResult>;
+  reannounceAttentionEvent(campaignId: string, eventId: string): Promise<void>;
+  restartAttentionReview(campaignId: string, jobId: string): Promise<void>;
+  repairLegacyAttentionEvents(
+    campaignId?: string,
+    options?: LegacyAttentionRepairOptions,
+  ): Promise<LegacyAttentionRepairResult>;
   resolveDestinations(
     campaignId: string,
     jobIds?: readonly string[],
   ): Promise<import("../../src/domain/applicationDestinationResolver").DestinationResolutionRunResult>;
+  /** Process one curated posting and reconcile its dedicated browser host run. */
+  processCuratedJobThroughHost(campaignId: string, input: JobIntakeInput): Promise<import("../../src/domain/campaignTypes").CareerJob>;
+  processCuratedJob(campaignId: string, input: JobIntakeInput): Promise<import("../../src/domain/campaignTypes").CareerJob>;
+  /** Confirm an externally verified manual submission through this runtime's durable authority. */
+  confirmManualApplication(campaignId: string, jobId: string): Promise<import("../../src/domain/campaignTypes").CareerJob>;
+  /** Correct an explicitly identified false manual-submission confirmation. */
+  correctFalseManualSubmissionConfirmation(campaignId: string, jobId: string, reason?: string): import("../../src/domain/campaignTypes").CareerJob;
+  /** Recover one unknown CAPTCHA boundary only after an explicit no-submission assertion. */
+  recoverUnsubmittedHumanVerification(campaignId: string, jobId: string, applicationId: string, input: { confirmedNotSubmitted: true; reason: string }): Promise<import("../../src/domain/campaignTypes").CareerJob>;
+  /** Restart the same prepared packet through the local host, never allowing submission. */
+  restartExistingApplication(campaignId: string, jobId: string, applicationId: string): Promise<import("../../src/domain/campaignTypes").CareerJob>;
+  /** Reprepare a proof-free packet only after its exact aged host session is unavailable. */
+  recoverStalePreSubmitApplication(campaignId: string, jobId: string, applicationId: string, executionId: string, hostUnavailable: "not_found" | "closed"): Promise<import("../../src/domain/campaignTypes").CareerJob>;
+  /** Perform one explicit action-time submit on the retained prepared host and reconcile proof/tracker state. */
+  submitPreparedApplication(campaignId: string, jobId: string): Promise<import("../../src/domain/campaignTypes").CareerJob>;
+  /** Record one explicit duplicate-risk authorization for an unknown fence; never submits by itself. */
+  authorizeDuplicateRiskRetry(campaignId: string, jobId: string, input: { confirmedRisk: true; reason: string }): import("../executionHost/submissionAuthority").SubmissionFence;
+  getSubmissionFence(applicationId: string, jobId: string): import("../executionHost/submissionAuthority").SubmissionFence | undefined;
+  resumePreparationOnlyConfigurationBlocker(campaignId: string, jobId: string): import("../../src/domain/campaignTypes").CareerJob;
+  getApplication(applicationId: string): import("../../src/domain/types").Application;
 }
 
-const HOST_ACTIVE_STATUSES: ReadonlySet<ExecutionHostStatus> = new Set([
-  "starting",
-  "inspecting",
-  "executing",
-  "resuming",
-]);
+const HOST_ACTIVE_STATUSES: ReadonlySet<ExecutionHostStatus> = new Set(["starting", "inspecting", "executing", "resuming"]);
 
 const HOST_TERMINAL_STATUSES: ReadonlySet<ExecutionHostStatus> = new Set([
   "needs_input",
@@ -196,6 +188,12 @@ const HOST_TERMINAL_STATUSES: ReadonlySet<ExecutionHostStatus> = new Set([
   "cancelled",
   "closed",
 ]);
+
+function isCaptchaWaiting(snapshot: ExecutionHostSnapshot): boolean {
+  return snapshot.status === "waiting_for_human" &&
+    snapshot.result?.state === "requires_human" &&
+    snapshot.result.blocker.kind === "captcha";
+}
 
 function positiveInteger(value: number | undefined, fallback: number, label: string): number {
   if (value === undefined) return fallback;
@@ -221,7 +219,7 @@ function executionRequestFor(
   jobId: string,
 ): ExecutionHostRequest {
   const campaign = service.getCampaign(campaignId);
-  const careerJob = service.getJob(jobId);
+  const careerJob = service.prepareJobForHostExecution(campaignId, jobId);
   if (!careerJob.applicationId) throw new Error("This career job has no prepared application packet.");
   const application = service.getApplication(careerJob.applicationId);
   return {
@@ -247,7 +245,9 @@ function loadProfileFromFile(filePath: string): CandidateProfile {
   }
 }
 
-export function loadBackgroundCandidateProfile(env: Pick<BackgroundCareerAgentEnvironment, "ATELIER_CAREER_AGENT_PROFILE_FILE">): CandidateProfile {
+export function loadBackgroundCandidateProfile(
+  env: Pick<BackgroundCareerAgentEnvironment, "ATELIER_CAREER_AGENT_PROFILE_FILE">,
+): CandidateProfile {
   const path = env.ATELIER_CAREER_AGENT_PROFILE_FILE?.trim();
   if (!path) {
     throw new Error("ATELIER_CAREER_AGENT_PROFILE_FILE is required for the background Career Agent runtime.");
@@ -309,6 +309,7 @@ interface RuntimeSources {
   scout: JobScout;
   campaignInput: CreateCampaignInput;
   destinationResolver: BoundedApplicationDestinationResolver;
+  officialDestinationCandidates: ReturnType<typeof parseDestinationCandidates>;
 }
 
 function createRuntimeSources(env: BackgroundCareerAgentEnvironment): RuntimeSources {
@@ -357,6 +358,7 @@ function createRuntimeSources(env: BackgroundCareerAgentEnvironment): RuntimeSou
     destinationResolver: new BoundedApplicationDestinationResolver({
       lookup: new StaticDestinationEvidenceLookup(destinationCandidates),
     }),
+    officialDestinationCandidates: destinationCandidates,
   };
 }
 
@@ -375,6 +377,7 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
   private readonly autoStartHostExecutions: boolean;
   private readonly hostPollIntervalMs: number;
   private readonly hostPollTimeoutMs: number;
+  private readonly submissionAuthority?: DurableSubmissionAuthority;
   private started = false;
   private stopped = false;
 
@@ -394,39 +397,47 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
     this.autoStartHostExecutions = options.autoStartHostExecutions ?? false;
     this.hostPollIntervalMs = positiveInteger(options.hostPollIntervalMs, 500, "Career Agent host poll interval");
     this.hostPollTimeoutMs = positiveInteger(options.hostPollTimeoutMs, 30 * 60 * 1_000, "Career Agent host poll timeout");
+    this.submissionAuthority = options.submissionAuthority;
     this.defaultCampaignInput = options.defaultCampaignInput;
     const serviceOptions: CareerAgentServiceOptions = {
       ...(options.now ? { now: options.now } : {}),
       ...(options.createId ? { createId: options.createId } : {}),
     };
-    const applicationService = options.applicationService ?? new ApplicationService(
-      this.applicationRepository,
+    const applicationService =
+      options.applicationService ??
+      new ApplicationService(this.applicationRepository, options.profile, undefined, serviceOptions satisfies ApplicationServiceOptions);
+    this.service = new CareerAgentService(
       options.profile,
-      undefined,
-      serviceOptions satisfies ApplicationServiceOptions,
+      {
+        ...(applicationService ? { applicationService } : {}),
+        careerRepository: this.careerRepository,
+        ...(options.scout ? { scout: options.scout } : {}),
+        ...(options.destinationResolver ? { destinationResolver: options.destinationResolver } : {}),
+        ...(options.officialDestinationCandidates ? { officialDestinationCandidates: options.officialDestinationCandidates } : {}),
+        executor: this.executor,
+        ...(options.tracker ? { tracker: options.tracker } : {}),
+        notificationAdapter: this.notification.adapter,
+        ...(options.resumeArtifactAvailable ? { resumeArtifactAvailable: options.resumeArtifactAvailable } : {}),
+        ...(options.applicationAnswerDraftGenerator
+          ? {
+              applicationAnswerDraftGenerator: options.applicationAnswerDraftGenerator,
+            }
+          : {}),
+        ...(this.executionHost
+          ? {
+              resumeAttention: async (campaignId, jobId, options) => this.resumeHostExecution(campaignId, jobId, options),
+            }
+          : {}),
+      },
+      serviceOptions,
     );
-    this.service = new CareerAgentService(options.profile, {
-      ...(applicationService ? { applicationService } : {}),
-      careerRepository: this.careerRepository,
-      ...(options.scout ? { scout: options.scout } : {}),
-      ...(options.destinationResolver ? { destinationResolver: options.destinationResolver } : {}),
-      executor: this.executor,
-      ...(options.tracker ? { tracker: options.tracker } : {}),
-      notificationAdapter: this.notification.adapter,
-      ...(options.resumeArtifactAvailable ? { resumeArtifactAvailable: options.resumeArtifactAvailable } : {}),
-      ...(this.executionHost ? {
-        resumeAttention: async (campaignId, jobId) => this.resumeHostExecution(campaignId, jobId),
-      } : {}),
-    }, serviceOptions);
   }
 
   async start(): Promise<void> {
     if (this.stopped) throw new Error("The background Career Agent runtime is stopped.");
     if (this.started) return;
     try {
-      await this.notification?.hydrate?.(
-        this.careerRepository.listCampaigns().flatMap((campaign) => campaign.attentionEvents ?? []),
-      );
+      await this.notification?.hydrate?.(this.careerRepository.listCampaigns().flatMap((campaign) => campaign.attentionEvents ?? []));
       await this.notification?.start?.();
       await this.service.publishPendingAttentionEvents();
       this.started = true;
@@ -441,7 +452,14 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
     if (this.stopped) return;
     this.stopped = true;
     await this.notification?.stop?.();
-    const applicationIds = [...new Set(this.service.listJobs().map((job) => job.applicationId).filter((id): id is string => Boolean(id)))];
+    const applicationIds = [
+      ...new Set(
+        this.service
+          .listJobs()
+          .map((job) => job.applicationId)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    ];
     for (const applicationId of applicationIds) {
       try {
         await this.executor.close?.(applicationId);
@@ -465,35 +483,243 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
     return {
       ...result,
       snapshot,
-      attentionRequired: snapshot.counts.needsYou + (snapshot.campaign.attentionEvents ?? []).filter((event) =>
-        event.type === "configuration_required" && event.status === "open",
-      ).length,
+      attentionRequired:
+        snapshot.counts.needsYou +
+        (snapshot.campaign.attentionEvents ?? []).filter((event) => event.type === "configuration_required" && event.status === "open")
+          .length,
     };
+  }
+
+  async processDailyHuntMessage(campaignId: string, message: string): Promise<DailyHuntProcessingResult> {
+    if (this.stopped) throw new Error("The background Career Agent runtime is stopped.");
+    const result = await this.service.processDailyHuntMessage(campaignId, message);
+    if (this.autoStartHostExecutions && this.executionHost) {
+      await this.startPreparedHostExecutions(campaignId);
+    }
+    await this.service.publishPendingAttentionEvents(campaignId);
+    return result;
   }
 
   publishPendingAttentionEvents(campaignId?: string): Promise<number> {
     return this.service.publishPendingAttentionEvents(campaignId);
   }
 
-  repairLegacyAttentionEvents(campaignId?: string): Promise<LegacyAttentionRepairResult> {
-    return this.service.repairLegacyAttentionEvents(campaignId);
+  reannounceAttentionEvent(campaignId: string, eventId: string): Promise<void> {
+    return this.service.reannounceAttentionEvent(campaignId, eventId);
+  }
+
+  repairLegacyAttentionEvents(campaignId?: string, options?: LegacyAttentionRepairOptions): Promise<LegacyAttentionRepairResult> {
+    return this.service.repairLegacyAttentionEvents(campaignId, options);
+  }
+
+  restartAttentionReview(campaignId: string, jobId: string): Promise<void> {
+    return this.service.restartAttentionReview(campaignId, jobId);
   }
 
   resolveDestinations(campaignId: string, jobIds?: readonly string[]) {
     return this.service.resolveDestinations(campaignId, jobIds);
   }
 
+  confirmManualApplication(campaignId: string, jobId: string): Promise<CareerJob> {
+    return this.service.confirmManualApplication(campaignId, jobId, this.submissionAuthority);
+  }
+
+  correctFalseManualSubmissionConfirmation(campaignId: string, jobId: string, reason?: string): CareerJob {
+    return this.service.correctFalseManualSubmissionConfirmation(campaignId, jobId, reason);
+  }
+
+  recoverUnsubmittedHumanVerification(campaignId: string, jobId: string, applicationId: string, input: { confirmedNotSubmitted: true; reason: string }): Promise<CareerJob> {
+    if (!this.submissionAuthority) throw new Error("The durable submission authority is not configured.");
+    return this.service.recoverUnsubmittedHumanVerification(campaignId, jobId, applicationId, this.submissionAuthority, input);
+  }
+
+  async restartExistingApplication(campaignId: string, jobId: string, applicationId: string): Promise<CareerJob> {
+    if (!this.executionHost) throw new Error("The execution host is not configured for application restart.");
+    const campaign = this.service.getCampaign(campaignId);
+    const job = this.service.getJob(jobId);
+    if (job.campaignId !== campaignId || job.applicationId !== applicationId) {
+      throw new Error("The campaign, job, and application IDs do not match.");
+    }
+    const application = this.service.getApplication(applicationId);
+    const proofFree = !job.submissionProof && !job.manualSubmissionConfirmation &&
+      !application.submissionProof && !application.manualSubmissionConfirmation;
+    const executionEvidence = job.execution?.evidence ?? [];
+    const safeFailedPreSubmit = job.status === "failed" && application.status === "failed" && proofFree &&
+      executionEvidence.includes("submit:not-clicked") &&
+      !executionEvidence.some((evidence) => /submit:(?:clicked|unknown)/i.test(evidence));
+    const readyForReviewRestart = application.status === "ready_for_review" && job.status !== "applied" && proofFree;
+    if (!readyForReviewRestart && !safeFailedPreSubmit) {
+      throw new Error("Restart requires the exact existing proof-free ready-for-review packet; applied or proof-bearing packets are rejected.");
+    }
+    if (campaign.submissionPolicy.authority !== "never") {
+      throw new Error("Restart is fail-closed unless the persisted campaign submission authority is never.");
+    }
+    if (safeFailedPreSubmit) this.service.recoverFailedApplicationForExecution(campaignId, jobId);
+    const request = executionRequestFor(this.service, this.serviceProfile(), campaignId, jobId);
+    // Defense in depth: the persisted campaign is already required to be
+    // never-submit, and the host request is independently forced to that
+    // authority so configuration drift cannot authorize submission here.
+    request.campaign = {
+      ...request.campaign,
+      submissionPolicy: { authority: "never", requireExplicitApproval: false },
+    };
+    const snapshot = await this.executionHost.start(request);
+    await this.reconcileHostExecution(campaignId, jobId, snapshot);
+    return this.service.getJob(jobId);
+  }
+
+  recoverStalePreSubmitApplication(
+    campaignId: string,
+    jobId: string,
+    applicationId: string,
+    executionId: string,
+    hostUnavailable: "not_found" | "closed",
+  ): Promise<CareerJob> {
+    return this.service.recoverStalePreSubmitApplication(campaignId, jobId, applicationId, executionId, hostUnavailable);
+  }
+
+  async submitPreparedApplication(campaignId: string, jobId: string): Promise<CareerJob> {
+    if (!this.executionHost?.submitManually) throw new Error("The execution host does not expose the explicit manual-submit action.");
+    const campaign = this.service.getCampaign(campaignId);
+    const job = this.service.getJob(jobId);
+    if (job.campaignId !== campaignId || !job.applicationId) throw new Error("The campaign and job IDs do not identify an application packet.");
+    const executionId = job.execution?.mode === "real_local" ? job.execution.hostExecutionId : undefined;
+    if (!executionId) throw new Error("The application does not have a retained browser execution.");
+    const snapshot = await this.executionHost.submitManually(executionId, {
+      campaignId,
+      careerJobId: jobId,
+      applicationId: job.applicationId,
+    });
+    // The host may have claimed/updated the durable fence in its own process.
+    // Reload before persisting the host snapshot so this runtime cannot write
+    // a stale state map over that fence update.
+    (this.stateStorage as KeyValueStorage & { reload?: () => void }).reload?.();
+    await this.service.recordExecutionHostSnapshot(campaignId, jobId, snapshot);
+    return this.service.getJob(jobId);
+  }
+
+  authorizeDuplicateRiskRetry(campaignId: string, jobId: string, input: { confirmedRisk: true; reason: string }) {
+    if (!this.submissionAuthority) throw new Error("The durable submission authority is not configured.");
+    const job = this.service.getJob(jobId);
+    if (job.campaignId !== campaignId || !job.applicationId) throw new Error("The campaign and job IDs do not identify an application packet.");
+    return this.submissionAuthority.authorizeDuplicateRiskRetry(job.applicationId, jobId, input, new Date().toISOString());
+  }
+
+  getSubmissionFence(applicationId: string, jobId: string) {
+    return this.submissionAuthority?.get(applicationId, jobId);
+  }
+
+  resumePreparationOnlyConfigurationBlocker(campaignId: string, jobId: string): CareerJob {
+    return this.service.resumePreparationOnlyConfigurationBlocker(campaignId, jobId, this.submissionAuthority);
+  }
+
+  async processCuratedJobThroughHost(campaignId: string, input: JobIntakeInput): Promise<CareerJob> {
+    if (!this.executionHost) throw new Error("The execution host is not configured for standalone queue processing.");
+    const created = await this.service.processCuratedJob(campaignId, input);
+    let current = this.service.getJob(created.id);
+    if (input.queueSelected && current.applicationId) {
+      const application = this.service.getApplication(current.applicationId);
+      if (application.status === "needs_input" || current.blockers.some((blocker) => ["salary_expectations", "relocation", "travel", "demographic_disclosure", "legal_attestations"].includes(blocker.field ?? ""))) {
+        this.service.deferGenericPreparationBlockersForQueueInspection(campaignId, current.id);
+        current = this.service.getJob(created.id);
+      }
+    }
+    if (!current.applicationId) return current;
+    const reconciledFence = this.submissionAuthority?.reconcile(current.applicationId, current.id);
+    if (reconciledFence?.state === "submitted") {
+      const recovered: ExecutionHostSnapshot = {
+        id: `reconciled-${current.id}`,
+        mode: "real_local",
+        applicationId: current.applicationId,
+        jobId: current.id,
+        campaignId,
+        status: "submitted",
+        startedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        result: {
+          state: "submitted",
+          proof: {
+            mode: "external",
+            provider: current.destinationResolution?.ats ?? "verified-ats",
+            externalApplicationId: reconciledFence.externalApplicationId,
+            submittedAt: current.updatedAt,
+            evidence: "durable-fence:reconciled; browser:not-reopened",
+          },
+        },
+      };
+      await this.reconcileHostExecution(campaignId, current.id, recovered);
+      return this.service.getJob(current.id);
+    }
+    if (reconciledFence?.state === "needs_input") {
+      const recovered: ExecutionHostSnapshot = {
+        id: `reconciled-${current.id}`,
+        mode: "real_local",
+        applicationId: current.applicationId,
+        jobId: current.id,
+        campaignId,
+        status: "needs_input",
+        startedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        result: {
+          state: "requires_human",
+          blocker: {
+            kind: "external_verification",
+            unit: "submission",
+            questionProvenance: "POLICY",
+            field: "submission-confirmation",
+            question: "Verify whether the application was submitted",
+            reason: reconciledFence.reason,
+            evidence: ["durable-fence:reconciled", "submit:unknown", "submit:not-retried"],
+            resumeAfterHuman: false,
+          },
+        },
+      };
+      await this.reconcileHostExecution(campaignId, current.id, recovered);
+      return this.service.getJob(current.id);
+    }
+    if (this.service.getApplication(current.applicationId).status !== "ready_for_review") return current;
+    // A Slack answer can resume the retained host asynchronously. The queue
+    // may poll the same row while that resume is in flight; do not start a
+    // second browser session for the same application.
+    if (current.execution?.mode === "real_local" && current.execution.hostExecutionId &&
+      ["starting", "inspecting", "executing", "resuming", "needs_input", "waiting_for_human"].includes(current.execution.status)) {
+      return current;
+    }
+    const snapshot = await this.executionHost.start(executionRequestFor(this.service, this.serviceProfile(), campaignId, current.id));
+    await this.reconcileHostExecution(campaignId, current.id, snapshot);
+    return this.service.getJob(current.id);
+  }
+
+  processCuratedJob(campaignId: string, input: JobIntakeInput): Promise<CareerJob> {
+    return this.service.processCuratedJob(campaignId, input);
+  }
+
+  getApplication(applicationId: string) {
+    return this.service.getApplication(applicationId);
+  }
+
   private async startPreparedHostExecutions(campaignId: string): Promise<void> {
     if (!this.executionHost) return;
-    const candidates = this.service.listJobs(campaignId).filter((job) =>
-      job.sourceMode === "live" &&
-      job.actionability === "actionable" &&
-      (job.sourceId.startsWith("lever:") || job.sourceId.startsWith("greenhouse:") ||
-        job.destinationResolution?.ats === "Greenhouse" || job.destinationResolution?.ats === "Rippling") &&
-      (job.status === "needs_input" || job.status === "preparing" || job.status === "ready_to_submit") &&
-      !(job.execution?.mode === "real_local" && job.execution.hostExecutionId) &&
-      Boolean(job.applicationId),
-    );
+    const candidates = this.service
+      .listJobs(campaignId)
+      .filter(
+        (job) =>
+          job.sourceMode === "live" &&
+          job.actionability === "actionable" &&
+          (this.executor.supports?.(job) === true ||
+            job.sourceId.startsWith("lever:") ||
+            job.sourceId.startsWith("greenhouse:") ||
+            job.destinationResolution?.ats === "Lever" ||
+            job.destinationResolution?.ats === "Greenhouse" ||
+            job.destinationResolution?.ats === "Rippling" ||
+            job.destinationResolution?.ats === "Ashby" ||
+            job.destinationResolution?.ats === "Workday" ||
+            (job.sourceId === "curated-live" &&
+              (job.sourceRecordId?.startsWith("protagona:") || job.sourceRecordId?.startsWith("gusto:")))) &&
+          (job.status === "needs_input" || job.status === "preparing" || job.status === "ready_to_submit") &&
+          !(job.execution?.mode === "real_local" && job.execution.hostExecutionId) &&
+          Boolean(job.applicationId),
+      );
     for (const job of candidates) {
       const application = job.applicationId ? this.service.getApplication(job.applicationId) : undefined;
       if (!application || application.status !== "ready_for_review") continue;
@@ -513,11 +739,15 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
    */
   private async resumePendingAttentionContinuations(): Promise<void> {
     if (!this.executionHost) return;
-    const pending = this.service.listCampaigns().flatMap((campaign) =>
-      (campaign.attentionEvents ?? [])
-        .filter((event) => event.status === "resolved" && event.type === "needs_input" && Boolean(event.jobId) && Boolean(event.resolvedAt))
-        .map((event) => ({ campaignId: campaign.id, event })),
-    );
+    const pending = this.service
+      .listCampaigns()
+      .flatMap((campaign) =>
+        (campaign.attentionEvents ?? [])
+          .filter(
+            (event) => event.status === "resolved" && event.type === "needs_input" && Boolean(event.jobId) && Boolean(event.resolvedAt),
+          )
+          .map((event) => ({ campaignId: campaign.id, event })),
+      );
     const resumedJobs = new Set<string>();
     for (const { campaignId, event } of pending) {
       if (!event.jobId || resumedJobs.has(event.jobId)) continue;
@@ -530,7 +760,8 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
       const execution = job.execution;
       const executionUpdatedAt = execution?.updatedAt ? Date.parse(execution.updatedAt) : Number.NaN;
       const responseAt = event.resolvedAt ? Date.parse(event.resolvedAt) : Number.NaN;
-      const awaitingContinuation = job.status === "needs_input" &&
+      const awaitingContinuation =
+        job.status === "needs_input" &&
         execution?.mode === "real_local" &&
         Boolean(execution.hostExecutionId) &&
         (execution.status === "needs_input" || execution.status === "waiting_for_human") &&
@@ -553,7 +784,7 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
     return this.profile;
   }
 
-  private async resumeHostExecution(campaignId: string, jobId: string): Promise<void> {
+  private async resumeHostExecution(campaignId: string, jobId: string, options: { verificationHandoff?: boolean } = {}): Promise<void> {
     if (!this.executionHost) return;
     const job = this.service.getJob(jobId);
     const executionId = job.execution?.mode === "real_local" ? job.execution.hostExecutionId : undefined;
@@ -566,90 +797,117 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
       // A host restart loses only the browser handle. Reopening the same
       // validated packet is the existing safe restart path; the executor will
       // inspect the current page before applying the one-time answer.
-      const restartable = error instanceof ExecutionHostResponseError &&
-        (error.statusCode === 404 ||
-          (error.statusCode === 409 && /closed|cannot be resumed|not found/i.test(error.message)));
+      const restartable =
+        error instanceof ExecutionHostResponseError &&
+        (error.statusCode === 404 || (error.statusCode === 409 && /closed|cannot be resumed|not found/i.test(error.message)));
       if (!restartable) throw error;
+      if (options.verificationHandoff) {
+        throw new Error("The browser verification session expired or closed; manual external verification is required and submission will not be retried.");
+      }
       snapshot = await this.executionHost.start(request);
     }
     await this.reconcileHostExecution(campaignId, jobId, snapshot);
   }
 
-  private async reconcileHostExecution(
-    campaignId: string,
-    jobId: string,
-    initial: ExecutionHostSnapshot,
-  ): Promise<ExecutionHostSnapshot> {
+  private async reconcileHostExecution(campaignId: string, jobId: string, initial: ExecutionHostSnapshot): Promise<ExecutionHostSnapshot> {
     if (!this.executionHost) return initial;
     let snapshot = initial;
     await this.service.recordExecutionHostSnapshot(campaignId, jobId, snapshot);
     const deadline = Date.now() + this.hostPollTimeoutMs;
-    while (HOST_ACTIVE_STATUSES.has(snapshot.status)) {
+    while (HOST_ACTIVE_STATUSES.has(snapshot.status) || isCaptchaWaiting(snapshot)) {
       if (Date.now() >= deadline) return snapshot;
       await new Promise((resolvePromise) => setTimeout(resolvePromise, this.hostPollIntervalMs));
       snapshot = await this.executionHost.get(snapshot.id);
       await this.service.recordExecutionHostSnapshot(campaignId, jobId, snapshot);
-      if (HOST_TERMINAL_STATUSES.has(snapshot.status)) return snapshot;
+      if (HOST_TERMINAL_STATUSES.has(snapshot.status) && !isCaptchaWaiting(snapshot)) return snapshot;
     }
     return snapshot;
   }
 }
 
-export function createBackgroundCareerAgentRuntime(
-  options: BackgroundCareerAgentRuntimeOptions,
-): BackgroundCareerAgentRuntime {
+export function createBackgroundCareerAgentRuntime(options: BackgroundCareerAgentRuntimeOptions): BackgroundCareerAgentRuntime {
   return new BackgroundCareerAgentRuntimeImpl(options);
 }
 
-export function createConfiguredBackgroundCareerAgentRuntime(
-  env: BackgroundCareerAgentEnvironment,
-): BackgroundCareerAgentRuntime {
+export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCareerAgentEnvironment): BackgroundCareerAgentRuntime {
   const slackConfig = resolveSlackConfig(env);
   const profile = loadBackgroundCandidateProfile(env);
   const sources = createRuntimeSources(env);
   const resumePaths = resolveResumePathsFromEnv(env);
-  const browserEnabled = booleanValue(
-    env.ATELIER_CAREER_AGENT_BROWSER_ENABLED,
-    false,
-    "ATELIER_CAREER_AGENT_BROWSER_ENABLED",
-  );
+  const browserEnabled = booleanValue(env.ATELIER_CAREER_AGENT_BROWSER_ENABLED, false, "ATELIER_CAREER_AGENT_BROWSER_ENABLED");
+  const handoffViewerEnabled = booleanValue(env.ATELIER_HANDOFF_VIEWER_ENABLED, false, "ATELIER_HANDOFF_VIEWER_ENABLED");
   let executionConfig: ReturnType<typeof resolveExecutionHostConfig> | undefined;
   if (browserEnabled) {
     if (profile.profileKind !== "private") {
       throw new Error("A private candidate profile is required when background browser execution is enabled.");
     }
+  }
+  // The long-lived Slack listener can be a separate process from the browser
+  // executor. It still needs the execution-host configuration to issue a
+  // protected handoff URL when the viewer is enabled, even when this process
+  // deliberately does not own browser automation.
+  if (shouldConfigureExecutionHost(browserEnabled, handoffViewerEnabled)) {
     executionConfig = resolveExecutionHostConfig(env);
   }
-  const configuredExecutor = browserEnabled
-    ? createConfiguredBrowserExecutor(executionConfig!)
-    : new UnavailableApplicationExecutor();
+  const configuredExecutor = browserEnabled ? createConfiguredBrowserExecutor(executionConfig!) : new UnavailableApplicationExecutor();
+  const applicationAnswerDraftGenerator = createConfiguredApplicationAnswerDraftGenerator(env);
   const stateFilePath = resolve(valueOrDefault(env.ATELIER_CAREER_AGENT_STATE_FILE, DEFAULT_CAREER_AGENT_STATE_FILE));
   const sharedStorage = new FileKeyValueStorage(stateFilePath);
   const sharedCareerRepository = new LocalStorageCareerRepository(sharedStorage);
   const sharedApplicationRepository = new LocalStorageApplicationRepository(sharedStorage);
+  // The long-lived Slack listener and the browser execution host may be
+  // separate processes.  Re-read the atomic state file before every lookup
+  // that crosses that boundary; otherwise repository instances retain the
+  // snapshot they loaded at process start and can reject a freshly published
+  // attention event or answer it against stale job state.
+  const reloadSharedState = (): void => sharedStorage.reload();
+  const submissionAuthority = new DurableSubmissionAuthority(
+    executionConfig?.submissionWorkerId ?? env.ATELIER_EXECUTION_WORKER_ID?.trim() ?? "local-execution-host",
+    (() => {
+      const submissionStateFile = executionConfig?.submissionStateFile ?? env.ATELIER_EXECUTION_SUBMISSION_STATE_FILE ?? stateFilePath;
+      return resolve(submissionStateFile) === resolve(stateFilePath)
+        ? { storage: sharedStorage }
+        : { stateFile: submissionStateFile };
+    })(),
+  );
   const tracker = createConfiguredGoogleSheetsJobTracker(env as GoogleSheetsEnvironment);
   const executionHost = new HttpExecutionHostClient({
-    baseUrl: valueOrDefault(
-      env.ATELIER_EXECUTION_HOST_BASE_URL ?? env.VITE_EXECUTION_HOST_BASE_URL,
-      "http://127.0.0.1:8787",
-    ),
+    baseUrl: valueOrDefault(env.ATELIER_EXECUTION_HOST_BASE_URL ?? env.VITE_EXECUTION_HOST_BASE_URL, "http://127.0.0.1:8787"),
   } satisfies ExecutionHostClientOptions);
   let runtime: BackgroundCareerAgentRuntime | undefined;
   const slack = new SlackNotificationAdapter({
     config: slackConfig,
-    eventLookup: (eventId: string): AttentionEvent | undefined => runtime?.service.listAttentionEvents().find((event) => event.id === eventId),
-    persistedAttentionEventsLookup: () => sharedCareerRepository.listCampaigns().flatMap((campaign) => campaign.attentionEvents ?? []),
+    eventLookup: (eventId: string): AttentionEvent | undefined => {
+      reloadSharedState();
+      return runtime?.service.listAttentionEvents().find((event) => event.id === eventId);
+    },
+    persistedAttentionEventsLookup: () => {
+      reloadSharedState();
+      return sharedCareerRepository.listCampaigns().flatMap((campaign) => campaign.attentionEvents ?? []);
+    },
     responseHandler: async (response: AttentionResponse) => {
       if (!runtime) throw new Error("The Career Agent runtime is not ready.");
       try {
+        reloadSharedState();
         const result = await runtime.service.resolveAttentionResponse(response);
-        console.info(`[career-agent-slack] ${result.status === "resolved" ? "CareerAgentService resume completed" : "attention event already resolved; no resume needed"}`);
+        console.info(
+          `[career-agent-slack] ${result.status === "resolved" ? "CareerAgentService resume completed" : "attention event already resolved; no resume needed"}`,
+        );
         return { status: result.status };
       } catch (error) {
         console.warn("[career-agent-slack] CareerAgentService resume failed");
         throw error;
       }
     },
+    handoffUrlForApplication: executionConfig?.handoffViewer?.enabled
+      ? async (applicationId) => {
+          try {
+            return (await executionHost.issueHandoffForApplication(applicationId)).url;
+          } catch {
+            return undefined;
+          }
+        }
+      : undefined,
   });
   const created = createBackgroundCareerAgentRuntime({
     profile,
@@ -658,26 +916,51 @@ export function createConfiguredBackgroundCareerAgentRuntime(
     applicationRepository: sharedApplicationRepository,
     scout: sources.scout,
     destinationResolver: sources.destinationResolver,
+    officialDestinationCandidates: sources.officialDestinationCandidates,
     executor: configuredExecutor,
     tracker,
     resumeArtifactAvailable: (familyId) => {
       const path = resumePaths[familyId];
       return Boolean(path && isUsableResumeArtifact(path));
     },
+    ...(applicationAnswerDraftGenerator
+      ? {
+          applicationAnswerDraftGenerator: applicationAnswerDraftGenerator.generate.bind(applicationAnswerDraftGenerator),
+        }
+      : {}),
     notification: {
       adapter: slack,
-      hydrate: (events) => { slack.hydratePublishedAttentionEvents(events); },
+      hydrate: (events) => {
+        slack.hydratePublishedAttentionEvents(events);
+      },
       start: () => slack.start(),
       stop: () => slack.stop(),
     },
     executionHost,
     autoStartHostExecutions: !browserEnabled,
-    hostPollIntervalMs: parsePositiveInteger(env.ATELIER_CAREER_AGENT_HOST_POLL_INTERVAL_MS, 500, "ATELIER_CAREER_AGENT_HOST_POLL_INTERVAL_MS"),
-    hostPollTimeoutMs: parsePositiveInteger(env.ATELIER_CAREER_AGENT_HOST_POLL_TIMEOUT_MS, 30 * 60 * 1_000, "ATELIER_CAREER_AGENT_HOST_POLL_TIMEOUT_MS"),
+    hostPollIntervalMs: parsePositiveInteger(
+      env.ATELIER_CAREER_AGENT_HOST_POLL_INTERVAL_MS,
+      500,
+      "ATELIER_CAREER_AGENT_HOST_POLL_INTERVAL_MS",
+    ),
+    hostPollTimeoutMs: parsePositiveInteger(
+      env.ATELIER_CAREER_AGENT_HOST_POLL_TIMEOUT_MS,
+      30 * 60 * 1_000,
+      "ATELIER_CAREER_AGENT_HOST_POLL_TIMEOUT_MS",
+    ),
     defaultCampaignInput: sources.campaignInput,
+    submissionAuthority,
   });
   runtime = created;
   return created;
+}
+
+/**
+ * The Slack listener may not own browser automation, but it must still be
+ * able to issue protected handoff links through the execution host.
+ */
+export function shouldConfigureExecutionHost(browserEnabled: boolean, handoffViewerEnabled: boolean): boolean {
+  return browserEnabled || handoffViewerEnabled;
 }
 
 function parsePositiveInteger(value: string | undefined, fallback: number, label: string): number {
@@ -687,12 +970,38 @@ function parsePositiveInteger(value: string | undefined, fallback: number, label
   return parsed;
 }
 
+function createConfiguredApplicationAnswerDraftGenerator(
+  env: Pick<
+    BackgroundCareerAgentEnvironment,
+    | "ATELIER_CAREER_AGENT_ANSWER_DRAFT_MODE"
+    | "ATELIER_CAREER_AGENT_OLLAMA_BASE_URL"
+    | "ATELIER_CAREER_AGENT_OLLAMA_MODEL"
+    | "ATELIER_CAREER_AGENT_OLLAMA_TIMEOUT_MS"
+  >,
+): OllamaApplicationAnswerDraftGenerator | undefined {
+  const mode =
+    env.ATELIER_CAREER_AGENT_ANSWER_DRAFT_MODE?.trim() || (env.ATELIER_CAREER_AGENT_OLLAMA_MODEL?.trim() ? "ollama" : "disabled");
+  if (mode === "disabled") return undefined;
+  if (mode !== "ollama") throw new Error("ATELIER_CAREER_AGENT_ANSWER_DRAFT_MODE must be disabled or ollama.");
+  const model = env.ATELIER_CAREER_AGENT_OLLAMA_MODEL?.trim();
+  if (!model) throw new Error("ATELIER_CAREER_AGENT_OLLAMA_MODEL is required when answer-draft mode is ollama.");
+  return new OllamaApplicationAnswerDraftGenerator({
+    model,
+    ...(env.ATELIER_CAREER_AGENT_OLLAMA_BASE_URL?.trim() ? { baseUrl: env.ATELIER_CAREER_AGENT_OLLAMA_BASE_URL.trim() } : {}),
+    ...(env.ATELIER_CAREER_AGENT_OLLAMA_TIMEOUT_MS?.trim()
+      ? {
+          timeoutMs: parsePositiveInteger(env.ATELIER_CAREER_AGENT_OLLAMA_TIMEOUT_MS, 20_000, "ATELIER_CAREER_AGENT_OLLAMA_TIMEOUT_MS"),
+        }
+      : {}),
+  });
+}
+
 function createConfiguredBrowserExecutor(config: ReturnType<typeof resolveExecutionHostConfig>): ApplicationExecutor {
   return createPlaywrightLeverBrowserExecutor({
     provider: "auto",
     headless: config.headless,
     timeoutMs: config.browserTimeoutMs,
     ...(Object.keys(config.resumePaths).length > 0 ? { resumePaths: config.resumePaths } : {}),
-    allowAutomaticSubmission: config.submissionAuthority === "automatic",
+    allowAutomaticSubmission: config.submissionAuthority === "automatic" && !config.preparationOnly,
   });
 }

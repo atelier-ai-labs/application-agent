@@ -25,6 +25,9 @@ export const DEFAULT_ANSWER_POLICIES: Readonly<Record<string, AnswerPolicy>> = {
   legal_attestations: "never_auto",
 };
 
+/** Marks a deterministic placeholder that must not be submitted as an ATS free-text answer. */
+export const DETERMINISTIC_DRAFT_PROVENANCE = "draft:deterministic-template";
+
 export interface AnswerDraftContext {
   field: string;
   question: string;
@@ -62,6 +65,9 @@ function profileValue(profile: CandidateProfile, field: string): string | undefi
         : undefined;
     case "verified_skills":
       return profile.skills.length > 0 ? profile.skills.join(", ") : undefined;
+    case "sponsorship":
+      if (profile.workAuthorization.sponsorshipRequired === null) return undefined;
+      return profile.workAuthorization.sponsorshipRequired ? "Yes" : "No";
     default:
       return undefined;
   }
@@ -134,6 +140,7 @@ export function buildDraftAnswer(context: AnswerDraftContext): ApplicationAnswer
     `job.title:${job.title}`,
     "job.requiredSkills",
     `fit.resume-family:${fit.recommendedResumeFamily}`,
+    DETERMINISTIC_DRAFT_PROVENANCE,
   ];
 
   if (field === "why_company") {
@@ -192,7 +199,13 @@ export async function prepareApplicationAnswers(
     if (policy === "auto") {
       const value = profileValue(profile, field) ?? approved;
       answers.push(
-        resolvedOrMissingAnswer(field, question, policy, value, [`profile:${field}`]),
+        resolvedOrMissingAnswer(
+          field,
+          question,
+          policy,
+          value,
+          [field === "sponsorship" ? "profile:workAuthorization.sponsorshipRequired" : `profile:${field}`],
+        ),
       );
       continue;
     }

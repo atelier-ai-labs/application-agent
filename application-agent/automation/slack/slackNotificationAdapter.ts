@@ -38,7 +38,11 @@ export interface SlackNotificationAdapterOptions {
   fetcher?: Fetcher;
   webSocketFactory?: SlackWebSocketFactory;
   socketOpenTimeoutMs?: number;
+  /** Delay before reconnecting a Socket Mode connection after Slack closes it. */
+  socketReconnectDelayMs?: number;
   diagnosticLogger?: SlackDiagnosticLogger;
+  /** Resolves a one-time viewer URL for an active CAPTCHA execution. */
+  handoffUrlForApplication?: (applicationId: string) => string | Promise<string | undefined> | undefined;
 }
 
 export interface SlackDiagnosticLogger {
@@ -73,9 +77,11 @@ function markdownText(value: string, maximum = 240): string {
 }
 
 function defaultWebSocketFactory(url: string): SlackWebSocket {
-  const constructor = (globalThis as unknown as {
-    WebSocket?: new (target: string) => SlackWebSocket;
-  }).WebSocket;
+  const constructor = (
+    globalThis as unknown as {
+      WebSocket?: new (target: string) => SlackWebSocket;
+    }
+  ).WebSocket;
   if (!constructor) throw new Error("The Node runtime does not provide WebSocket support for Slack Socket Mode.");
   return new constructor(url);
 }
@@ -86,7 +92,10 @@ function responseData(value: unknown): string {
   return "";
 }
 
-function eventMessage(event: AttentionEvent, renderOptions: { threadReply?: boolean } = {}): {
+function eventMessage(
+  event: AttentionEvent,
+  renderOptions: { threadReply?: boolean; handoffUrl?: string } = {},
+): {
   text: string;
   blocks: readonly Record<string, unknown>[];
 } {
@@ -112,70 +121,105 @@ function eventMessage(event: AttentionEvent, renderOptions: { threadReply?: bool
     };
   }
   if (!event.question) throw new Error("An interactive attention event requires a question.");
+  const humanVerificationHandoff = event.submissionAlreadyClicked === true || event.blockerType === "captcha" ||
+    (event.blockerType === "external_verification" && /verify whether the application was submitted/i.test(event.question.prompt));
+  if (humanVerificationHandoff) {
+    const postSubmit = event.submissionAlreadyClicked === true || event.blockerType === "external_verification";
+    const handoffText = postSubmit
+      ? "The application Submit action has already crossed the submission boundary, but the employer's confirmation could not be verified automatically. Do not click Submit again."
+      : "The open browser needs a human verification step before the application can continue.";
+    const instruction = postSubmit
+      ? renderOptions.handoffUrl
+        ? "Do not click Submit again. Use the protected browser handoff below to verify the employer result, then reply with what you observed."
+        : "Do not click Submit again. Verify the employer result through the available handoff, then reply with what you observed. No interactive browser link is provided by this notifier."
+      : renderOptions.handoffUrl
+        ? "Use the protected browser handoff below to complete the verification, then reply DONE in this thread."
+        : "Complete the verification in the open local browser, then reply DONE in this thread. If the browser session has closed, reply DONE and I will report that the session expired without retrying submission.";
+    const link = renderOptions.handoffUrl ? `\n\nOpen the protected browser handoff: ${markdownText(renderOptions.handoffUrl, 500)}` : "";
+    const text = `${markdownText(event.title, 160)}\n${markdownText(event.context.company, 160)} — ${markdownText(event.context.role, 200)}\n\n${handoffText}\n\n${instruction}${link}`;
+    return {
+      text,
+      blocks: [
+        { type: "header", text: { type: "plain_text", text: safeText(event.title, 150) } },
+        { type: "section", text: { type: "mrkdwn", text: `${handoffText}\n\n${instruction}${link}` } },
+      ],
+    };
+  }
   const section = event.context.section ? `\n\n*${markdownText(event.context.section, 160)}*` : "";
-  const fieldLabel = event.question.fieldLabel
-    ? `Field label: ${markdownText(event.question.fieldLabel, 160)}`
-    : "";
-  const requiredness = event.question.required === true
-    ? "Required field."
-    : event.question.required === false
-      ? "Optional field."
-      : "";
-  const uncertainty = event.descriptor?.confidence === "uncertain"
-    ? "\n\n_The question context may be uncertain; review it before answering._"
-    : "";
+  const requiredness = event.question.required === true ? "Required field." : event.question.required === false ? "Optional field." : "";
+  const uncertainty =
+    event.descriptor?.confidence === "uncertain" ? "\n\n_The question context may be uncertain; review it before answering._" : "";
   const question = `${markdownText(event.question.prompt, 240)}${uncertainty}`;
-  const postedCompensation = event.blockerType === "salary"
-    ? formatPostedCompensation(event.context.postingCompensation)
-    : undefined;
-  const salaryContext = event.blockerType === "salary"
-    ? postedCompensation
-      ? `The job posting lists compensation of ${postedCompensation}.`
-      : "No compensation range was found in the job posting."
+  const postedCompensation = event.blockerType === "salary" ? formatPostedCompensation(event.context.postingCompensation) : undefined;
+  const salaryContext =
+    event.blockerType === "salary"
+      ? postedCompensation
+        ? `The job posting lists compensation of ${postedCompensation}.`
+        : "No compensation range was found in the job posting."
+      : "";
+  const answerOptions =
+    event.question.kind === "single_choice" && event.question.options.length > 0
+      ? `Options: ${event.question.options.map((option) => markdownText(option.label, 64)).join(" / ")}`
+      : "";
+  const draftReview = event.draft
+    ? [
+        "Suggested answer generated locally for your review (not submitted):",
+        `> ${markdownText(event.draft.answer, 512)}`,
+        event.draft.evidence.length > 0 ? `Grounded in: ${event.draft.evidence.map((item) => markdownText(item, 120)).join("; ")}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n")
     : "";
-  const answerOptions = event.question.kind === "single_choice" && event.question.options.length > 0
-    ? `Options: ${event.question.options.map((option) => markdownText(option.label, 64)).join(" / ")}`
-    : "";
-  const questionFraming = event.questionProvenance === "ATS_FORM"
-    ? "Application question:"
-    : event.questionProvenance === "APPLICATION_PREPARATION"
-      ? "Career Agent needs this candidate fact before application execution:"
-      : event.questionProvenance === "POLICY"
-        ? "Career Agent needs your review before continuing:"
-        : "Career Agent needs clarification before continuing:";
+  const questionFraming =
+    event.questionProvenance === "ATS_FORM"
+      ? "Application question:"
+      : event.questionProvenance === "APPLICATION_PREPARATION"
+        ? "Career Agent needs this candidate fact before application execution:"
+        : event.questionProvenance === "POLICY"
+          ? "Career Agent needs your review before continuing:"
+          : "Career Agent needs clarification before continuing:";
   const questionDetails = [
-    event.questionProvenance === "ATS_FORM" ? fieldLabel : "",
     event.questionProvenance === "ATS_FORM" ? requiredness : "",
     salaryContext,
     `${questionFraming}\n\"${question}\"`,
     answerOptions,
+    draftReview,
     event.blockerType === "salary" ? "What should I enter?" : "",
-  ].filter(Boolean).join("\n\n");
-  const replyInstruction = event.question.kind === "free_text"
-    ? "\n\nReply in this Slack thread with one grounded answer."
-    : "";
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  const replyInstruction = event.draft
+    ? "\n\nReply APPROVE to use this draft, or reply with your edited answer. The draft is never used without your explicit approval."
+    : event.question.kind === "free_text"
+      ? "\n\nReply in this Slack thread with one grounded answer."
+      : "";
   const threadReply = renderOptions.threadReply === true;
   const text = threadReply
     ? `${questionDetails}${replyInstruction}`
     : `${markdownText(event.title, 160)}\n${markdownText(event.context.company, 160)} — ${markdownText(event.context.role, 200)}${section}\n\n${questionDetails}${replyInstruction}`;
   const blocks: Record<string, unknown>[] = threadReply
-    ? [{
-      type: "section",
-      text: { type: "mrkdwn", text: `${questionDetails}${replyInstruction}` },
-    }]
-    : [
-      {
-        type: "header",
-        text: { type: "plain_text", text: safeText(event.title, 150) },
-      },
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `*${markdownText(event.context.company, 160)}* — ${markdownText(event.context.role, 200)}${section}\n\n${questionDetails}${replyInstruction}`,
+    ? [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `${questionDetails}${replyInstruction}`,
+          },
         },
-      },
-    ];
+      ]
+    : [
+        {
+          type: "header",
+          text: { type: "plain_text", text: safeText(event.title, 150) },
+        },
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `*${markdownText(event.context.company, 160)}* — ${markdownText(event.context.role, 200)}${section}\n\n${questionDetails}${replyInstruction}`,
+          },
+        },
+      ];
   if (event.question.kind === "single_choice" && event.question.options.length > 0) {
     blocks.push({
       type: "actions",
@@ -199,9 +243,52 @@ function responsePayload(value: unknown): Record<string, unknown> | undefined {
 }
 
 function stringValue(value: unknown, maximum: number): string | undefined {
-  return typeof value === "string" && value.trim().length > 0 && value.length <= maximum
-    ? value.trim()
-    : undefined;
+  return typeof value === "string" && value.trim().length > 0 && value.length <= maximum ? value.trim() : undefined;
+}
+
+const RICH_TEXT_CONTAINER_TYPES = new Set([
+  "rich_text",
+  "rich_text_section",
+  "rich_text_list",
+  "rich_text_quote",
+  "rich_text_preformatted",
+]);
+
+/**
+ * Slack may omit message.text for user-authored replies and put the visible
+ * answer in a rich_text block instead. Only traverse known rich-text
+ * containers and text elements; arbitrary block/action metadata is never
+ * considered answer content.
+ */
+function richTextMessageValue(message: Record<string, unknown>, maximum: number): string | undefined {
+  const blocks = message.blocks;
+  if (!Array.isArray(blocks)) return undefined;
+  const parts: string[] = [];
+
+  const collect = (value: unknown): void => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    const node = value as Record<string, unknown>;
+    const type = typeof node.type === "string" ? node.type : undefined;
+    if (type === "text") {
+      if (typeof node.text === "string" && node.text.trim()) parts.push(node.text);
+      return;
+    }
+    if (!type || !RICH_TEXT_CONTAINER_TYPES.has(type)) return;
+    const elements = node.elements;
+    if (Array.isArray(elements)) elements.forEach(collect);
+  };
+
+  blocks.forEach((block) => {
+    if (!block || typeof block !== "object" || Array.isArray(block)) return;
+    const candidate = block as Record<string, unknown>;
+    if (candidate.type === "rich_text") collect(candidate);
+  });
+  return stringValue(parts.join(" "), maximum);
+}
+
+function slackErrorCode(value: unknown): string | undefined {
+  const code = stringValue(value, 96);
+  return code && /^[A-Za-z0-9_-]+$/.test(code) ? code : undefined;
 }
 
 /**
@@ -217,7 +304,9 @@ export class SlackNotificationAdapter implements NotificationAdapter {
   private readonly fetcher: Fetcher;
   private readonly webSocketFactory: SlackWebSocketFactory;
   private readonly socketOpenTimeoutMs: number;
+  private readonly socketReconnectDelayMs: number;
   private readonly diagnosticLogger: SlackDiagnosticLogger;
+  private readonly handoffUrlForApplication?: SlackNotificationAdapterOptions["handoffUrlForApplication"];
   private readonly messageTimestamps = new Map<string, string>();
   /** Transport-local application conversation state; core remains Slack-agnostic. */
   private readonly applicationThreadRoots = new Map<string, { threaded: Set<string>; topLevel: Set<string> }>();
@@ -225,6 +314,8 @@ export class SlackNotificationAdapter implements NotificationAdapter {
   /** Latest durable event snapshots used when a listener started before publication. */
   private readonly publishedAttentionEvents = new Map<string, PersistedAttentionEvent>();
   private socket?: SlackWebSocket;
+  private reconnectTimer?: ReturnType<typeof setTimeout>;
+  private stopping = true;
 
   constructor(options: SlackNotificationAdapterOptions) {
     this.config = options.config;
@@ -234,24 +325,60 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     this.fetcher = options.fetcher ?? ((input, init) => fetch(input, init));
     this.webSocketFactory = options.webSocketFactory ?? defaultWebSocketFactory;
     this.socketOpenTimeoutMs = options.socketOpenTimeoutMs ?? 10_000;
+    // Slack can briefly retain a Socket Mode connection after a process exits.
+    // A one-second reconnect loop turns that cleanup window into a persistent
+    // `too_many_websockets` storm, so use a calmer default while keeping tests
+    // and callers able to inject a shorter delay.
+    this.socketReconnectDelayMs = options.socketReconnectDelayMs ?? 10_000;
     this.diagnosticLogger = options.diagnosticLogger ?? {
       info: (message) => console.info(`[career-agent-slack] ${message}`),
       warn: (message) => console.warn(`[career-agent-slack] ${message}`),
     };
+    this.handoffUrlForApplication = options.handoffUrlForApplication;
     if (!Number.isInteger(this.socketOpenTimeoutMs) || this.socketOpenTimeoutMs <= 0) {
       throw new Error("Slack Socket Mode connection timeout must be positive.");
+    }
+    if (!Number.isInteger(this.socketReconnectDelayMs) || this.socketReconnectDelayMs <= 0) {
+      throw new Error("Slack Socket Mode reconnect delay must be positive.");
     }
   }
 
   async publishAttentionEvent(event: AttentionEvent): Promise<AttentionProviderDelivery | void> {
     if (event.status !== "open") return;
-    const threadTs = event.applicationId ? this.applicationRootForPublishing(event.applicationId) : undefined;
-    const message = eventMessage(event, { threadReply: Boolean(threadTs) });
+    const alreadyPublished = this.messageTimestamps.get(event.id);
+    if (alreadyPublished) {
+      const roots = event.applicationId ? this.applicationThreadRoots.get(event.applicationId) : undefined;
+      const threadTs = roots && roots.threaded.size === 1 ? [...roots.threaded][0] : undefined;
+      return {
+        provider: "slack",
+        messageTs: alreadyPublished,
+        channelId: this.config.channelId,
+        ...(threadTs ? { threadTs } : {}),
+      };
+    }
+    const humanVerificationHandoff = event.submissionAlreadyClicked === true || event.blockerType === "captcha" ||
+      (event.blockerType === "external_verification" && event.question && /verify whether the application was submitted/i.test(event.question.prompt));
+    // A verification handoff is always a fresh top-level alert. This avoids
+    // burying the action in an earlier question thread while preserving the
+    // durable event/message correlation for restart-safe deduplication.
+    const threadTs = event.applicationId && !humanVerificationHandoff ? this.applicationRootForPublishing(event.applicationId) : undefined;
+    let handoffUrl: string | undefined;
+    if (humanVerificationHandoff && this.handoffUrlForApplication) {
+      if (!event.applicationId) {
+        throw new Error("Slack human-verification handoff requires an application ID.");
+      }
+      handoffUrl = await this.handoffUrlForApplication(event.applicationId);
+      if (!handoffUrl) {
+        throw new Error("Slack human-verification handoff URL could not be created.");
+      }
+    }
+    const message = eventMessage(event, { threadReply: Boolean(threadTs), ...(handoffUrl ? { handoffUrl } : {}) });
     const result = await this.callApi("chat.postMessage", this.config.botToken, {
       channel: this.config.channelId,
       text: message.text,
       blocks: message.blocks,
       ...(threadTs ? { thread_ts: threadTs } : {}),
+      ...(humanVerificationHandoff ? { unfurl_links: false, unfurl_media: false } : {}),
     });
     const timestamp = typeof result.ts === "string" && result.ts.trim() ? result.ts.trim() : undefined;
     if (event.type === "needs_input" && !timestamp) {
@@ -272,16 +399,81 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     };
   }
 
-  async closeAttentionEvent(event: AttentionEvent): Promise<void> {
+  /**
+   * Reannounce one exact open event whose previous delivery was buried in a
+   * stale thread. The durable event id remains unchanged; only the Slack
+   * delivery correlation is replaced.
+   */
+  async reannounceAttentionEvent(event: AttentionEvent): Promise<AttentionProviderDelivery | void> {
+    if (event.status !== "open") return;
+    this.messageTimestamps.delete(event.id);
+    if (event.applicationId) this.applicationThreadRoots.delete(event.applicationId);
+    return this.publishAttentionEvent(event);
+  }
+
+  /** Start a new top-level Slack root while leaving historical reply correlations intact. */
+  startFreshApplicationReview(applicationId: string): void {
+    this.applicationThreadRoots.delete(applicationId);
+  }
+
+  async updateAttentionEvent(event: AttentionEvent): Promise<void> {
     const timestamp = this.messageTimestamps.get(event.id);
-    if (!timestamp) return;
+    if (!timestamp) throw new Error("Slack attention message is not available for update.");
+    const rootTs = event.applicationId ? this.applicationRootForPublishing(event.applicationId) : undefined;
+    const message = eventMessage(event, { threadReply: Boolean(rootTs && rootTs !== timestamp) });
     await this.callApi("chat.update", this.config.botToken, {
       channel: this.config.channelId,
       ts: timestamp,
-      text: `${safeText(event.title, 150)} — resolved`,
-      blocks: [],
+      text: message.text,
+      blocks: message.blocks,
+    });
+  }
+
+  async closeAttentionEvent(event: AttentionEvent): Promise<void> {
+    const timestamp = this.messageTimestamps.get(event.id);
+    if (!timestamp) return;
+    const answerUsed = event.answerUsed ? `\n\nAnswer used in application:\n> ${markdownText(event.answerUsed, 512)}` : "";
+    await this.callApi("chat.update", this.config.botToken, {
+      channel: this.config.channelId,
+      ts: timestamp,
+      text: `${safeText(event.title, 150)} — resolved${answerUsed}`,
+      blocks: answerUsed
+        ? [
+            {
+              type: "header",
+              text: { type: "plain_text", text: safeText(event.title, 150) },
+            },
+            {
+              type: "section",
+              text: { type: "mrkdwn", text: `Resolved. The following answer was used in the application:${answerUsed}` },
+            },
+          ]
+        : [],
     });
     this.forgetMessageTimestamp(event.id);
+  }
+
+  async publishExpiredSessionNotice(event: AttentionEvent): Promise<void> {
+    const timestamp = this.messageTimestamps.get(event.id);
+    const text = `${safeText(event.title, 150)}\n\nThe local browser session expired or closed before verification could be completed. No application submission was retried. Verify the application status manually in the employer's system; the Career Agent cannot confirm success.`;
+    const blocks: Record<string, unknown>[] = [
+      { type: "header", text: { type: "plain_text", text: safeText(event.title, 150) } },
+      { type: "section", text: { type: "mrkdwn", text: "The local browser session expired or closed before verification could be completed.\n\nNo application submission was retried. Verify the application status manually in the employer's system; the Career Agent cannot confirm success." } },
+    ];
+    if (timestamp) {
+      await this.callApi("chat.update", this.config.botToken, {
+        channel: this.config.channelId,
+        ts: timestamp,
+        text,
+        blocks,
+      });
+      return;
+    }
+    await this.callApi("chat.postMessage", this.config.botToken, {
+      channel: this.config.channelId,
+      text,
+      blocks,
+    });
   }
 
   /** Hydrates durable application threads and open event message correlations before Socket Mode starts. */
@@ -306,9 +498,15 @@ export class SlackNotificationAdapter implements NotificationAdapter {
         hydrated += 1;
       }
       if (event.applicationId && event.type === "needs_input") {
-        const rootTs = delivery.threadTs ?? delivery.messageTs;
-        this.rememberApplicationRoot(event.applicationId, rootTs, Boolean(delivery.threadTs));
-        if (event.status === "open") this.rememberThreadEvent(rootTs, event.id);
+        // Cancelled records are retained for auditability, but their old
+        // thread must not become the root for a new review after restart.
+        // A resolved canonical threaded root remains useful for continuity;
+        // an active open event can also anchor the next sequential question.
+        if (event.status === "open" || (event.status === "resolved" && Boolean(delivery.threadTs))) {
+          const rootTs = delivery.threadTs ?? delivery.messageTs;
+          this.rememberApplicationRoot(event.applicationId, rootTs, Boolean(delivery.threadTs));
+          this.rememberThreadEvent(rootTs, event.id);
+        }
       }
     }
     return hydrated;
@@ -325,6 +523,11 @@ export class SlackNotificationAdapter implements NotificationAdapter {
 
   async start(): Promise<void> {
     if (this.socket) throw new Error("The Slack Socket Mode listener is already running.");
+    this.stopping = false;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
     const result = await this.callApi("apps.connections.open", this.config.appToken);
     const url = stringValue(result.url, 2_000);
     if (!url || !url.startsWith("wss://")) throw new Error("Slack did not return a valid Socket Mode URL.");
@@ -357,12 +560,45 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     socket.onmessage = (message) => {
       void this.handleSocketEnvelope(message.data);
     };
+    socket.onerror = () => {
+      this.handleEstablishedSocketFailure(socket, "error");
+    };
+    socket.onclose = () => {
+      this.handleEstablishedSocketFailure(socket, "close");
+    };
   }
 
   stop(): void {
+    this.stopping = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
     const socket = this.socket;
     this.socket = undefined;
     socket?.close();
+  }
+
+  private scheduleReconnect(): void {
+    if (this.stopping || this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      if (this.stopping || this.socket) return;
+      void this.start().catch(() => {
+        if (!this.stopping) {
+          this.diagnosticLogger.warn("Slack Socket Mode reconnect failed; retrying.");
+          this.scheduleReconnect();
+        }
+      });
+    }, this.socketReconnectDelayMs);
+  }
+
+  private handleEstablishedSocketFailure(socket: SlackWebSocket, reason: "close" | "error" | "disconnect"): void {
+    if (this.socket !== socket || this.stopping) return;
+    this.socket = undefined;
+    this.diagnosticLogger.warn(`Slack Socket Mode connection ${reason === "close" ? "closed" : reason === "error" ? "errored" : "requested a disconnect"}; reconnecting.`);
+    if (reason !== "close") socket.close();
+    this.scheduleReconnect();
   }
 
   async handleSocketEnvelope(raw: unknown): Promise<void> {
@@ -386,9 +622,16 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     }
     const envelopeId = stringValue(envelope.envelope_id, 256);
     if (envelopeId && this.socket) this.socket.send(JSON.stringify({ envelope_id: envelopeId }));
-    if (envelope.type === "hello") return;
+    const envelopeType = stringValue(envelope.type, 64);
+    if (envelopeType === "hello") return;
     const payload = responsePayload(envelope.payload);
     if (!payload) {
+      if (envelopeType === "disconnect") {
+        const reason = stringValue(envelope.reason, 64) ?? "unknown";
+        this.diagnosticLogger.info(`received Socket Mode disconnect (${reason})`);
+        if (this.socket) this.handleEstablishedSocketFailure(this.socket, "disconnect");
+        return;
+      }
       this.diagnosticLogger.warn("ignored: Socket Mode envelope had no payload");
       return;
     }
@@ -420,10 +663,14 @@ export class SlackNotificationAdapter implements NotificationAdapter {
       this.diagnosticLogger.info("ignored: bot/self or subtype message");
       return;
     }
+    if ((Array.isArray(message.files) && message.files.length > 0) || (Array.isArray(message.attachments) && message.attachments.length > 0)) {
+      this.diagnosticLogger.info("ignored: message contains files or attachments");
+      return;
+    }
     const userId = stringValue(message.user, 128);
     const channelId = stringValue(message.channel, 128);
     const threadTs = stringValue(message.thread_ts, 128);
-    const text = stringValue(message.text, 512);
+    const text = stringValue(message.text, 512) ?? richTextMessageValue(message, 512);
     const teamId = stringValue(payload.team_id, 128) ?? stringValue(message.team, 128);
     if (!userId) {
       this.diagnosticLogger.info("ignored: message had no user");
@@ -460,8 +707,11 @@ export class SlackNotificationAdapter implements NotificationAdapter {
       this.diagnosticLogger.info("ignored: unmatched thread");
       return;
     }
+    // A listener can receive a reply for an event persisted by another
+    // process. Keep the durable snapshot as a fallback when the injected
+    // service lookup still has an older in-memory view.
     const events = [...eventIds]
-      .map((eventId) => this.eventLookup?.(eventId))
+      .map((eventId) => this.eventLookup?.(eventId) ?? this.publishedAttentionEvents.get(eventId))
       .filter((event): event is AttentionEvent => Boolean(event));
     const openEvents = events.filter((event) => event.status === "open" && event.type === "needs_input");
     if (openEvents.length > 1) {
@@ -500,7 +750,10 @@ export class SlackNotificationAdapter implements NotificationAdapter {
   }
 
   private rememberApplicationRoot(applicationId: string, rootTs: string, threaded: boolean): void {
-    const roots = this.applicationThreadRoots.get(applicationId) ?? { threaded: new Set<string>(), topLevel: new Set<string>() };
+    const roots = this.applicationThreadRoots.get(applicationId) ?? {
+      threaded: new Set<string>(),
+      topLevel: new Set<string>(),
+    };
     (threaded ? roots.threaded : roots.topLevel).add(rootTs);
     this.applicationThreadRoots.set(applicationId, roots);
   }
@@ -544,9 +797,7 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     }
     const action = responsePayload(body.actions[0]);
     if (!action) return { status: "rejected", reason: "unexpected_action" };
-    const actionId = typeof action.action_id === "string" && action.action_id.length <= 255
-      ? action.action_id
-      : undefined;
+    const actionId = typeof action.action_id === "string" && action.action_id.length <= 255 ? action.action_id : undefined;
     if (!actionId) return { status: "rejected", reason: "unexpected_action" };
     const generatedAction = actionId.match(GENERATED_ACTION_ID_PATTERN);
     if (actionId !== ACTION_ID && !generatedAction) return { status: "rejected", reason: "unexpected_action" };
@@ -570,7 +821,10 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     if (event && (event.type !== "needs_input" || !event.question)) {
       return { status: "rejected", reason: "non_interactive_event" };
     }
-    if (optionIndex !== undefined && (!event?.question || event.question.kind !== "single_choice" || !event.question.options[optionIndex])) {
+    if (
+      optionIndex !== undefined &&
+      (!event?.question || event.question.kind !== "single_choice" || !event.question.options[optionIndex])
+    ) {
       return { status: "rejected", reason: "unexpected_action" };
     }
     if (event?.type === "needs_input" && event.question && !event.question.options.some((option) => option.id === selectedOption)) {
@@ -618,7 +872,10 @@ export class SlackNotificationAdapter implements NotificationAdapter {
       throw new Error(`Slack ${method} returned malformed JSON.`);
     }
     const result = responsePayload(data) as SlackApiResponse | undefined;
-    if (!result?.ok) throw new Error(`Slack ${method} was not accepted.`);
+    if (!result?.ok) {
+      const errorCode = slackErrorCode(result?.error);
+      throw new Error(`Slack ${method} was not accepted${errorCode ? ` (${errorCode})` : ""}.`);
+    }
     return clone(result);
   }
 }

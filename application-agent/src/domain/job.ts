@@ -98,11 +98,57 @@ function parseMoney(value: string): number | undefined {
   return Number.isFinite(numeric) ? numeric * multiplier : undefined;
 }
 
+const KNOWN_CURRENCY_CODES: ReadonlySet<string> = new Set([
+  "AUD", "CAD", "CHF", "CNY", "DKK", "EUR", "GBP", "HKD", "INR", "JPY",
+  "KRW", "MXN", "NOK", "NZD", "PLN", "SEK", "SGD", "USD", "ZAR",
+]);
+
+const COMPENSATION_LABEL_PATTERN = /\b(?:salary|compensation|base\s+pay|base\s+salary|pay|wage|rate|earnings|remuneration)\b/i;
+const CURRENCY_SYMBOL_AMOUNT_PATTERN = /[$€£]\s*(?=\d)/;
+const KNOWN_CURRENCY_AMOUNT_PATTERN = new RegExp(`\\b(?:${[...KNOWN_CURRENCY_CODES].join("|")})\\s*(?=\\d)`, "i");
+const AMOUNT_PATTERN = /(?:[$€£]\s*)?(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)k?/gi;
+const RANGE_PATTERN = new RegExp(
+  `(?:[$€£]\\s*)?(?:\\d{1,3}(?:,\\d{3})+|\\d+(?:\\.\\d+)?)k?\\s*(?:-|–|—|to)\\s*(?:[$€£]\\s*)?(?:\\d{1,3}(?:,\\d{3})+|\\d+(?:\\.\\d+)?)k?`,
+  "i",
+);
+
+function compensationLines(text: string): readonly string[] {
+  return text.split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => COMPENSATION_LABEL_PATTERN.test(line) || CURRENCY_SYMBOL_AMOUNT_PATTERN.test(line) || KNOWN_CURRENCY_AMOUNT_PATTERN.test(line));
+}
+
+function normalizedCurrency(text: string): string | undefined {
+  const symbol = text.match(/[€£$]/)?.[0];
+  if (symbol) return symbol === "€" ? "EUR" : symbol === "£" ? "GBP" : "USD";
+  const code = text.match(/\b[A-Z]{3}\b/)?.[0]?.toUpperCase();
+  return code && KNOWN_CURRENCY_CODES.has(code) ? code : undefined;
+}
+
+function isExperienceRange(line: string, range: RegExpExecArray): boolean {
+  const suffix = line.slice((range.index ?? 0) + range[0].length);
+  return /^(?:\s*\+?\s*)(?:years?|yrs?)\b/i.test(suffix);
+}
+
+function hasUnknownCurrencyPrefix(line: string): boolean {
+  const prefix = line.match(/\b([A-Z]{3})\s*(?=\d)/)?.[1]?.toUpperCase();
+  return Boolean(prefix && !KNOWN_CURRENCY_CODES.has(prefix));
+}
+
+function amountsIn(value: string): number[] {
+  return [...value.matchAll(AMOUNT_PATTERN)]
+    .map((match) => parseMoney(match[0]))
+    .filter((amount): amount is number => amount !== undefined);
+}
+
 function extractCompensation(text: string): JobPosting["compensation"] {
-  const compensationText = text.split(/\r?\n/).find((line) => /^compensation\s*:/i.test(line)) ?? text;
+  const candidateLines = compensationLines(text);
+  if (candidateLines.length === 0) return undefined;
+
+  const compensationText = candidateLines.join("\n");
   const currencySymbol = compensationText.match(/[€£$]/)?.[0];
-  const currencyCode = compensationText.match(/\b[A-Z]{3}\b/)?.[0];
-  const currency = currencyCode ?? (currencySymbol === "€" ? "EUR" : currencySymbol === "£" ? "GBP" : currencySymbol === "$" ? "USD" : undefined);
+  const currency = normalizedCurrency(compensationText) ?? (currencySymbol === "€" ? "EUR" : currencySymbol === "£" ? "GBP" : currencySymbol === "$" ? "USD" : undefined);
   const period = compensationText.match(/\b(hourly|hour|weekly|week|fortnightly|fortnight|monthly|month|annual|yearly|year|yr)\b/i)?.[1]?.toLowerCase();
   const normalizedPeriod = period === "hour" ? "hourly"
     : period === "week" ? "weekly"
@@ -117,29 +163,25 @@ function extractCompensation(text: string): JobPosting["compensation"] {
     ...(normalizedPeriod ? { period: normalizedPeriod } : {}),
   });
 
-  const range = text.match(/\$\s?[\d,]+(?:\.\d+)?k?\s*(?:-|–|—|to)\s*\$?\s?[\d,]+(?:\.\d+)?k?/i);
-  if (range) {
-    const values = range[0].split(/-|–|—|to/i).map(parseMoney).filter((value): value is number => value !== undefined);
-    if (values.length === 2) {
-      return withMetadata(values[0], values[1]);
+  for (const line of candidateLines) {
+    const range = RANGE_PATTERN.exec(line);
+    RANGE_PATTERN.lastIndex = 0;
+    if (range) {
+      if (isExperienceRange(line, range) || hasUnknownCurrencyPrefix(line)) continue;
+      const values = amountsIn(range[0]);
+      if (values.length === 2) return withMetadata(values[0], values[1]);
     }
-  }
 
-  const codeRange = compensationText.match(/\b[A-Z]{3}\s*[\d,]+(?:\.\d+)?k?\s*(?:-|–|—|to)\s*(?:[A-Z]{3}\s*)?[\d,]+(?:\.\d+)?k?/);
-  if (codeRange) {
-    const values = codeRange[0].match(/[\d,]+(?:\.\d+)?k?/gi)?.map(parseMoney).filter((value): value is number => value !== undefined) ?? [];
-    if (values.length === 2) return withMetadata(values[0], values[1]);
+    const single = line.match(AMOUNT_PATTERN)?.[0];
+    if (!single || (!COMPENSATION_LABEL_PATTERN.test(line) && !CURRENCY_SYMBOL_AMOUNT_PATTERN.test(line) && !KNOWN_CURRENCY_AMOUNT_PATTERN.test(line))) {
+      continue;
+    }
+    const suffix = line.slice((line.indexOf(single) ?? 0) + single.length);
+    if (!currency && /^(?:\s*\+?\s*)(?:years?|yrs?)\b/i.test(suffix)) continue;
+    const value = parseMoney(single);
+    if (value !== undefined) return withMetadata(value);
   }
-
-  const numericRange = compensationText.match(/[\d,]+(?:\.\d+)?k?\s*(?:-|–|—|to)\s*[\d,]+(?:\.\d+)?k?/i);
-  if (numericRange) {
-    const values = numericRange[0].split(/-|–|—|to/i).map(parseMoney).filter((value): value is number => value !== undefined);
-    if (values.length === 2) return withMetadata(values[0], values[1]);
-  }
-
-  const single = compensationText.match(/(?:\$|€|£)\s?[\d,]+(?:\.\d+)?k?/i);
-  const value = single ? parseMoney(single[0]) : undefined;
-  return value === undefined ? undefined : withMetadata(value);
+  return undefined;
 }
 
 function extractSkills(lines: readonly string[]): {
@@ -245,6 +287,7 @@ export function normalizeJobPosting(
   const location = labelValue(lines, "location");
   const remoteStatus = inferRemoteStatus(rawText);
   const skills = extractSkills(lines);
+  const compensation = input.compensation ?? extractCompensation(rawText);
   const posting: JobPosting = {
     ...(sourceUrl ? { sourceUrl } : {}),
     ...(applicationUrl ? { applicationUrl } : {}),
@@ -253,7 +296,7 @@ export function normalizeJobPosting(
     ...(location ? { location } : {}),
     ...(remoteStatus ? { remoteStatus } : {}),
     ...(inferEmploymentType(rawText) ? { employmentType: inferEmploymentType(rawText) } : {}),
-    ...(extractCompensation(rawText) ? { compensation: extractCompensation(rawText) } : {}),
+    ...(compensation ? { compensation } : {}),
     description: rawText,
     requiredSkills: skills.requiredSkills,
     preferredSkills: skills.preferredSkills,

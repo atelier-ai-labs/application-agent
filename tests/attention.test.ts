@@ -246,6 +246,52 @@ class UnknownQuestionExecutor implements ApplicationExecutor {
   }
 }
 
+function continuationBlocker(): CareerBlockerDraft {
+  return {
+    kind: "unknown_form_field",
+    unit: "submission",
+    questionProvenance: "ATS_FORM",
+    field: "privacy-policy",
+    question: "GC AI Privacy Policy",
+    reason: "The required privacy-policy control needs an explicit human choice.",
+    evidence: [
+      "executor:ashby-browser",
+      "field-id:privacy-policy",
+      "field-type:radio",
+      "field-label:GC AI Privacy Policy",
+      "field-required:true",
+      "classification:unknown",
+      "options:Continue",
+      "question-prompt:GC AI Privacy Policy",
+      "question-section:Personal Information",
+      "question-source:question_container",
+      "question-confidence:high",
+    ],
+    resumeAfterHuman: true,
+  };
+}
+
+class GeneratedChoiceThenReadyExecutor implements ApplicationExecutor {
+  readonly id = "generated-choice-test-executor";
+  calls = 0;
+
+  executionMode(): "preparation_only" {
+    return "preparation_only";
+  }
+
+  async execute(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult> {
+    this.calls += 1;
+    const answered = request.careerJob.blockers.some((candidate) =>
+      candidate.field === "privacy-policy" && candidate.status === "resolved" && candidate.value === "Continue",
+    );
+    if (!answered) {
+      const current = continuationBlocker();
+      return { state: "requires_human", blocker: current, blockers: [current] };
+    }
+    return { state: "ready_to_submit", inspection: inspection("inspected") };
+  }
+}
+
 function setup(options: {
   candidate?: CandidateProfile;
   executor?: ApplicationExecutor;
@@ -391,6 +437,59 @@ describe("Career Agent human attention seam", () => {
     }).event.questionProvenance).toBe("CONFIGURATION");
   });
 
+  it("marks a post-click CAPTCHA handoff even when its blocker unit is external", () => {
+    const generated = attentionEventForCareerBlocker({
+      campaignId: "campaign-1",
+      jobId: "job-1",
+      blocker: asCareerBlocker({
+        kind: "captcha",
+        unit: "external",
+        questionProvenance: "POLICY",
+        field: "submission-confirmation",
+        question: "Verify you are human",
+        reason: "A verification challenge appeared after Submit.",
+        evidence: ["executor:lever-browser", "submit:clicked", "captcha-state:active_challenge"],
+        resumeAfterHuman: false,
+      }),
+      createdAt: capturedAt,
+      createId: (prefix) => `${prefix}-post-click-captcha`,
+    });
+    expect(generated?.event.submissionAlreadyClicked).toBe(true);
+    expect(isAttentionEvent(generated?.event)).toBe(true);
+  });
+
+  it("preserves a legitimate long ATS prompt for attention and dedupe", () => {
+    const prompt = "Our priorities for this role are to continue scaling our AWS Control Tower environment with Terraform IaC, CI/CD via GitHub Actions, and AWS data warehousing solutions; how does your interests and experience align with these priorities?";
+    const generated = attentionEventForCareerBlocker({
+      campaignId: "campaign-1",
+      jobId: "job-1",
+      blocker: asCareerBlocker({
+        kind: "subjective_answer",
+        unit: "submission",
+        questionProvenance: "ATS_FORM",
+        field: "job_applicant_custom_form_response_attributes_answers_attributes_6_text",
+        question: prompt,
+        reason: "The exact ATS free-text question requires review.",
+        evidence: [
+          "executor:gusto-browser",
+          "field-type:textarea",
+          "field-required:true",
+          `question-prompt:${prompt}`,
+          "question-source:question_container",
+          "question-confidence:high",
+        ],
+        resumeAfterHuman: true,
+      }),
+      createdAt: capturedAt,
+      createId: (prefix) => `${prefix}-long-ats`,
+    });
+
+    expect(generated?.event.question).toMatchObject({ prompt, kind: "free_text", required: true });
+    expect(generated?.record.descriptorSignature.length).toBeGreaterThan(512);
+    expect(generated?.record.descriptorSignature.length).toBeLessThanOrEqual(1_024);
+    expect(isAttentionEvent(generated?.event)).toBe(true);
+  });
+
   it.each(["other", "submission_approval"] as const)("keeps %s out of the interactive attention queue", (kind) => {
     expect(attentionEventForCareerBlocker({
       campaignId: "campaign-1",
@@ -501,6 +600,77 @@ describe("Career Agent human attention seam", () => {
     expect(result).toMatchObject({ inspected: 1, eligible: 1, replaced: 1, deliveryMetadataPersisted: 1, newRootsPublished: 0 });
     const records = state.service.getCampaign(state.campaign.id).attentionEvents ?? [];
     expect(records.find((event) => event.id !== legacy.id && event.id !== canonical.id)?.providerDelivery?.threadTs).toBe(threaded.threadTs);
+  });
+
+  it("repairs one explicitly targeted unthreaded root when no canonical application thread exists", async () => {
+    const state = await blockedRun({
+      candidate: salaryAskProfile(),
+      executor: new PreparationBlockerExecutor(["salary"]),
+    });
+    const campaign = state.service.getCampaign(state.campaign.id);
+    const legacy = campaign.attentionEvents?.[0];
+    if (!legacy) throw new Error("Expected an attention event.");
+    const oldDelivery: AttentionProviderDelivery = {
+      provider: "slack",
+      messageTs: "1710000000.000050",
+      channelId: "C123456",
+    };
+    state.careerRepository.saveCampaign({
+      ...campaign,
+      attentionEvents: campaign.attentionEvents?.map((event) => event.id === legacy.id
+        ? { ...event, providerDelivery: oldDelivery }
+        : event),
+    });
+    const freshDelivery: AttentionProviderDelivery = {
+      provider: "slack",
+      messageTs: "1710000000.000051",
+      channelId: "C123456",
+    };
+    state.notificationAdapter.publishAttentionEvent = async () => freshDelivery;
+
+    const result = await state.service.repairLegacyAttentionEvents(state.campaign.id, { jobId: state.job.id });
+    const records = state.service.getCampaign(state.campaign.id).attentionEvents ?? [];
+    const replacement = records.find((event) => event.id !== legacy.id);
+    expect(result).toMatchObject({ inspected: 1, eligible: 1, replaced: 1, newRootsPublished: 1, deliveryMetadataPersisted: 1 });
+    expect(records).toHaveLength(2);
+    expect(records[0]).toMatchObject({
+      status: "cancelled",
+      closureReason: "legacy_unreplyable_replaced",
+      replacementEventId: replacement?.id,
+    });
+    expect(replacement?.providerDelivery).toEqual(freshDelivery);
+  });
+
+  it("restarts a stale sequential review with a fresh root and persists its reply correlation", async () => {
+    const state = await blockedRun({
+      candidate: salaryAskProfile(),
+      executor: new PreparationBlockerExecutor(["salary"]),
+    });
+    let resetApplicationId: string | undefined;
+    state.notificationAdapter.startFreshApplicationReview = (applicationId) => {
+      resetApplicationId = applicationId;
+    };
+    state.notificationAdapter.publishAttentionEvent = async () => ({
+      provider: "slack",
+      messageTs: "1789936874.500000",
+      channelId: "C123456",
+    });
+
+    await state.service.restartAttentionReview(state.campaign.id, state.job.id);
+
+    const records = state.service.getCampaign(state.campaign.id).attentionEvents ?? [];
+    expect(resetApplicationId).toBe(state.job.applicationId);
+    expect(records).toHaveLength(2);
+    expect(records[0]).toMatchObject({ status: "cancelled" });
+    expect(records[1]).toMatchObject({
+      status: "open",
+      providerDelivery: {
+        provider: "slack",
+        messageTs: "1789936874.500000",
+        channelId: "C123456",
+      },
+      publishedAt: expect.any(String),
+    });
   });
 
   it("repairs an eligible legacy event through the normal lifecycle and persists delivery metadata", async () => {
@@ -800,6 +970,29 @@ describe("Career Agent human attention seam", () => {
     expect(state.service.getCampaign(state.campaign.id).attentionEvents?.[0].publishedAt).toBeDefined();
   });
 
+  it("maps a generated choice ID back to the inspected option before resuming", async () => {
+    const executor = new GeneratedChoiceThenReadyExecutor();
+    const state = await blockedRun({ executor });
+    const event = state.service.listAttentionEvents(state.campaign.id)[0];
+    expect(event.question?.options).toEqual([{ id: "continue-1", label: "Continue" }]);
+
+    const resolved = await state.service.resolveAttentionResponse({
+      eventId: event.id,
+      selectedOption: "continue-1",
+      actorIdentity: { provider: "test", userId: "human-1" },
+      respondedAt: "2026-09-01T12:30:00.000Z",
+    });
+
+    expect(resolved.status).toBe("resolved");
+    expect(executor.calls).toBe(2);
+    expect(state.service.getJob(state.job.id).status).toBe("ready_to_submit");
+    expect(state.service.getJob(state.job.id).blockers.find((candidate) => candidate.field === "privacy-policy")).toMatchObject({
+      status: "resolved",
+      value: "Continue",
+    });
+    expect(state.service.listAttentionEvents(state.campaign.id)).toHaveLength(1);
+  });
+
   it("preserves exact demographic question context, options, section, and optionality", () => {
     const generated = attentionEventForCareerBlocker({
       campaignId: "campaign-1",
@@ -1059,5 +1252,110 @@ describe("Career Agent human attention seam", () => {
     ];
     storage.setItem("atelier.application-agent.campaigns.v0", JSON.stringify(rawCampaigns));
     expect(second.getCampaign(state.campaign.id)?.attentionEvents).toHaveLength(1);
+  });
+
+  it("revises one exact resolved answer without resuming or submitting", async () => {
+    const state = await blockedRun({ executor: new PreparationBlockerExecutor(["subjective_answer"]) });
+    const job = state.service.getJob(state.job.id);
+    const blocker = job.blockers[0];
+    const event = state.service.listAttentionEvents(state.campaign.id)[0];
+    if (!blocker || !event) throw new Error("revision fixture is incomplete");
+    state.careerRepository.saveJob({
+      ...job,
+      status: "failed",
+      execution: {
+        ...(job.execution ?? {
+          status: "failed" as const,
+          fieldsDetected: [],
+          fieldsFilled: [],
+          unresolvedFields: [],
+          startedAt: capturedAt,
+          updatedAt: capturedAt,
+        }),
+        status: "failed" as const,
+        evidence: ["submit:not-clicked"],
+      },
+      blockers: [{ ...blocker, status: "resolved", value: "internet", resolvedAt: capturedAt }],
+    });
+    state.careerRepository.saveCampaign({
+      ...state.service.getCampaign(state.campaign.id),
+      attentionEvents: [{
+        ...event,
+        jobId: job.id,
+        blockerId: blocker.id,
+        descriptorSignature: "revision-test",
+        status: "resolved",
+        answerUsed: "internet",
+        response: {
+          eventId: event.id,
+          selectedOption: "internet",
+          actorIdentity: { provider: "test", userId: "human-1" },
+          respondedAt: capturedAt,
+        },
+      }],
+    });
+
+    const revised = state.service.reviseResolvedCareerAnswer({
+      campaignId: state.campaign.id,
+      jobId: job.id,
+      blockerId: blocker.id,
+      attentionEventId: event.id,
+      expectedCurrentValue: "internet",
+      replacementValue: "MeridianLink Career Site",
+    });
+    expect(revised.careerJob.status).toBe("failed");
+    expect(revised.careerJob.blockers[0]?.value).toBe("MeridianLink Career Site");
+    expect(revised.attentionEvent.answerUsed).toBe("MeridianLink Career Site");
+    expect(revised.attentionEvent.response?.selectedOption).toBe("MeridianLink Career Site");
+  });
+
+  it("rejects a resolved-answer revision without positive pre-submit evidence", async () => {
+    const state = await blockedRun({ executor: new PreparationBlockerExecutor(["subjective_answer"]) });
+    const job = state.service.getJob(state.job.id);
+    const blocker = job.blockers[0];
+    const event = state.service.listAttentionEvents(state.campaign.id)[0];
+    if (!blocker || !event) throw new Error("revision fixture is incomplete");
+    state.careerRepository.saveJob({
+      ...job,
+      status: "failed",
+      execution: {
+        ...(job.execution ?? {
+          status: "failed" as const,
+          fieldsDetected: [],
+          fieldsFilled: [],
+          unresolvedFields: [],
+          startedAt: capturedAt,
+          updatedAt: capturedAt,
+        }),
+        status: "failed" as const,
+        evidence: [],
+      },
+      blockers: [{ ...blocker, status: "resolved", value: "internet", resolvedAt: capturedAt }],
+    });
+    state.careerRepository.saveCampaign({
+      ...state.service.getCampaign(state.campaign.id),
+      attentionEvents: [{
+        ...event,
+        jobId: job.id,
+        blockerId: blocker.id,
+        descriptorSignature: "revision-test",
+        status: "resolved",
+        answerUsed: "internet",
+        response: {
+          eventId: event.id,
+          selectedOption: "internet",
+          actorIdentity: { provider: "test", userId: "human-1" },
+          respondedAt: capturedAt,
+        },
+      }],
+    });
+    expect(() => state.service.reviseResolvedCareerAnswer({
+      campaignId: state.campaign.id,
+      jobId: job.id,
+      blockerId: blocker.id,
+      attentionEventId: event.id,
+      expectedCurrentValue: "internet",
+      replacementValue: "MeridianLink Career Site",
+    })).toThrow("pre-submit evidence fence");
   });
 });

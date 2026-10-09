@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { loadEnv } from "vite";
 import {
   createConfiguredBackgroundCareerAgentRuntime,
@@ -39,6 +41,27 @@ try {
     const campaign = runtime.createCampaign(input);
     campaignId = campaign.id;
     console.log(`[career-agent-runtime] created campaign ${campaign.id} in durable local state`);
+  }
+
+  const dailyHuntFile = process.env.ATELIER_CAREER_AGENT_DAILY_HUNT_FILE?.trim();
+  if (dailyHuntFile) {
+    if (!campaignId) {
+      throw new Error("ATELIER_CAREER_AGENT_CAMPAIGN_ID is required when ATELIER_CAREER_AGENT_DAILY_HUNT_FILE is set.");
+    }
+    const campaign = runtime.service.getCampaign(campaignId);
+    if (campaign.status === "draft") runtime.service.activateCampaign(campaignId);
+    let message: string;
+    try {
+      message = readFileSync(resolve(dailyHuntFile), "utf8");
+    } catch {
+      throw new Error("The configured Daily job hunt file could not be read.");
+    }
+    const result = await runtime.processDailyHuntMessage(campaignId, message);
+    console.log(`[career-agent-runtime] daily hunt processed: ${result.processed} accepted, ${result.skipped} skipped`);
+    if (booleanValue(process.env.ATELIER_CAREER_AGENT_EXIT_AFTER_DAILY_HUNT, false, "ATELIER_CAREER_AGENT_EXIT_AFTER_DAILY_HUNT")) {
+      await shutdown(0);
+      process.exit(0);
+    }
   }
 
   if (booleanValue(process.env.ATELIER_CAREER_AGENT_RUN_ON_START, false, "ATELIER_CAREER_AGENT_RUN_ON_START")) {

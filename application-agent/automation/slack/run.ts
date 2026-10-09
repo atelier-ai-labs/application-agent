@@ -13,7 +13,8 @@ try {
   });
   await adapter.start();
   console.log("[career-agent-slack] Socket Mode listener started; no routine activity notifications are enabled.");
-  console.log("[career-agent-slack] A Career Agent runtime must inject the response handler; no answer is applied by this transport alone.");
+  console.log("[career-agent-slack] Standalone transport only: no CareerAgentService response handler is attached.");
+  console.log("[career-agent-slack] Do not run this alongside career-agent:runtime; the runtime owns the live Slack connection.");
   const shutdown = () => {
     adapter.stop();
     process.exit(0);

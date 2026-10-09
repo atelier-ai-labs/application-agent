@@ -79,6 +79,10 @@ export class HttpExecutionHostClient {
     return this.call(`/career-agent/executions/${encodeURIComponent(executionId)}`, { method: "GET" });
   }
 
+  getActiveForApplication(applicationId: string): Promise<ExecutionHostSnapshot> {
+    return this.call(`/career-agent/executions/by-application/${encodeURIComponent(applicationId)}`, { method: "GET" });
+  }
+
   resume(executionId: string, request?: ExecutionHostRequest): Promise<ExecutionHostSnapshot> {
     return this.call(`/career-agent/executions/${encodeURIComponent(executionId)}/resume`, {
       method: "POST",
@@ -88,6 +92,23 @@ export class HttpExecutionHostClient {
 
   cancel(executionId: string): Promise<ExecutionHostSnapshot> {
     return this.call(`/career-agent/executions/${encodeURIComponent(executionId)}/cancel`, { method: "POST" });
+  }
+
+  submitManually(executionId: string, target: { campaignId: string; careerJobId: string; applicationId: string }): Promise<ExecutionHostSnapshot> {
+    return this.call(`/career-agent/executions/${encodeURIComponent(executionId)}/submit`, {
+      method: "POST",
+      body: JSON.stringify({ approval: "SUBMIT_APPLICATION", ...target }),
+    });
+  }
+
+  issueHandoffForApplication(applicationId: string): Promise<{ url: string; expiresAt: number }> {
+    return this.callJson(`/career-agent/executions/by-application/${encodeURIComponent(applicationId)}/handoff`, { method: "POST" })
+      .then((body) => {
+        if (!body || typeof body !== "object" || Array.isArray(body) || typeof (body as { url?: unknown }).url !== "string" || typeof (body as { expiresAt?: unknown }).expiresAt !== "number") {
+          throw new ExecutionHostResponseError("The execution host returned a malformed handoff link.");
+        }
+        return body as { url: string; expiresAt: number };
+      });
   }
 
   private async call(
@@ -132,5 +153,21 @@ export class HttpExecutionHostClient {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  private async callJson(path: string, init: RequestInit): Promise<unknown> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      let response: Response;
+      try {
+        response = await this.fetcher(`${this.baseUrl}${path}`, { ...init, signal: controller.signal });
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") throw new ExecutionHostUnavailableError("The local real browser executor timed out or is not running.");
+        throw new ExecutionHostUnavailableError("The local real browser executor could not be reached.");
+      }
+      if (!response.ok) throw new ExecutionHostResponseError(await errorMessage(response), response.status);
+      try { return await response.json(); } catch { throw new ExecutionHostResponseError("The execution host returned malformed JSON.", response.status); }
+    } finally { clearTimeout(timer); }
   }
 }

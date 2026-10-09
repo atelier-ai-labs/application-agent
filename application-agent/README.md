@@ -540,6 +540,15 @@ The normalized `JobPosting` boundary validates URLs, timestamps, required fields
 
 `ModelClient` defines `analyzeJob`, `assessFit`, `draftResume`, and `draftAnswer`. `DeterministicModelClient` is the offline V0 implementation. A future provider can implement the interface while leaving the service and UI unchanged; provider configuration and secrets must remain outside source control.
 
+The background runtime can optionally use a local Ollama model for exact ATS
+free-text questions. It first selects a small lexical set of private employment,
+project, certification, approved-answer, and mapped-resume evidence, then asks
+Ollama for a concise JSON draft. The draft is attached to the existing ATS
+attention event for human review; `APPROVE` or an edited Slack reply is required
+before the resolved value can reach the browser executor. Model failure leaves
+the ordinary human-required question in place, and no profile answer is saved
+or reused automatically.
+
 `JobPostingIngestor` is the small intake seam for future URL or ATS-specific ingestion. `pastedJobPostingIngestor` is the only V0 implementation. Future Greenhouse, Lever, Ashby, Workday, or browser-assisted sources should return the same normalized `JobPosting` and should not leak provider response shapes into the domain.
 
 ## Persistence and events
@@ -615,10 +624,79 @@ npm run career-agent:executor
 
 Open `/application-agent` or `/departments/application-agent` for the preparation core. Open `/career-agent` or `/application-agent/campaigns` for campaigns. The latter route has deep-linkable campaign IDs. Create a **live campaign** to use Remotive plus any configured Lever sites and Greenhouse boards, or a **local demo campaign** for offline reproducibility. Set `VITE_LEVER_SITES` and/or `VITE_GREENHOUSE_BOARDS` to comma-separated public board identifiers before starting Vite; no credential is required for the public GET feeds. To include the bounded broad source in newly created live campaigns, set `VITE_BROAD_DISCOVERY_ENABLED=true`, set the server-only `ATELIER_BRAVE_SEARCH_API_KEY`, and run `npm run career-agent:executor` alongside Vite. The NHL and Quant variables remain separate read-only department configuration.
 
-The local campaign acceptance flow is: create the demo campaign → start → run now → inspect synthetic postings and blockers → resolve a blocker if desired → observe simulated proof and the local tracker record. The live flow is: configure optional Lever sites and/or Greenhouse boards → optionally enable bounded Brave discovery → create the live campaign → start → run now → inspect current Remotive/Lever/Greenhouse postings plus URL references, source provenance, actionability, and locally evaluated packets. Greenhouse and Lever are watchlists, not global ATS searches, and Brave is a bounded URL discovery sample rather than comprehensive market coverage. Reference-based discovery can classify a URL and route it to a structured board adapter; Ashby/Workday are recognized but unsupported, and custom/unknown pages stop at `fallback_required` without browser scraping. With a private verified profile loaded and `npm run career-agent:executor` running, select **Prepare in browser** only on an actionable Lever packet; the host opens the verified `/apply` page, pauses for human boundaries, and stops at `ready_to_submit`. After the user submits manually, select **Mark as submitted** and confirm; only then does the service attempt the configured Google Sheets tracker sync. If the tracker host or credentials are unavailable, the application remains Applied and the UI exposes **Retry tracker sync**.
+The local campaign acceptance flow is: create the demo campaign → start → run now → inspect synthetic postings and blockers → resolve a blocker if desired → observe simulated proof and the local tracker record. The live flow is: configure optional Lever sites and/or Greenhouse boards → optionally enable bounded Brave discovery → create the live campaign → start → run now → inspect current Remotive/Lever/Greenhouse postings plus URL references, source provenance, actionability, and locally evaluated packets. Greenhouse and Lever are watchlists, not global ATS searches, and Brave is a bounded URL discovery sample rather than comprehensive market coverage. Reference-based discovery can classify a URL and route it to a structured board adapter; Ashby/Workday are recognized, and custom/unknown pages stop at `fallback_required` without browser scraping. The daily-hunt intake accepts one bounded message snapshot, extracts only explicit Apply links, and sends verified Lever, Rippling, Ashby, or narrowly verified direct routes such as YouHired, Matlen Silver, and the exact current Protagona ApplyToJob route through the same fit, preparation, and browser path; it does not scrape a job page or invent a missing destination. With a private verified profile loaded and `npm run career-agent:executor` running, select **Prepare in browser** only on an actionable supported ATS packet; the host opens the verified application page, pauses for human boundaries, and stops at `ready_to_submit`. After the user submits manually, select **Mark as submitted** and confirm; only then does the service attempt the configured Google Sheets tracker sync. If the tracker host or credentials are unavailable, the application remains Applied and the UI exposes **Retry tracker sync**.
 
 ## Known limitations and roadmap
 
 The preparation core does not generate resume PDF/DOCX files. Career Agent now has a server-only deterministic local PDF/DOCX importer and an ignored family-to-artifact manifest; the importer adds only explicitly supported resume facts and leaves consequential answers for the existing human-attention path. Career Agent additionally has no scheduler, ChatGPT delivery, authentication, or multi-user storage. The Google Sheets adapter is implemented behind the local Node host; the local OAuth client/token are not configured in this checkout, although the connected Sheets workflow completed one controlled temporary live upsert/readback/repeat/cleanup against the canonical tab. The browser adapter supports only the common visible controls it can classify safely; it does not fill arbitrary custom widgets, bypass CAPTCHA/MFA, or persist sessions to disk. Final submission remains disabled unless the server-only automatic authority gate is explicitly enabled. The Node host is local-only, ephemeral, and not an authenticated remote service; a host restart loses its live browser session and the UI marks it interrupted. Remotive is a single public remote feed rather than broad job-market coverage; its public data is delayed and its terms do not authorize blindly forwarding listings to third-party submission systems. Brave broad discovery is a bounded, credentialed URL-search experiment with no claim of comprehensive coverage; it does not fetch result pages, scrape HTML, or resolve Ashby/Workday/custom/unknown references. Lever and Greenhouse are targeted only at explicitly configured employer SITE/board identifiers and are not global ATS searches. Local storage is a single-browser workspace and is not a durable server-side record. The static source, simulated executor, and in-memory tracker are test/demo infrastructure, not production integrations.
 
 The next practical step is to place a real private PDF/DOCX under the ignored resume directory, run the importer, review its non-sensitive counts, and perform one bounded upload check. Any automatic submission path requires deliberate server-side authority, external proof, and the current policy/provenance model. Do not add a scheduler or multi-agent runtime until a source and executor are production-authorized.
+
+## Standalone Google Sheets job queue
+
+The standalone queue uses the configured Google Sheet as the authoritative job
+intake and lifecycle store. Rows have stable `Job ID` values (never row-number
+identity) and statuses `Discovered`, `Ready`, `Claimed`, `Applying`, `Needs
+Input`, `Ready to Submit`, `Submitted`, `Confirmed`, `Expired`, `Skipped`, or
+`Failed`. Claims include a worker ID, lease expiry, and attempt ID and are
+verified by rereading the row; expired leases are reclaimable. Submission
+states require deterministic proof. With the explicit server-side
+automatic-submission gate enabled, the standalone processor may submit and
+write `Submitted`; the durable loopback-host fence is keyed by exact
+application/job identity and makes an ambiguous post-click outcome terminal.
+Google Sheets has no compare-and-swap fencing, so run exactly one active worker
+per queue with an explicit stable worker ID; the Sheet is the intake/lifecycle
+store, never the submission lock.
+
+`GoogleSheetsJobQueue` and `runStandaloneJobQueueTick` provide the queue and a
+single-worker polling tick. They use the existing public application-service
+boundary through an injected processor, so legacy tracker synchronization and
+browser execution remain available.
+
+The command is `npm run career-agent:queue`. Configure
+`ATELIER_GOOGLE_SHEET_ID`, `ATELIER_GOOGLE_SHEET_NAME`, and optionally
+`ATELIER_GOOGLE_SHEET_QUEUE_TAB` (default `Application Queue`); `--sheet-id`,
+`--sheet-name`, and `--tab` override them. `ATELIER_GOOGLE_SHEET_TAB` remains
+the source tracker tab and defaults to `Job Tracker`. Use `--schema-check` or
+`--dry-run` for a read-only validation, `--init` to create/validate only the
+dedicated queue tab, or `--poll` requires `--worker-id` (or
+`ATELIER_JOB_QUEUE_WORKER_ID`) and accepts `--lease-ms` for bounded polling.
+In poll mode the command initializes/validates the queue tab, imports eligible
+new rows from the tracker on every cycle, then processes the next rows in source
+order (up to `--max-jobs-per-poll`, default `2`). It stops at the first active,
+human-blocked, or ready-to-submit row. Use `--skip-tracker-import` only when
+intentionally running against a frozen queue.
+The runnable
+command currently uses a safe Needs Input processor until an application
+processor is injected; the default processor is a safe Needs Input no-op. The
+opt-in `--processor career-service` mode sends each claimed row through the
+existing application service and its dedicated execution-host lifecycle, and
+accepts `--execution-host-url` (or
+`ATELIER_EXECUTION_HOST_BASE_URL`) to select the existing execution host. Queue
+submission is accepted only when the processor returns deterministic proof; the
+execution host independently requires both campaign `automatic` authority and
+`ATELIER_EXECUTION_SUBMISSION_AUTHORITY=automatic`. Schema-check and dry-run
+never launch a browser or write lifecycle state.
+
+With `--processor career-service`, route discovery is enabled by default for
+unsupported listing URLs. It opens the public page in an ephemeral browser,
+requires one uniquely labelled Apply control, and validates the resulting ATS
+route before handing the job to the existing application service. Set
+`ATELIER_CAREER_AGENT_ROUTE_DISCOVERY_ENABLED=false` to disable this fallback.
+
+For a controlled one-shot run, pass `--job-id <exact stable Job ID>`; the queue
+claims only that row, rejects a missing or ineligible target, and never falls
+back to another row. Targeted runs cannot be combined with `--poll`.
+
+To preview promotion from `Job Tracker`, run `npm run career-agent:queue --
+--sheet-id ID --sheet-name NAME --tab "Application Queue" --import-tracker`
+(read-only by default). Use `--import-live` only for the explicit queue write;
+`--tracker-tab` overrides `Job Tracker`. Stable IDs use the tracker source ID
+when present, otherwise a deterministic URL-derived ID. Applied and terminal
+tracker rows are excluded. Active rows that were previously skipped only
+because their application destination was not verified are reopened once so
+the queue can surface the route blocker; they become `Needs Input` rather than
+silently disappearing. Policy exclusions, already-applied company/role
+duplicates, and genuinely closed rows remain terminal. Existing queue rows are
+not duplicated, and a queue blocker is not retried after its source tracker row
+becomes terminal.

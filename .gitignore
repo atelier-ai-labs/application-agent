@@ -12,3 +12,6 @@ application-agent/resumes.local/
 *.token.json
 *.service-account.json
 google-credentials*.json
+
+# Windows download metadata (WSL)
+*:Zone.Identifier

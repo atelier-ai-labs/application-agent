@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  greenhouseLocationOptionMatches,
   greenhouseOptionMatches,
 } from "../application-agent/automation/playwrightLeverBrowserSession";
 
@@ -199,6 +200,15 @@ function request(session: FakeSession): ApplicationExecutionRequest {
 describe("Greenhouse destination execution through the existing browser policy", () => {
   it("maps a grounded US location to the Greenhouse country option without guessing a candidate fact", async () => {
     expect(greenhouseOptionMatches("United States+1", null, "United States")).toBe(true);
+    expect(greenhouseOptionMatches("Male", "male", "Male")).toBe(true);
+    expect(greenhouseOptionMatches("I don't wish to answer", "prefer_not_to_say", "I don't wish to answer")).toBe(true);
+    expect(greenhouseOptionMatches("McDonald, Pennsylvania, United States", null, "McDonald")).toBe(false);
+    expect(greenhouseOptionMatches("North McDonald, Pennsylvania, United States", null, "McDonald")).toBe(false);
+    expect(greenhouseLocationOptionMatches("McDonald, PA, United States", "McDonald", "McDonald, Pennsylvania, United States")).toBe(true);
+    expect(greenhouseLocationOptionMatches("McDonald, TN, United States", "McDonald", "McDonald, Pennsylvania, United States")).toBe(false);
+    expect(greenhouseLocationOptionMatches("McDonald, Pennsylvania, United States", "McDonald", "McDonald, Pennsylvania, United States")).toBe(true);
+    expect(greenhouseLocationOptionMatches("McDonald, Pennsylvania, United States", "McDonald, Pennsylvania, USA", "McDonald, Pennsylvania, USA")).toBe(true);
+    expect(greenhouseLocationOptionMatches("McDonald, Tennessee, United States", "McDonald, Pennsylvania, USA", "McDonald, Pennsylvania, USA")).toBe(false);
     expect(greenhouseOptionMatches("United States+1", null, "Canada")).toBe(false);
 
     const country = new FakeField({ id: "country", label: "Country", type: "select", required: true });
@@ -459,6 +469,84 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(result.inspection?.evidence).toContain("submit:not-clicked");
   });
 
+  it("fills explicit work authorization and sponsorship facts for binary controls", async () => {
+    const profile = {
+      ...exampleCandidateProfile,
+      workAuthorization: {
+        status: "authorized",
+        countries: ["United States"],
+        sponsorshipRequired: false,
+      },
+    } satisfies CandidateProfile;
+    const authorization = new FakeField({
+      id: "authorized",
+      label: "Yes",
+      type: "select",
+      required: true,
+      options: [{ label: "Yes", value: "yes" }, { label: "No", value: "no" }],
+      questionDescriptor: {
+        promptText: "Are you legally authorized to work in the United States?",
+        sourceStrategy: "question_container",
+        confidence: "high",
+      },
+    });
+    const sponsorship = new FakeField({
+      id: "sponsorship",
+      label: "No",
+      type: "select",
+      required: true,
+      options: [{ label: "Yes", value: "yes" }, { label: "No", value: "no" }],
+      questionDescriptor: {
+        promptText: "Will you now or in the future require immigration sponsorship?",
+        sourceStrategy: "question_container",
+        confidence: "high",
+      },
+    });
+    const session = new FakeSession([authorization, sponsorship]);
+    const result = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      provider: "greenhouse",
+      now: () => capturedAt,
+    }).execute({ ...request(session), profile });
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(authorization.current).toBe("yes");
+    expect(sponsorship.current).toBe("no");
+    expect(session.submitChecks).toBe(1);
+  });
+
+  it("does not reuse United States authorization for a different country", async () => {
+    const profile = {
+      ...exampleCandidateProfile,
+      workAuthorization: {
+        status: "authorized",
+        countries: ["United States"],
+        sponsorshipRequired: false,
+      },
+    } satisfies CandidateProfile;
+    const authorization = new FakeField({
+      id: "authorized-canada",
+      label: "Yes",
+      type: "select",
+      required: true,
+      options: [{ label: "Yes", value: "yes" }, { label: "No", value: "no" }],
+      questionDescriptor: {
+        promptText: "Are you legally authorized to work in Canada?",
+        sourceStrategy: "question_container",
+        confidence: "high",
+      },
+    });
+    const session = new FakeSession([authorization]);
+    const result = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      provider: "greenhouse",
+      now: () => capturedAt,
+    }).execute({ ...request(session), profile });
+
+    expect(result.state).toBe("requires_human");
+    expect(authorization.selectCalls).toBe(0);
+  });
+
   it("stops at an active human-verification boundary before any field action", async () => {
     const firstName = new FakeField({ id: "first_name", label: "First Name", type: "text", required: true });
     const session = new FakeSession([firstName], {
@@ -489,5 +577,22 @@ describe("Greenhouse destination execution through the existing browser policy",
     const unverified = request(session);
     unverified.careerJob.destinationResolution = undefined;
     expect(executor.supports(unverified)).toBe(false);
+    const curated = request(session);
+    curated.careerJob.sourceId = "curated-live";
+    curated.careerJob.sourceRecordId = "greenhouse:kapitus:4390052009";
+    expect(executor.supports({
+      ...curated,
+      careerJob: {
+        ...curated.careerJob,
+        job: { ...curated.careerJob.job, sourceUrl: "https://job-boards.greenhouse.io/kapitus/jobs/4390052010" },
+      },
+    })).toBe(false);
+    expect(executor.supports({
+      ...curated,
+      careerJob: {
+        ...curated.careerJob,
+        job: { ...curated.careerJob.job, sourceUrl: "https://job-boards.greenhouse.io/other-board/jobs/4390052009" },
+      },
+    })).toBe(false);
   });
 });

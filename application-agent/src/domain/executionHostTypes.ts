@@ -68,6 +68,8 @@ export interface ExecutionHostSnapshot {
   telemetry?: BrowserExecutionTelemetry;
   inspection?: ExecutionInspection;
   result?: ExecutionHostResult;
+  /** Set only by the exact action-time manual-submit route after its durable fence. */
+  manualSubmission?: boolean;
   /** High-level server error only; no profile values or browser content. */
   error?: string;
 }

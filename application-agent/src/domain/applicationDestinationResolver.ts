@@ -28,6 +28,22 @@ export interface DestinationCandidate {
   evidence: readonly string[];
 }
 
+/** Narrow admission predicate for an explicitly supplied official-employer application. */
+export function isVerifiedOfficialEmployerCandidate(
+  candidate: DestinationCandidate | undefined,
+  input: { company: string; role: string; applicationUrl: string; knownListingUrl?: string },
+): boolean {
+  if (!candidate || candidate.source !== "official_employer" || candidate.pageKind !== "application" ||
+    !candidate.employerVerified || !candidate.roleVerified || !candidate.current) return false;
+  const candidateUrl = canonicalJobUrl(candidate.finalUrl ?? candidate.url);
+  const applicationUrl = canonicalJobUrl(input.applicationUrl);
+  if (!candidateUrl || !applicationUrl || candidateUrl !== applicationUrl || !isExternal(candidateUrl, input.knownListingUrl)) return false;
+  if (!sameCompany(candidate.company, input.company) || !sameRole(candidate.role, input.role)) return false;
+  const officialDomain = candidate.officialDomain?.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/$/, "");
+  if (!officialDomain || hostname(candidateUrl) !== officialDomain) return false;
+  return classifyJobUrl(candidateUrl).kind === "custom";
+}
+
 export interface ApplicationDestinationResolutionInput {
   company: string;
   role: string;
