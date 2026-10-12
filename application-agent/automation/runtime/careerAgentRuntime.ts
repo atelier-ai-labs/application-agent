@@ -46,7 +46,8 @@ import {
   ExecutionHostResponseError,
   type ExecutionHostClientOptions,
 } from "../../src/service/executionHostClient";
-import { createConfiguredGoogleSheetsJobTracker, type GoogleSheetsEnvironment } from "../googleSheetsJobTracker";
+import { createConfiguredGoogleSheetsJobTracker, createConfiguredGoogleSheetsTransport, type GoogleSheetsEnvironment } from "../googleSheetsJobTracker";
+import { GoogleSheetsJobQueue } from "../googleSheetsJobQueue";
 import { resolveExecutionHostConfig, resolveResumePathsFromEnv, type ExecutionHostEnvironment } from "../executionHost/config";
 import { SlackNotificationAdapter } from "../slack/slackNotificationAdapter";
 import { resolveSlackConfig, type SlackEnvironment } from "../slack/config";
@@ -78,6 +79,7 @@ export interface BackgroundCareerAgentEnvironment extends ExecutionHostEnvironme
   ATELIER_CAREER_AGENT_DESTINATION_EVIDENCE_FILE?: string;
   ATELIER_CAREER_AGENT_BROWSER_ENABLED?: string;
   ATELIER_CAREER_AGENT_CAMPAIGN_ID?: string;
+  ATELIER_GOOGLE_SHEET_QUEUE_TAB?: string;
   /** Optional one-shot server-local snapshot of the Daily job hunt report. */
   ATELIER_CAREER_AGENT_DAILY_HUNT_FILE?: string;
   /** Close the process after a one-shot Daily job hunt intake. */
@@ -132,6 +134,12 @@ export interface BackgroundCareerAgentRuntimeOptions {
   now?: () => string;
   createId?: CareerAgentServiceOptions["createId"];
   submissionAuthority?: DurableSubmissionAuthority;
+  /**
+   * Advances the matching Sheet queue row once an application is confirmed
+   * applied, so strict queue order does not stall on a submitted row.
+   * Returns a short status for the operator, or undefined when nothing matched.
+   */
+  confirmQueueRow?: (job: CareerJob) => Promise<string | undefined>;
 }
 
 export interface BackgroundCareerAgentRuntime {
@@ -185,6 +193,8 @@ export interface BackgroundCareerAgentRuntime {
    * never authorizes duplicate-risk retries.
    */
   submitFromHumanApproval(campaignId: string, jobId: string, applicationId: string, executionHostBaseUrl: string): Promise<{ submitted: boolean; message: string }>;
+  /** Marks the matching queue row Confirmed for an applied job; undefined when none matched. */
+  confirmQueueRowForAppliedJob(jobId: string): Promise<string | undefined>;
 }
 
 const HOST_ACTIVE_STATUSES: ReadonlySet<ExecutionHostStatus> = new Set(["starting", "inspecting", "executing", "resuming"]);
@@ -388,11 +398,13 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
   private readonly hostPollIntervalMs: number;
   private readonly hostPollTimeoutMs: number;
   private readonly submissionAuthority?: DurableSubmissionAuthority;
+  private readonly confirmQueueRow?: (job: CareerJob) => Promise<string | undefined>;
   private started = false;
   private stopped = false;
 
   constructor(options: BackgroundCareerAgentRuntimeOptions) {
     this.profile = options.profile;
+    this.confirmQueueRow = options.confirmQueueRow;
     const storage = options.stateStorage ?? new FileKeyValueStorage(options.stateFilePath ?? DEFAULT_CAREER_AGENT_STATE_FILE);
     this.stateStorage = storage;
     this.stateFilePath = storage instanceof FileKeyValueStorage ? storage.filePath : options.stateFilePath;
@@ -726,12 +738,19 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
       assertDuplicateRiskRetryAuthorization(this.getSubmissionFence(applicationId, jobId)?.state, undefined, undefined);
     }, () => this.submitPreparedApplication(campaignId, jobId));
     if (job.status === "applied") {
-      return { submitted: true, message: `Submitted: ${label}. The employer confirmation was verified and the tracker is being updated.` };
+      const queueNote = await this.confirmQueueRowForAppliedJob(jobId).catch(() => "the queue row could not be updated; confirm it in the Sheet");
+      return { submitted: true, message: `Submitted: ${label}. The employer confirmation was verified and the tracker is being updated.${queueNote ? ` Queue: ${queueNote}.` : ""}` };
     }
     return {
       submitted: false,
       message: `Not confirmed: ${label} (status ${job.status}). Check the employer site or your email before doing anything else; the agent will not retry automatically.`,
     };
+  }
+
+  async confirmQueueRowForAppliedJob(jobId: string): Promise<string | undefined> {
+    const job = this.service.getJob(jobId);
+    if (job.status !== "applied" || !(job.submissionProof || job.manualSubmissionConfirmation)) return undefined;
+    return this.confirmQueueRow?.(job);
   }
 
   async notifyQueueHandoff(notice: QueueHandoffNotice): Promise<boolean> {
@@ -992,8 +1011,35 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
         }
       : undefined,
   });
+  const queueSpreadsheetId = env.ATELIER_GOOGLE_SHEET_ID?.trim();
+  const queueSpreadsheetName = env.ATELIER_GOOGLE_SHEET_NAME?.trim();
+  const confirmQueueRow = queueSpreadsheetId && queueSpreadsheetName
+    ? async (job: CareerJob): Promise<string | undefined> => {
+        const queue = new GoogleSheetsJobQueue({
+          spreadsheetId: queueSpreadsheetId,
+          spreadsheetName: queueSpreadsheetName,
+          sheetTab: env.ATELIER_GOOGLE_SHEET_QUEUE_TAB?.trim() || "Application Queue",
+          timeoutMs: 10_000,
+        }, createConfiguredGoogleSheetsTransport(env as GoogleSheetsEnvironment));
+        const key = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        const matches = (await queue.list()).filter((row) =>
+          (row.status === "Ready to Submit" || row.status === "Submitted") &&
+          key(row.company) === key(job.job.company) && key(row.role) === key(job.job.title));
+        if (matches.length !== 1) return matches.length === 0 ? undefined : "more than one matching row; confirm it in the Sheet";
+        const proof = job.submissionProof;
+        const confirmedAt = proof?.submittedAt ?? job.manualSubmissionConfirmation?.confirmedAt ?? new Date().toISOString();
+        await queue.update(matches[0]!.jobId, {
+          status: "Confirmed",
+          ...(proof?.externalApplicationId ? { proofId: proof.externalApplicationId } : {}),
+          confirmationEvidence: `Applied ${confirmedAt} via ${proof?.provider ?? "manual confirmation"}${proof?.evidence ? ` (${proof.evidence})` : ""}`.slice(0, 300),
+          lastError: "",
+        });
+        return "marked Confirmed";
+      }
+    : undefined;
   const created = createBackgroundCareerAgentRuntime({
     profile,
+    ...(confirmQueueRow ? { confirmQueueRow } : {}),
     stateStorage: sharedStorage,
     careerRepository: sharedCareerRepository,
     applicationRepository: sharedApplicationRepository,

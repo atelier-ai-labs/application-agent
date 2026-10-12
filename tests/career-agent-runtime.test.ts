@@ -445,6 +445,40 @@ describe("background Career Agent runtime", () => {
     }
   });
 
+  it("advances the queue row only for an applied job with submission evidence", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "atelier-career-queue-confirm-"));
+    try {
+      const authority = new DurableSubmissionAuthority("runtime-worker", { stateFile: join(directory, "submission.json") });
+      const confirmed: string[] = [];
+      const runtime = new BackgroundCareerAgentRuntimeImpl({
+        ...runtimeOptions(join(directory, "state.json"), new ReadyExecutor(), new InMemoryNotificationAdapter()),
+        tracker: new InMemoryJobTracker(),
+        submissionAuthority: authority,
+        confirmQueueRow: async (job) => { confirmed.push(job.id); return "marked Confirmed"; },
+      });
+      const campaign = runtime.createCampaign({ ...campaignInput(), submissionPolicy: { authority: "automatic", requireExplicitApproval: false } });
+      runtime.service.activateCampaign(campaign.id);
+      const input = { ...listing().input, isExample: false, sourceUrl: "https://jobs.lever.co/acme/post-1", applicationUrl: "https://jobs.lever.co/acme/post-1/apply", rawText: "Acme\nData Platform Engineer\nRemote United States\n" };
+      await runtime.service.processCuratedJob(campaign.id, input);
+      const original = runtime.service.listJobs(campaign.id)[0]!;
+
+      await expect(runtime.confirmQueueRowForAppliedJob(original.id)).resolves.toBeUndefined();
+      expect(confirmed).toHaveLength(0);
+
+      const blocker = { id: "submission-confirmation", kind: "external_verification" as const, unit: "submission" as const, field: "submission-confirmation", questionProvenance: "POLICY" as const, question: "Verify whether the application was submitted", context: { jobId: original.id, applicationId: original.applicationId, company: original.job.company, role: original.job.title }, reason: "Unknown result", evidence: ["submit:clicked"], status: "open" as const, createdAt: capturedAt, resumeAfterHuman: false };
+      runtime.careerRepository.saveJob({ ...original, status: "needs_input", blockers: [blocker] });
+      const fence = authority.claim(original.applicationId!, original.id, capturedAt);
+      authority.beforeClick(fence, capturedAt);
+      authority.markUnknown(fence, capturedAt);
+      await runtime.confirmManualApplication(campaign.id, original.id);
+
+      await expect(runtime.confirmQueueRowForAppliedJob(original.id)).resolves.toBe("marked Confirmed");
+      expect(confirmed).toEqual([original.id]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("exposes unknown-fence manual confirmation through the production runtime boundary", async () => {
     const directory = mkdtempSync(join(tmpdir(), "atelier-career-manual-confirm-"));
     try {
