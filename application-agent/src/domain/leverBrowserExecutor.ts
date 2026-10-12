@@ -5,6 +5,7 @@ import type {
   ApplicationFieldDescriptor,
   ApplicationFieldOption,
   ApplicationFieldType,
+  ExecutionReviewEntry,
   BrowserHumanBoundary,
   BrowserCaptchaDiagnostics,
   BrowserExecutionBoundaryState,
@@ -62,6 +63,9 @@ import {
   isVerifiedGustoHostedUrl,
   isVerifiedGustoApplicationUrl,
   gustoPostingId,
+  isVerifiedVaiaApplicationUrl,
+  vaiaPostingId,
+  canonicalVaiaApplicationUrl,
   matlenPostingId,
   protagonaPostingId,
   youHiredPostingId,
@@ -72,7 +76,7 @@ import { monotonicNow } from "./executionTrace";
 export interface LeverBrowserExecutorOptions {
   sessionFactory: LeverBrowserSessionFactory;
   /** Defaults to Lever for backwards compatibility; auto accepts verified ATS destinations. */
-  provider?: "lever" | "greenhouse" | "rippling" | "ashby" | "workday" | "youhired" | "matlensilver" | "protagona" | "gusto" | "generic" | "auto";
+  provider?: "lever" | "greenhouse" | "rippling" | "ashby" | "workday" | "youhired" | "matlensilver" | "protagona" | "gusto" | "vaia" | "generic" | "auto";
   /** Local/private resume artifacts keyed by the selected family. Never persisted by the domain. */
   resumePaths?: Partial<Record<ResumeFamilyId, string>>;
   /** The concrete host may check a path before the browser attempts upload. */
@@ -90,7 +94,7 @@ interface SessionState {
 }
 
 interface TrustedTarget {
-  provider: "lever" | "greenhouse" | "rippling" | "ashby" | "workday" | "youhired" | "matlensilver" | "protagona" | "gusto" | "generic";
+  provider: "lever" | "greenhouse" | "rippling" | "ashby" | "workday" | "youhired" | "matlensilver" | "protagona" | "gusto" | "vaia" | "generic";
   site: string;
   postingId?: string;
   applicationUrl: string;
@@ -616,7 +620,11 @@ function descriptor(field: LeverBrowserField): ApplicationFieldDescriptor {
     label,
     type: field.type,
     required: field.required,
-    ...(field.options && field.options.length > 0 ? { options: field.options.map((option) => ({ ...option })) } : {}),
+    // An empty-value option (Vaia's "Prefer not to say") is the select's
+    // unselected state; it is not a choice the executor can make.
+    ...(field.options?.some((option) => option.label.trim() && option.value.trim())
+      ? { options: field.options.filter((option) => option.label.trim() && option.value.trim()).map((option) => ({ ...option })) }
+      : {}),
     ...(field.section ? { section: field.section } : {}),
     ...(field.sourceSelector ? { sourceSelector: field.sourceSelector } : {}),
     ...(field.questionDescriptor ? {
@@ -741,6 +749,7 @@ function inspection(
     unresolvedFields?: readonly string[];
     blockers?: readonly CareerBlockerDraft[];
     resumeUsed?: string;
+    reviewSummary?: readonly ExecutionReviewEntry[];
     evidence?: readonly string[];
     durationMs?: number;
     domInspectionCount?: number;
@@ -757,6 +766,7 @@ function inspection(
     unresolvedFields: values.unresolvedFields ?? [],
     blockers: values.blockers ?? [],
     ...(values.resumeUsed ? { resumeUsed: values.resumeUsed } : {}),
+    ...(values.reviewSummary && values.reviewSummary.length > 0 ? { reviewSummary: values.reviewSummary } : {}),
     evidence: values.evidence ?? [],
     ...(values.durationMs !== undefined ? { durationMs: Math.max(0, Math.round(values.durationMs)) } : {}),
     ...(values.domInspectionCount !== undefined ? { domInspectionCount: Math.max(0, Math.round(values.domInspectionCount)) } : {}),
@@ -1318,11 +1328,20 @@ function profileValueForField(
         ? state
         : US_STATE_ABBREVIATIONS[normalizedState] ?? state;
     }
-    if (hasPhrase(text, /\bcity\b/)) return groundedCityFromLocation(location);
-    if (hasPhrase(text, /\bpostal\b|\bzip\b/)) {
+    // Hosts that label controls through aria-labelledby (Vaia: id "f-plz",
+    // placeholder "10001", accessible name "ZIP code") expose the component
+    // only in the inspected prompt, so match against both.
+    // Section titles ("ADDRESS") are deliberately excluded: they describe the
+    // group, not this control.
+    const ownPrompt = (field as { questionDescriptor?: { accessibleName?: string; promptText?: string } }).questionDescriptor;
+    const componentText = normalized([text, ownPrompt?.accessibleName, ownPrompt?.promptText].filter(Boolean).join(" "));
+    if (hasPhrase(componentText, /\bcity\b/)) return groundedCityFromLocation(location);
+    if (hasPhrase(componentText, /\bpostal\b|\bzip\b/)) {
       return profile.identity.postalCode ?? groundedPostalFromLocation(location);
     }
-    if (hasPhrase(text, /\baddress\b|\bstreet\b/)) return profile.identity.streetAddress ?? undefined;
+    if (hasPhrase(componentText, /\baddress\b|\bstreet\b/)) return profile.identity.streetAddress ?? undefined;
+    // A full location string is never a city, ZIP, or street component.
+    if (hasPhrase(componentText, /\bcity\b|\bpostal\b|\bzip\b|\baddress\b|\bstreet\b/)) return undefined;
     return location ?? undefined;
   }
   if (factField === "desired_work_location") return profile.workPreferences.preferredWorkLocation ?? undefined;
@@ -1722,6 +1741,7 @@ function providerLabel(provider: TrustedTarget["provider"]): string {
   if (provider === "matlensilver") return "Matlen Silver";
   if (provider === "protagona") return "Protagona";
   if (provider === "gusto") return "Gusto";
+  if (provider === "vaia") return "Vaia";
   return "Lever";
 }
 
@@ -1735,6 +1755,7 @@ function executorEvidenceLabel(provider: TrustedTarget["provider"]): string {
   if (provider === "matlensilver") return "matlen-browser";
   if (provider === "protagona") return "protagona-browser";
   if (provider === "gusto") return "gusto-browser";
+  if (provider === "vaia") return "vaia-browser";
   return "lever-browser";
 }
 
@@ -1780,6 +1801,10 @@ function sameApplicationPage(value: string, target: TrustedTarget): boolean {
       return url.protocol === "https:" && isVerifiedGustoApplicationUrl(url.toString()) &&
         gustoPostingId(url.toString()) === target.postingId;
     }
+    if (target.provider === "vaia") {
+      return url.protocol === "https:" && isVerifiedVaiaApplicationUrl(url.toString()) &&
+        vaiaPostingId(url.toString()) === target.postingId;
+    }
     return url.protocol === "https:" && isVerifiedLeverApplicationUrl(url.toString(), target.site, target.postingId ?? "");
   } catch {
     return false;
@@ -1799,6 +1824,13 @@ export function isTrustedAutomaticConfirmation(
     observed = new URL(result.confirmationUrl);
   } catch {
     return false;
+  }
+  // Vaia renders its Done step in place on the same apply-form URL, so the
+  // session proves it from the verified route plus the rendered Done state.
+  if (target.provider === "vaia") {
+    return observed.origin === expected.origin && result.confirmationOrigin === observed.origin &&
+      vaiaPostingId(observed.toString()) === target.postingId &&
+      result.evidence.includes("submit:clicked; confirmation:vaia-done");
   }
   if (observed.origin !== expected.origin || result.confirmationOrigin !== observed.origin || !/confirmation|success|thank[-_]?you/i.test(observed.pathname)) return false;
   const decodedSegments = observed.pathname.split("/").filter(Boolean).map((segment) => {
@@ -1849,6 +1881,7 @@ function trustedTarget(
       isVerifiedMatlenApplicationUrl(posting.applicationUrl) ? "matlensilver" :
       isVerifiedProtagonaApplicationUrl(posting.applicationUrl) ? "protagona" :
       isVerifiedGustoApplicationUrl(posting.applicationUrl) ? "gusto" :
+      isVerifiedVaiaApplicationUrl(posting.applicationUrl) ? "vaia" :
       job.destinationResolution?.status === "resolved" && job.destinationResolution.actionable === true ? "generic" : undefined
     : configuredProvider;
 
@@ -2134,6 +2167,32 @@ function trustedTarget(
     };
   }
 
+  if (provider === "vaia") {
+    const postingId = vaiaPostingId(posting.applicationUrl);
+    if (!postingId || posting.sourceUrl !== posting.applicationUrl) {
+      return { reason: "The Vaia source and application URL must be the same verified apply-form route." };
+    }
+    const resolution = job.destinationResolution;
+    const destinationMatches = resolution?.status === "resolved" &&
+      resolution.actionable === true &&
+      resolution.ats === "Custom" &&
+      resolution.destinationUrl === posting.applicationUrl;
+    const directCuratedSource = sourceId === "curated-live" && job.sourceRecordId === `vaia:${postingId}`;
+    if (!destinationMatches && !directCuratedSource) {
+      return { reason: "The Vaia destination is not independently verified for this posting." };
+    }
+    return {
+      target: {
+        provider,
+        site: "partner.studysmarter.de",
+        postingId,
+        // Vaia redirects /apply-form (no slash) to a blank form without the
+        // job_id, so always open the slash form with only the identity params.
+        applicationUrl: canonicalVaiaApplicationUrl(posting.applicationUrl) ?? posting.applicationUrl,
+      },
+    };
+  }
+
   return { reason: "No supported browser executor is configured for this application destination." };
 }
 
@@ -2158,6 +2217,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
               options.provider === "matlensilver" ? "matlen-browser-executor" :
               options.provider === "protagona" ? "protagona-browser-executor" :
                   options.provider === "gusto" ? "gusto-browser-executor" :
+                  options.provider === "vaia" ? "vaia-browser-executor" :
                     options.provider === "generic" ? "page-first-browser-executor" : "lever-browser-executor";
   }
 
@@ -2578,6 +2638,23 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       };
     }
 
+    // Read back before any provider step navigation hides the filled controls.
+    const reviewSummary = await reviewSummaryFor(observed.fields, new Set(fieldsFilled));
+    if (observed.target.provider === "vaia") {
+      const advanced = await (observed.session.advanceVaiaToReview
+        ? observed.session.advanceVaiaToReview().then(() => undefined, (error: unknown) => safeErrorMessage(error, "Vaia did not accept the details step."))
+        : Promise.resolve("This browser session cannot advance the Vaia details step."));
+      if (advanced) {
+        const blocker = boundaryBlocker({
+          kind: "external_verification",
+          question: "Review the Vaia details step in the open browser",
+          reason: `${advanced} Nothing was submitted.`,
+          evidence: ["vaia:details-not-advanced", "submit:not-clicked"],
+        }, executorEvidenceLabel(observed.target.provider));
+        return unsupportedResult("Vaia details step was not advanced to review", startedAt, this.now(), blocker, observed.inspection);
+      }
+    }
+
     if (!(await observed.session.hasSubmitControl())) {
       const blocker = formBlocker({
         id: "submit-control",
@@ -2619,6 +2696,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       fieldsFilled: [...fieldsFilled],
       unresolvedFields: [...unresolvedFields],
       ...(resumeUsed ? { resumeUsed } : {}),
+      ...(reviewSummary.length > 0 ? { reviewSummary } : {}),
       ...inspectionTelemetry(observed.inspection),
       evidence: submissionCapable
         ? [...evidence, "navigation:verified", "submit-control:detected", "submission:automatic-enabled"]
@@ -2749,6 +2827,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
     if (!state.navigated) {
       await state.session.navigate(target.applicationUrl);
       state.navigated = true;
+      if (target.provider === "vaia") await this.prepareVaiaWizard(request, state.session);
     }
     const currentUrl = await state.session.currentUrl();
     if (!sameApplicationPage(currentUrl, target)) {
@@ -2764,6 +2843,18 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       });
     }
     return state;
+  }
+
+  /** Runs Vaia's email and résumé intro steps with grounded profile data only. */
+  private async prepareVaiaWizard(request: ApplicationExecutionRequest, session: LeverBrowserSession): Promise<void> {
+    const email = request.profile?.identity.email?.trim();
+    const familyId = request.application.resume?.familyId;
+    const resumePath = familyId ? this.options.resumePaths?.[familyId] : undefined;
+    const failure = (message: string) => new BrowserExecutionDiagnosticError({ stage: "navigation", reasonCode: "unsupported_page", message });
+    if (!session.prepareVaiaApplication) throw failure("This browser session cannot run the Vaia application intro steps.");
+    if (!email) throw failure("The candidate profile has no email address for the Vaia email step.");
+    if (!resumePath) throw failure("No résumé file is configured for the selected résumé family; the Vaia upload step was not started.");
+    await session.prepareVaiaApplication({ email, resumePath, company: request.careerJob.job.company, role: request.careerJob.job.title });
   }
 
   private async inspectForm(
@@ -2800,6 +2891,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
                   this.options.provider === "matlensilver" ? "matlensilver" :
                     this.options.provider === "protagona" ? "protagona" :
                       this.options.provider === "gusto" ? "gusto" :
+                      this.options.provider === "vaia" ? "vaia" :
                         this.options.provider === "generic" ? "generic" : "lever",
           site: "unknown",
           applicationUrl: "",
@@ -2860,7 +2952,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       const commonEvidence = [
         `executor:${executorEvidenceLabel(target.provider)}`,
         `source:live/${target.provider}`,
-        `${target.provider === "greenhouse" ? "greenhouse-board" : target.provider === "rippling" ? "rippling-org" : target.provider === "ashby" ? "ashby-org" : target.provider === "workday" ? "workday-tenant" : target.provider === "youhired" ? "youhired-host" : target.provider === "matlensilver" ? "matlensilver-host" : target.provider === "protagona" ? "protagona-host" : target.provider === "gusto" ? "gusto-host" : "lever-site"}:${target.site}`,
+        `${target.provider === "greenhouse" ? "greenhouse-board" : target.provider === "rippling" ? "rippling-org" : target.provider === "ashby" ? "ashby-org" : target.provider === "workday" ? "workday-tenant" : target.provider === "youhired" ? "youhired-host" : target.provider === "matlensilver" ? "matlensilver-host" : target.provider === "protagona" ? "protagona-host" : target.provider === "gusto" ? "gusto-host" : target.provider === "vaia" ? "vaia-host" : "lever-site"}:${target.site}`,
         ...(target.postingId ? [`provider-job-id:${target.postingId}`] : []),
         "navigation:verified",
       ];
@@ -2988,6 +3080,27 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       });
     }
   }
+}
+
+/** Bounded read-back of filled controls; values come from the live page, not the plan. */
+async function reviewSummaryFor(fields: readonly LeverBrowserField[], filled: ReadonlySet<string>): Promise<ExecutionReviewEntry[]> {
+  const entries: ExecutionReviewEntry[] = [];
+  for (const field of fields) {
+    if (!filled.has(field.id) || entries.length >= 40) continue;
+    const rawLabel = (field.questionDescriptor?.accessibleName || field.label).replace(/\s+/g, " ").replace(/\*+$/, "").trim().slice(0, 80);
+    // Placeholder-only labels such as "(555) 123-4567" carry no field name.
+    const label = /[a-z]{2}/i.test(rawLabel) ? rawLabel
+      : field.type === "tel" ? "Phone" : field.type === "email" ? "Email" : field.id;
+    if (!label) continue;
+    if (field.type === "file") {
+      entries.push({ label, value: "file attached" });
+      continue;
+    }
+    const raw = await field.readValue?.().catch(() => null);
+    const value = typeof raw === "boolean" ? (raw ? "checked" : "unchecked") : (raw ?? "").replace(/\s+/g, " ").trim().slice(0, 120);
+    entries.push({ label, value });
+  }
+  return entries;
 }
 
 function dedupeBlockers(blockers: readonly CareerBlockerDraft[]): CareerBlockerDraft[] {

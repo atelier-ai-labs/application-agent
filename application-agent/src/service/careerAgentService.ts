@@ -100,6 +100,8 @@ import {
   isVerifiedGustoApplicationUrl,
   isVerifiedGustoHostedUrl,
   gustoPostingId,
+  isVerifiedVaiaApplicationUrl,
+  vaiaPostingId,
   isVerifiedWorkdayApplicationUrl,
   isVerifiedWorkdayHostedUrl,
   workdayPostingId,
@@ -906,6 +908,7 @@ export class CareerAgentService {
     const isMatlen = classification.kind === "custom" && isVerifiedMatlenApplicationUrl(applicationUrl);
     const isProtagona = classification.kind === "custom" && isVerifiedProtagonaApplicationUrl(applicationUrl);
     const isGusto = classification.kind === "custom" && isVerifiedGustoApplicationUrl(applicationUrl);
+    const isVaia = classification.kind === "custom" && isVerifiedVaiaApplicationUrl(applicationUrl);
     const isGreenhouse = classification.kind === "greenhouse" &&
       Boolean(classification.siteIdentifier) &&
       Boolean(classification.postingIdentifier) &&
@@ -929,6 +932,10 @@ export class CareerAgentService {
     } else if (isGusto) {
       if (!gustoPostingId(applicationUrl)) {
         throw new Error("The selected Gusto application URL is missing its verified job identity.");
+      }
+    } else if (isVaia) {
+      if (!vaiaPostingId(applicationUrl)) {
+        throw new Error("The selected Vaia application URL is missing its verified job identity.");
       }
     } else if (isWorkday) {
       if (!classification.siteIdentifier || !workdayPostingId(applicationUrl)) {
@@ -976,6 +983,9 @@ export class CareerAgentService {
     if (isProtagona && (sourceUrl !== applicationUrl || protagonaPostingId(applicationUrl) === undefined)) {
       throw new Error("The selected Protagona posting must retain the same verified job URL as its application destination.");
     }
+    if (isVaia && (sourceUrl !== applicationUrl || vaiaPostingId(applicationUrl) === undefined)) {
+      throw new Error("The selected Vaia posting must retain the same verified apply-form URL as its application destination.");
+    }
     if (isGusto && (!isVerifiedGustoHostedUrl(sourceUrl) || gustoPostingId(sourceUrl) !== gustoPostingId(applicationUrl))) {
       throw new Error("The selected Gusto posting and application URLs do not match the same verified posting.");
     }
@@ -1001,6 +1011,8 @@ export class CareerAgentService {
               ? `matlensilver:${matlenPostingId(applicationUrl)}`
               : isProtagona
                 ? `protagona:${protagonaPostingId(applicationUrl)}`
+                : isVaia
+                ? `vaia:${vaiaPostingId(applicationUrl)}`
                   : isWorkday
                   ? `workday:${workdayPostingId(applicationUrl)}`
                   : isGreenhouse
@@ -3575,7 +3587,9 @@ export class CareerAgentService {
                 ? "workday-browser-executor"
                 : job.sourceRecordId?.startsWith("gusto:")
                   ? "gusto-browser-executor"
-                  : "lever-browser-executor";
+                  : job.sourceRecordId?.startsWith("vaia:")
+                    ? "vaia-browser-executor"
+                    : "lever-browser-executor";
       this.appendEvent(campaign.id, "application.execution_host_started", {
         ...careerEventMetadata(marked),
         executionId: snapshot.id,
@@ -4487,6 +4501,11 @@ export class CareerAgentService {
       override.result !== undefined
         ? override.manualSubmission !== true && (override.result.state !== "submitted" || campaign.submissionPolicy.authority !== "automatic")
         : this.executor.executionMode?.(executionRequest) === "preparation_only";
+    // A submit from the host's explicit manual lane was approved by the human
+    // at click time, so the campaign's automatic-submission authority does not
+    // gate it. Proof is still checked below like any other submission.
+    const humanApprovedSubmission = override.result?.state === "submitted" && override.manualSubmission === true;
+    const policyAllowsPreparedOnly = preparationOnly || humanApprovedSubmission;
     const gate = trace
       ? trace.measureSync(
           `execution.policy-check.${careerJob.id}`,
@@ -4498,7 +4517,7 @@ export class CareerAgentService {
               campaign.submissionPolicy,
               campaign,
               resolvedKinds,
-              preparationOnly,
+              policyAllowsPreparedOnly,
             ),
           {
             parentNodeId,
@@ -4517,7 +4536,7 @@ export class CareerAgentService {
           campaign.submissionPolicy,
           campaign,
           resolvedKinds,
-          preparationOnly,
+          policyAllowsPreparedOnly,
         );
 
     if (!gate.allowed) {

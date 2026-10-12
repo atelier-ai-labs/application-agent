@@ -4,18 +4,26 @@ const runtimeLifecycle = vi.hoisted(() => ({
   start: vi.fn(async () => undefined),
   stop: vi.fn(async () => undefined),
   processCuratedJob: vi.fn(async () => ({ status: "held" as const, decisionReason: "Needs review." })),
+  processCuratedJobThroughHost: vi.fn(async () => ({ status: "held" as const, decisionReason: "Needs review." })),
 }));
-vi.mock("../application-agent/automation/runtime/careerAgentRuntime", () => ({
-  createConfiguredBackgroundCareerAgentRuntime: vi.fn(() => ({
-    start: runtimeLifecycle.start,
-    stop: runtimeLifecycle.stop,
-    processCuratedJob: runtimeLifecycle.processCuratedJob,
-  })),
-}));
+vi.mock("../application-agent/automation/runtime/careerAgentRuntime", () => {
+  // A class instance like the real runtime: its methods live on the
+  // prototype, so the queue must bind them rather than object-spread them.
+  class MockRuntime {
+    start() { return runtimeLifecycle.start(); }
+    stop() { return runtimeLifecycle.stop(); }
+    processCuratedJob() { return runtimeLifecycle.processCuratedJob(); }
+    processCuratedJobThroughHost() { return runtimeLifecycle.processCuratedJobThroughHost(); }
+    getApplication() { return {}; }
+    async notifyQueueHandoff() { return false; }
+  }
+  return { createConfiguredBackgroundCareerAgentRuntime: vi.fn(() => new MockRuntime()) };
+});
 import { runStandaloneJobQueueCommand } from "../application-agent/automation/standaloneJobQueue";
 import { createCareerServiceQueueProcessor, deriveQueueApplicationUrl, deriveQueuePostingUrl, queueDestinationPreflightReason, runStandaloneJobQueuePollTick, runStandaloneJobQueueTick } from "../application-agent/automation/standaloneJobQueueWorker";
-import { deduplicateGroundedLocationOptions, deduplicateStaticOptions, groundedLocationRepresentative, isApplicationDiscoveryControlLabel } from "../application-agent/automation/playwrightLeverBrowserSession";
+import { deduplicateGroundedLocationOptions, deduplicateStaticOptions, groundedLocationRepresentative, isAccountGatedApplyLabel, isApplicationDiscoveryControlLabel } from "../application-agent/automation/playwrightLeverBrowserSession";
 import { GoogleSheetsJobQueue } from "../application-agent/automation/googleSheetsJobQueue";
+import { isVerifiedVaiaApplicationUrl, vaiaPostingId } from "../application-agent/src/domain/jobUrlClassifier";
 import type { GoogleSheetsApiTransport, GoogleSheetMetadata, GoogleSheetValueRange } from "../application-agent/automation/googleSheetsJobTracker";
 import { DurableSubmissionAuthority } from "../application-agent/automation/executionHost/submissionAuthority";
 import { join } from "node:path";
@@ -119,11 +127,87 @@ describe("standalone queue command", () => {
     expect(processCuratedJob).not.toHaveBeenCalled();
   });
 
+  it("accepts the Vaia apply form and strips its session tracking", () => {
+    const jobLink = "https://partner.studysmarter.de/apply-form/?job_id=113902352&domain=us&lang=en-US&company=Changeis%2C%20Inc.&title=Junior%20Cloud%20Engineer&amp_session_id=1791813057135&deviceId=056e977f-16e0-4ea7-aedf-84234fe0f066";
+    expect(queueDestinationPreflightReason({ jobLink })).toBeUndefined();
+    const applicationUrl = deriveQueueApplicationUrl(jobLink);
+    expect(applicationUrl).toBe(deriveQueuePostingUrl(jobLink));
+    expect(applicationUrl).toContain("job_id=113902352");
+    expect(applicationUrl).not.toContain("amp_session_id");
+    expect(applicationUrl).not.toContain("deviceId");
+    expect(isVerifiedVaiaApplicationUrl(applicationUrl)).toBe(true);
+    expect(vaiaPostingId(applicationUrl)).toBe("113902352");
+  });
+
+  it("rejects look-alike Vaia routes", () => {
+    expect(isVerifiedVaiaApplicationUrl("http://partner.studysmarter.de/apply-form/?job_id=1")).toBe(false);
+    expect(isVerifiedVaiaApplicationUrl("https://partner.studysmarter.de.evil.example/apply-form/?job_id=1")).toBe(false);
+    expect(isVerifiedVaiaApplicationUrl("https://partner.studysmarter.de/other/?job_id=1")).toBe(false);
+    expect(isVerifiedVaiaApplicationUrl("https://partner.studysmarter.de/apply-form/?job_id=abc")).toBe(false);
+    expect(queueDestinationPreflightReason({ jobLink: "https://partner.studysmarter.de/apply-form/" })).toMatch(/Needs review/);
+  });
+
   it("recognizes only explicit application control labels", () => {
     expect(isApplicationDiscoveryControlLabel("Apply Now")).toBe(true);
     expect(isApplicationDiscoveryControlLabel("Apply for this job")).toBe(true);
     expect(isApplicationDiscoveryControlLabel("Apply filters")).toBe(false);
     expect(isApplicationDiscoveryControlLabel("Apply coupon")).toBe(false);
+  });
+
+  it("recognizes decorated aggregator Apply labels without widening to unrelated text", () => {
+    expect(isApplicationDiscoveryControlLabel("Apply for this role →")).toBe(true);
+    expect(isApplicationDiscoveryControlLabel("APPLY ON JOB-BOARDS.GREENHOUSE.IO →")).toBe(true);
+    expect(isApplicationDiscoveryControlLabel("Apply on original site ↗")).toBe(true);
+    expect(isApplicationDiscoveryControlLabel("Auto Apply terms")).toBe(false);
+    expect(isApplicationDiscoveryControlLabel("Apply on LinkedIn")).toBe(false);
+    expect(isApplicationDiscoveryControlLabel("Applications Analyst Joveo Inc")).toBe(false);
+  });
+
+  it("recognizes account-gated Apply controls separately from Apply links", () => {
+    expect(isAccountGatedApplyLabel("LOG IN TO APPLY")).toBe(true);
+    expect(isAccountGatedApplyLabel("Sign up to apply")).toBe(true);
+    expect(isAccountGatedApplyLabel("Apply now")).toBe(false);
+    expect(isApplicationDiscoveryControlLabel("SIGN UP TO APPLY")).toBe(false);
+  });
+
+  it("sends a Slack link when the Apply link leads to an unsupported site", async () => {
+    const processCuratedJob = vi.fn();
+    const notifyQueueHandoff = vi.fn(async () => true);
+    const processor = createCareerServiceQueueProcessor({
+      processCuratedJob,
+      notifyQueueHandoff,
+      discoverApplicationRoute: async () => ({
+        status: "resolved" as const,
+        applicationUrl: "https://partner.example/applynow?job=1",
+        evidence: ["destination-host:partner.example"],
+      }),
+    }, "campaign-1");
+    const result = await processor.process({
+      jobId: "job-aggregator", company: "Acme", role: "Engineer", jobLink: "https://www.indeed.com/viewjob?jk=abc123", status: "Ready", workerId: "worker-1", leaseUntil: new Date(Date.now() + 60_000).toISOString(), attemptId: "attempt-1",
+    });
+    expect(result.status).toBe("Needs Input");
+    expect(result.error).toContain("queue-destination-input");
+    expect(result.error).toContain("Link sent to Slack.");
+    expect(notifyQueueHandoff).toHaveBeenCalledWith(expect.objectContaining({ jobId: "job-aggregator", company: "Acme", role: "Engineer", url: "https://partner.example/applynow?job=1" }));
+    expect(processCuratedJob).not.toHaveBeenCalled();
+  });
+
+  it("sends the listing link for login walls and keeps Needs Input when Slack fails", async () => {
+    const processor = createCareerServiceQueueProcessor({
+      processCuratedJob: vi.fn(),
+      notifyQueueHandoff: vi.fn(async () => { throw new Error("slack down"); }),
+      discoverApplicationRoute: async () => ({
+        status: "blocked" as const,
+        reason: "The listing site requires you to log in or create an account before applying.",
+        evidence: ["listing-boundary:account_gated_apply", "apply:not-clicked"],
+      }),
+    }, "campaign-1");
+    const result = await processor.process({
+      jobId: "job-builtin", company: "Acme", role: "Engineer", jobLink: "https://builtin.com/job/engineer/1", status: "Ready", workerId: "worker-1", leaseUntil: new Date(Date.now() + 60_000).toISOString(), attemptId: "attempt-1",
+    });
+    expect(result.status).toBe("Needs Input");
+    expect(result.error).toContain("log in or create an account");
+    expect(result.error).not.toContain("Link sent to Slack.");
   });
 
   it("derives the verified Ashby posting URL from a queued application URL", () => {
@@ -227,6 +311,7 @@ describe("standalone queue command", () => {
     expect(runtimeLifecycle.start).toHaveBeenCalledTimes(1);
     expect(runtimeLifecycle.stop).toHaveBeenCalledTimes(1);
     expect(runtimeLifecycle.start.mock.invocationCallOrder[0]).toBeLessThan(runtimeLifecycle.stop.mock.invocationCallOrder[0]!);
+    expect(runtimeLifecycle.processCuratedJobThroughHost).toHaveBeenCalledTimes(1);
   });
 
   it("contains a tick failure for pollers without weakening the one-shot tick", async () => {

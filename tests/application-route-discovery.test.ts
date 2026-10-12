@@ -1,6 +1,7 @@
 /** @vitest-environment node */
 import { describe, expect, it, vi } from "vitest";
 import { PlaywrightApplicationRouteDiscoverer } from "../application-agent/automation/applicationRouteDiscovery";
+import { applicationDiscoveryControlKey } from "../application-agent/automation/playwrightLeverBrowserSession";
 import type { LeverBrowserSession, LeverBrowserSessionFactory } from "../application-agent/src/domain/executor";
 
 function session(overrides: Partial<LeverBrowserSession> = {}): LeverBrowserSession {
@@ -55,5 +56,33 @@ describe("bounded application route discovery", () => {
     expect(result).toMatchObject({ status: "blocked", evidence: ["posting:closed", "apply:not-clicked"] });
     expect(browserSession.discoverApplicationRoute).not.toHaveBeenCalled();
     expect(browserSession.close).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("applicationDiscoveryControlKey", () => {
+  const page = "https://gainam.com/react-typescript-front-end-engineer-remote-us";
+
+  it("treats differently labelled links to the same destination as one control", () => {
+    const href = "https://gainam.com/applynow?job=react-typescript-front-end-engineer-remote-us";
+    expect(applicationDiscoveryControlKey("Apply for this role", href, undefined, page))
+      .toBe(applicationDiscoveryControlKey("Apply now", `${href}#form`, undefined, page));
+  });
+
+  it("keeps links to different destinations distinct", () => {
+    expect(applicationDiscoveryControlKey("Apply now", "https://gainam.com/applynow?job=a", undefined, page))
+      .not.toBe(applicationDiscoveryControlKey("Apply now", "https://gainam.com/applynow?job=b", undefined, page));
+  });
+
+  it("keeps a new-tab link distinct from a same-tab link", () => {
+    const href = "https://gainam.com/applynow?job=a";
+    expect(applicationDiscoveryControlKey("Apply now", href, "_blank", page))
+      .not.toBe(applicationDiscoveryControlKey("Apply now", href, undefined, page));
+  });
+
+  it("still distinguishes buttons and same-page fragment links by label", () => {
+    expect(applicationDiscoveryControlKey("Apply", undefined, undefined, page))
+      .not.toBe(applicationDiscoveryControlKey("Apply now", undefined, undefined, page));
+    expect(applicationDiscoveryControlKey("Apply", `${page}#apply`, undefined, page))
+      .not.toBe(applicationDiscoveryControlKey("Apply now", `${page}#apply`, undefined, page));
   });
 });

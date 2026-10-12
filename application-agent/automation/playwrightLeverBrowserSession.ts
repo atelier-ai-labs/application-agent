@@ -32,6 +32,7 @@ import type { RipplingPromptCandidate } from "./ripplingDomHelpers";
 import {
   isVerifiedMatlenApplicationUrl,
   isVerifiedProtagonaApplicationUrl,
+  isVerifiedVaiaApplicationUrl,
   isVerifiedRipplingApplicationUrl,
   isVerifiedAshbyApplicationUrl,
   isVerifiedAshbyHostedUrl,
@@ -362,9 +363,36 @@ function visibleFormControl(locator: Locator): Promise<boolean> {
  * filters" and "Apply coupon".
  */
 export function isApplicationDiscoveryControlLabel(value: string): boolean {
-  const normalized = value.replace(/\s+/g, " ").trim().toLowerCase();
+  // Aggregators decorate the control with trailing arrows ("Apply for this role →").
+  const normalized = value.replace(/\s+/g, " ").trim().toLowerCase().replace(/[\s→↗➔➜›»>]+$/u, "");
   if (!normalized || normalized.length > 96) return false;
-  return /^(?:apply|apply now|apply online|apply today|apply for (?:this )?(?:job|role|position)|apply on (?:the )?(?:company|employer) (?:website|site)|start (?:an )?application|begin (?:an )?application)$/.test(normalized);
+  return /^(?:apply|apply now|apply online|apply today|apply for (?:this )?(?:job|role|position)|apply on (?:the )?(?:company|employer|original) (?:website|site)|apply on [a-z0-9-]+(?:\.[a-z0-9-]+)+|start (?:an )?application|begin (?:an )?application)$/.test(normalized);
+}
+
+/** Aggregator controls that gate applying behind the aggregator's own account. */
+export function isAccountGatedApplyLabel(value: string): boolean {
+  const normalized = value.replace(/\s+/g, " ").trim().toLowerCase().replace(/[\s→↗➔➜›»>]+$/u, "");
+  return /^(?:log ?in|sign ?in|sign ?up|register|create (?:an )?account|join)(?: now)? to apply$/.test(normalized);
+}
+
+/** Listings often repeat one Apply link under different labels ("Apply for
+ * this role" / "Apply now"). Links that navigate to the same off-page
+ * destination are one control; buttons and same-page fragment links have no
+ * comparable destination, so their label still distinguishes them. */
+export function applicationDiscoveryControlKey(label: string, href: string | undefined, target: string | undefined, pageUrl: string): string {
+  let destination: string | undefined;
+  try {
+    const parsed = href ? new URL(href, pageUrl) : undefined;
+    const page = new URL(pageUrl);
+    if (parsed) parsed.hash = "";
+    page.hash = "";
+    if (parsed && /^https?:$/.test(parsed.protocol) && parsed.toString() !== page.toString()) destination = parsed.toString();
+  } catch {
+    destination = undefined;
+  }
+  return destination
+    ? `href\u0000${destination}\u0000${target ?? ""}`
+    : `label\u0000${label.toLowerCase()}\u0000${href ?? ""}\u0000${target ?? ""}`;
 }
 
 /** File inputs are frequently visually hidden behind a styled resume dropzone.
@@ -1935,6 +1963,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
     const controls = this.page.locator('a, button, input[type="button"], input[type="submit"], [role="button"]');
     const candidates: { locator: Locator; key: string }[] = [];
     const seen = new Set<string>();
+    let accountGated = false;
     for (let index = 0; index < await controls.count(); index += 1) {
       const candidate = controls.nth(index);
       if (!(await visibleFormControl(candidate)) || !(await candidate.isEnabled().catch(() => true))) continue;
@@ -1955,14 +1984,22 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
         };
       }).catch(() => undefined);
       if (!details || details.insideForm || details.type === "submit" || details.href?.toLowerCase().startsWith("javascript:")) continue;
+      if (details.labels.some((value) => isAccountGatedApplyLabel(value))) accountGated = true;
       const label = details.labels.find((value) => isApplicationDiscoveryControlLabel(value));
       if (!label) continue;
-      const key = `${label.toLowerCase()}\u0000${details.href ?? ""}\u0000${details.target ?? ""}`;
+      const key = applicationDiscoveryControlKey(label, details.href, details.target, this.page.url());
       if (seen.has(key)) continue;
       seen.add(key);
       candidates.push({ locator: candidate, key });
     }
 
+    if (candidates.length === 0 && accountGated) {
+      return {
+        status: "blocked",
+        reason: "The listing site requires you to log in or create an account before applying.",
+        evidence: ["listing-identity:verified", "listing-boundary:account_gated_apply", "apply:not-clicked"],
+      };
+    }
     if (candidates.length === 0) {
       return {
         status: "not_found",
@@ -2499,6 +2536,9 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
         uploadEntryLabel ||
         uploadContainerLabel ||
         control.getAttribute("aria-label")?.trim() ||
+        // aria-labelledby is the accessible label (Vaia's "ZIP code"); a
+        // placeholder is example input ("10001") and must not win over it.
+        ariaLabelledByText ||
         control.getAttribute("placeholder")?.trim() ||
         control.getAttribute("name")?.trim() ||
         control.id.trim() ||
@@ -2808,6 +2848,138 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
     return terms.length > 0 && terms.every((term) => text.includes(term));
   }
 
+  /**
+   * Vaia Easy Apply: email gate → résumé upload → details. Only the two intro
+   * steps are completed here, each through one exactly labelled control; the
+   * details step is left for the shared inspection and is never continued.
+   */
+  async prepareVaiaApplication(input: { email: string; resumePath: string; company: string; role: string }): Promise<void> {
+    if (!isVerifiedVaiaApplicationUrl(this.page.url())) throw new Error("The page is not the verified Vaia apply form.");
+    const detailsField = this.page.locator("#f-first");
+    const stepTimeout = Math.max(this.timeoutMs, 30_000);
+    await this.page.locator("#f-email-gate, #f-first").first().waitFor({ state: "visible", timeout: stepTimeout });
+    if (!(await this.verifyPageIdentity(input.company, input.role))) {
+      throw new Error("The Vaia apply form did not visibly name the expected company and role.");
+    }
+    if (await visibleFormControl(detailsField)) return;
+
+    const uniqueButton = async (name: RegExp): Promise<Locator> => {
+      const matches = this.page.getByRole("button", { name });
+      const visible: Locator[] = [];
+      for (let index = 0; index < await matches.count(); index += 1) {
+        if (await visibleFormControl(matches.nth(index))) visible.push(matches.nth(index));
+      }
+      if (visible.length !== 1) throw new Error(`Expected exactly one visible Vaia "${name.source}" control; found ${visible.length}.`);
+      return visible[0]!;
+    };
+
+    const emailField = this.page.locator("#f-email-gate");
+    if (await visibleFormControl(emailField)) {
+      await emailField.fill(input.email);
+      await (await uniqueButton(/^continue$/i)).click();
+    }
+
+    await this.page.getByRole("button", { name: /^upload résumé & start application$/i })
+      .waitFor({ state: "visible", timeout: stepTimeout });
+    const fileInputs = this.page.locator('input[type="file"]:not(#cover-letter-input):not(#certificate-input)');
+    const resumeInputs: Locator[] = [];
+    for (let index = 0; index < await fileInputs.count(); index += 1) {
+      const accept = ((await fileInputs.nth(index).getAttribute("accept")) ?? "").toLowerCase();
+      if (accept.includes(".pdf") && accept.includes(".docx")) resumeInputs.push(fileInputs.nth(index));
+    }
+    if (resumeInputs.length !== 1) throw new Error(`Expected exactly one Vaia résumé input; found ${resumeInputs.length}.`);
+    await resumeInputs[0]!.setInputFiles(input.resumePath);
+    // Vaia may start parsing as soon as a file is chosen (the upload button
+    // disappears) or wait for the explicit upload control; accept either.
+    const uploadButton = this.page.getByRole("button", { name: /^upload résumé & start application$/i });
+    const parseTimeout = Math.max(this.timeoutMs, 60_000);
+    const deadline = Date.now() + parseTimeout;
+    let clickedUpload = false;
+    while (Date.now() < deadline) {
+      if (await visibleFormControl(detailsField)) return;
+      if (!clickedUpload && await uploadButton.count() > 0 && await visibleFormControl(uploadButton.first())) {
+        const button = await uniqueButton(/^upload résumé & start application$/i);
+        if (await button.isEnabled().catch(() => false)) {
+          await button.click();
+          clickedUpload = true;
+        }
+      }
+      await this.page.waitForTimeout(250);
+    }
+    throw new Error("Vaia did not show the details step after the résumé upload.");
+  }
+
+  /**
+   * Vaia details → review: one click on the details step's primary
+   * "Continue". Validation failures are reported, never retried, and the
+   * review step's own control is left for the candidate.
+   */
+  async advanceVaiaToReview(): Promise<void> {
+    if (!isVerifiedVaiaApplicationUrl(this.page.url())) throw new Error("The page is not the verified Vaia apply form.");
+    const detailsField = this.page.locator("#f-first");
+    if (!(await visibleFormControl(detailsField))) throw new Error("Vaia is not on the details step; nothing was clicked.");
+    const primary = this.page.locator("button#v2-cta");
+    if (await primary.count() !== 1 || !(await visibleFormControl(primary))) throw new Error("Vaia's details Continue control was not uniquely visible.");
+    const label = (await primary.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+    if (!/^continue$/i.test(label)) throw new Error(`Vaia's details control read "${label.slice(0, 60)}" instead of Continue; nothing was clicked.`);
+    await primary.click();
+    try {
+      await detailsField.waitFor({ state: "hidden", timeout: Math.max(this.timeoutMs, 30_000) });
+    } catch {
+      const errors = await this.page.locator('[role="alert"], [aria-live="assertive"], .error, .field-error, [class*="error" i]')
+        .allInnerTexts().catch(() => [] as string[]);
+      const visibleErrors = errors.map((text) => text.replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 3).join("; ");
+      throw new Error(`Vaia did not accept the details step${visibleErrors ? `: ${visibleErrors.slice(0, 300)}` : ""}.`);
+    }
+  }
+
+  /**
+   * Vaia review → done. Reached only through the executor's explicit
+   * submitPrepared path (a per-application human approval). Clicks only an
+   * unambiguous submit label and proves success from the rendered Done state.
+   */
+  private async submitVaiaReview(): Promise<BrowserSubmissionResult> {
+    const url = this.page.url();
+    if (await visibleFormControl(this.page.locator("#f-first"))) {
+      return { clicked: false, confirmed: false, evidence: "submit:vaia-not-on-review" };
+    }
+    const primary = this.page.locator("button#v2-cta");
+    if (await primary.count() !== 1 || !(await visibleFormControl(primary))) {
+      return { clicked: false, confirmed: false, evidence: "submit:control-missing" };
+    }
+    const label = (await primary.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+    if (!/^(?:submit|send|apply)(?: (?:my |your |the )?application)?(?: now)?$/i.test(label)) {
+      return { clicked: false, confirmed: false, evidence: `submit:vaia-unexpected-control:${label.slice(0, 60) || "unlabelled"}` };
+    }
+    await primary.click();
+    const done = /application (?:was |has been )?(?:sent|submitted)|thank you for (?:your )?appl|you(?:'|’)ve applied|successfully (?:applied|submitted)/i;
+    const deadline = Date.now() + Math.max(this.timeoutMs, 30_000);
+    while (Date.now() < deadline) {
+      const text = await this.page.locator("body").innerText().catch(() => "");
+      if (done.test(text) && isVerifiedVaiaApplicationUrl(this.page.url())) {
+        const confirmationUrl = this.page.url();
+        const jobId = new URL(confirmationUrl).searchParams.get("job_id") ?? "unknown";
+        return {
+          clicked: true,
+          confirmed: true,
+          outcome: "confirmed",
+          externalApplicationId: `vaia:${jobId}:${new Date().toISOString()}`,
+          confirmationOrigin: new URL(confirmationUrl).origin,
+          confirmationUrl,
+          evidence: "submit:clicked; confirmation:vaia-done",
+        };
+      }
+      await this.page.waitForTimeout(500);
+    }
+    return {
+      clicked: true,
+      confirmed: false,
+      outcome: "ambiguous",
+      reasonCode: "confirmation-missing",
+      evidence: `submit:clicked; confirmation:missing; start-url:${new URL(url).origin}`,
+    };
+  }
+
   /** Matlen keeps its application form behind a non-submitting Apply toggle. */
   private async revealMatlenApplicationForm(): Promise<void> {
     if (!isVerifiedMatlenApplicationUrl(this.page.url())) return;
@@ -2939,6 +3111,12 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
   }
 
   private async submitControl(): Promise<Locator | null> {
+    // Vaia marks every wizard button (Close, Back, salutation) type="submit".
+    // Only its primary step control is the form's forward action.
+    if (isVerifiedVaiaApplicationUrl(this.page.url())) {
+      const primary = this.page.locator("button#v2-cta");
+      return await primary.count() === 1 && await visibleFormControl(primary) ? primary : null;
+    }
     const submitInputs = this.page.locator('input[type="submit"], button[type="submit"]');
     for (let index = 0; index < await submitInputs.count(); index += 1) {
       const candidate = submitInputs.nth(index);
@@ -3007,6 +3185,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
   }
 
   async submit(): Promise<BrowserSubmissionResult> {
+    if (isVerifiedVaiaApplicationUrl(this.page.url())) return this.submitVaiaReview();
     const control = await this.submitControl();
     if (!control) return { clicked: false, confirmed: false, evidence: "submit:control-missing" };
     if (await control.isDisabled().catch(() => true) || (await control.getAttribute("aria-disabled").catch(() => null)) === "true") {

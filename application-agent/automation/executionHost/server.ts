@@ -393,6 +393,7 @@ export function createConfiguredExecutionHostServer(
   const executor = createPlaywrightLeverBrowserExecutor({
     provider: "auto",
     headless: config.headless,
+    ...(config.slowMoMs > 0 ? { slowMo: config.slowMoMs } : {}),
     timeoutMs: config.browserTimeoutMs,
     ...(Object.keys(config.resumePaths).length > 0 ? { resumePaths: config.resumePaths } : {}),
     allowAutomaticSubmission: config.submissionAuthority === "automatic" && !config.preparationOnly,

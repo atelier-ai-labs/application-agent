@@ -23,6 +23,8 @@ export interface ExecutionHostEnvironment extends GoogleSheetsEnvironment {
   ATELIER_EXECUTION_ALLOWED_ORIGINS?: string;
   ATELIER_EXECUTION_ALLOW_NON_LOOPBACK?: string;
   ATELIER_EXECUTION_HEADLESS?: string;
+  /** Optional per-action delay so a person can watch a visible browser run. */
+  ATELIER_EXECUTION_SLOW_MO_MS?: string;
   ATELIER_EXECUTION_BROWSER_TIMEOUT_MS?: string;
   ATELIER_EXECUTION_MAX_CONCURRENT?: string;
   ATELIER_EXECUTION_SESSION_TIMEOUT_MS?: string;
@@ -62,6 +64,7 @@ export interface ExecutionHostConfig {
   allowedOrigins: readonly string[];
   allowNonLoopback: boolean;
   headless: boolean;
+  slowMoMs: number;
   browserTimeoutMs: number;
   maxConcurrent: number;
   sessionTimeoutMs: number;
@@ -190,6 +193,7 @@ export function resolveExecutionHostConfig(env: ExecutionHostEnvironment): Execu
   if (port > 65_535) throw new Error("ATELIER_EXECUTION_PORT must be between 1 and 65535.");
   const allowNonLoopback = booleanValue(env.ATELIER_EXECUTION_ALLOW_NON_LOOPBACK, false, "ATELIER_EXECUTION_ALLOW_NON_LOOPBACK");
   const headless = booleanValue(env.ATELIER_EXECUTION_HEADLESS, false, "ATELIER_EXECUTION_HEADLESS");
+  const slowMoMs = env.ATELIER_EXECUTION_SLOW_MO_MS?.trim() ? positiveInteger(env.ATELIER_EXECUTION_SLOW_MO_MS, 0, "ATELIER_EXECUTION_SLOW_MO_MS") : 0;
   const browserTimeoutMs = positiveInteger(env.ATELIER_EXECUTION_BROWSER_TIMEOUT_MS, 15_000, "ATELIER_EXECUTION_BROWSER_TIMEOUT_MS");
   const maxConcurrent = positiveInteger(env.ATELIER_EXECUTION_MAX_CONCURRENT, 1, "ATELIER_EXECUTION_MAX_CONCURRENT");
   const sessionTimeoutMs = positiveInteger(env.ATELIER_EXECUTION_SESSION_TIMEOUT_MS, 30 * 60 * 1_000, "ATELIER_EXECUTION_SESSION_TIMEOUT_MS");
@@ -209,6 +213,7 @@ export function resolveExecutionHostConfig(env: ExecutionHostEnvironment): Execu
     allowedOrigins: originList(env.ATELIER_EXECUTION_ALLOWED_ORIGINS),
     allowNonLoopback,
     headless,
+    slowMoMs,
     browserTimeoutMs,
     maxConcurrent,
     sessionTimeoutMs,

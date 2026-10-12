@@ -55,7 +55,9 @@ import { OllamaApplicationAnswerDraftGenerator } from "../answerDraft/ollamaAppl
 import { isUsableResumeArtifact } from "../resume/resumeArtifact";
 import { normalizeJobSearchIntent, type JobSearchIntent } from "../../src/domain/searchIntent";
 import { DEFAULT_CAREER_AGENT_STATE_FILE, FileKeyValueStorage } from "./fileKeyValueStorage";
-import type { AttentionEvent, AttentionResponse, NotificationAdapter, PersistedAttentionEvent } from "../../src/domain/attention";
+import { assertDuplicateRiskRetryAuthorization, assertSubmitPreparedApplicationPreflight } from "./submitPreparedApplicationPreflight";
+import { authorizeThenSubmit } from "./submitPreparedApplicationFlow";
+import type { AttentionEvent, AttentionResponse, NotificationAdapter, PersistedAttentionEvent, QueueHandoffNotice } from "../../src/domain/attention";
 import { DurableSubmissionAuthority } from "../executionHost/submissionAuthority";
 
 export interface BackgroundCareerAgentEnvironment extends ExecutionHostEnvironment, SlackEnvironment {
@@ -175,6 +177,14 @@ export interface BackgroundCareerAgentRuntime {
   getSubmissionFence(applicationId: string, jobId: string): import("../executionHost/submissionAuthority").SubmissionFence | undefined;
   resumePreparationOnlyConfigurationBlocker(campaignId: string, jobId: string): import("../../src/domain/campaignTypes").CareerJob;
   getApplication(applicationId: string): import("../../src/domain/types").Application;
+  /** Sends a link-only queue notice when the adapter supports it; returns false otherwise. */
+  notifyQueueHandoff(notice: QueueHandoffNotice): Promise<boolean>;
+  /**
+   * One explicit, human-approved submit of an exact prepared application
+   * (Slack's Submit button). Same preflight as career-agent:submit-prepared;
+   * never authorizes duplicate-risk retries.
+   */
+  submitFromHumanApproval(campaignId: string, jobId: string, applicationId: string, executionHostBaseUrl: string): Promise<{ submitted: boolean; message: string }>;
 }
 
 const HOST_ACTIVE_STATUSES: ReadonlySet<ExecutionHostStatus> = new Set(["starting", "inspecting", "executing", "resuming"]);
@@ -698,6 +708,39 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
     return this.service.getApplication(applicationId);
   }
 
+  async submitFromHumanApproval(campaignId: string, jobId: string, applicationId: string, executionHostBaseUrl: string): Promise<{ submitted: boolean; message: string }> {
+    const storage = this.stateStorage as (KeyValueStorage & {
+      reload?: () => void;
+      withExclusiveLockAsync?: <R>(operation: () => Promise<R>) => Promise<R>;
+    }) | undefined;
+    if (!storage?.withExclusiveLockAsync) throw new Error("Submitting requires the file-backed runtime state.");
+    let label = "this application";
+    const job = await authorizeThenSubmit(storage.withExclusiveLockAsync.bind(storage), () => {
+      storage.reload?.();
+      const current = this.service.getJob(jobId);
+      const application = this.service.getApplication(applicationId);
+      label = `${current.job.company} — ${current.job.title}`;
+      assertSubmitPreparedApplicationPreflight({ campaignId, jobId, applicationId, job: current, application, executionHostBaseUrl });
+      // An unknown fence means an earlier click may have landed; only the
+      // CLI's explicit duplicate-risk authorization can retry that.
+      assertDuplicateRiskRetryAuthorization(this.getSubmissionFence(applicationId, jobId)?.state, undefined, undefined);
+    }, () => this.submitPreparedApplication(campaignId, jobId));
+    if (job.status === "applied") {
+      return { submitted: true, message: `Submitted: ${label}. The employer confirmation was verified and the tracker is being updated.` };
+    }
+    return {
+      submitted: false,
+      message: `Not confirmed: ${label} (status ${job.status}). Check the employer site or your email before doing anything else; the agent will not retry automatically.`,
+    };
+  }
+
+  async notifyQueueHandoff(notice: QueueHandoffNotice): Promise<boolean> {
+    const adapter = this.notification?.adapter;
+    if (!adapter?.publishQueueHandoffNotice) return false;
+    await adapter.publishQueueHandoffNotice(notice);
+    return true;
+  }
+
   private async startPreparedHostExecutions(campaignId: string): Promise<void> {
     if (!this.executionHost) return;
     const candidates = this.service
@@ -809,7 +852,40 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
     await this.reconcileHostExecution(campaignId, jobId, snapshot);
   }
 
+  private readonly announcedSubmissionReviews = new Set<string>();
+
   private async reconcileHostExecution(campaignId: string, jobId: string, initial: ExecutionHostSnapshot): Promise<ExecutionHostSnapshot> {
+    const final = await this.pollHostExecution(campaignId, jobId, initial);
+    await this.announceSubmissionReview(campaignId, jobId, final).catch(() => {
+      console.warn("[career-agent-runtime] submission review notice could not be published");
+    });
+    return final;
+  }
+
+  /** Posts the pre-submit review once per prepared browser execution. */
+  private async announceSubmissionReview(campaignId: string, jobId: string, snapshot: ExecutionHostSnapshot): Promise<void> {
+    const publish = this.notification?.adapter.publishSubmissionReview;
+    if (!publish || snapshot.status !== "ready_to_submit" || snapshot.result?.state !== "ready_to_submit") return;
+    if (this.announcedSubmissionReviews.has(snapshot.id)) return;
+    const job = this.service.getJob(jobId);
+    if (job.status !== "ready_to_submit" || !job.applicationId) return;
+    const application = this.service.getApplication(job.applicationId);
+    const inspection = snapshot.result.inspection;
+    const labels = new Map(inspection.fields.map((field) => [field.id, field.label]));
+    this.announcedSubmissionReviews.add(snapshot.id);
+    await publish.call(this.notification!.adapter, {
+      campaignId,
+      jobId,
+      applicationId: job.applicationId,
+      company: job.job.company,
+      role: job.job.title,
+      ...(application.resume?.familyId ? { resumeFamily: application.resume.familyId } : {}),
+      filled: inspection.reviewSummary ?? inspection.fieldsFilled.map((id) => ({ label: labels.get(id) ?? id, value: "" })),
+      leftBlank: inspection.unresolvedFields,
+    });
+  }
+
+  private async pollHostExecution(campaignId: string, jobId: string, initial: ExecutionHostSnapshot): Promise<ExecutionHostSnapshot> {
     if (!this.executionHost) return initial;
     let snapshot = initial;
     await this.service.recordExecutionHostSnapshot(campaignId, jobId, snapshot);
@@ -871,8 +947,9 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
     })(),
   );
   const tracker = createConfiguredGoogleSheetsJobTracker(env as GoogleSheetsEnvironment);
+  const executionHostBaseUrl = valueOrDefault(env.ATELIER_EXECUTION_HOST_BASE_URL ?? env.VITE_EXECUTION_HOST_BASE_URL, "http://127.0.0.1:8787");
   const executionHost = new HttpExecutionHostClient({
-    baseUrl: valueOrDefault(env.ATELIER_EXECUTION_HOST_BASE_URL ?? env.VITE_EXECUTION_HOST_BASE_URL, "http://127.0.0.1:8787"),
+    baseUrl: executionHostBaseUrl,
   } satisfies ExecutionHostClientOptions);
   let runtime: BackgroundCareerAgentRuntime | undefined;
   const slack = new SlackNotificationAdapter({
@@ -898,6 +975,12 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
         console.warn("[career-agent-slack] CareerAgentService resume failed");
         throw error;
       }
+    },
+    submissionApprovalHandler: async (approval) => {
+      if (!runtime) throw new Error("The Career Agent runtime is not ready.");
+      const result = await runtime.submitFromHumanApproval(approval.campaignId, approval.jobId, approval.applicationId, executionHostBaseUrl);
+      console.info(`[career-agent-slack] human-approved submit ${result.submitted ? "confirmed" : "not confirmed"}`);
+      return result;
     },
     handoffUrlForApplication: executionConfig?.handoffViewer?.enabled
       ? async (applicationId) => {

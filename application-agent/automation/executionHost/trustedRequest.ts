@@ -24,6 +24,8 @@ import {
   isVerifiedGustoHostedUrl,
   isVerifiedGustoApplicationUrl,
   gustoPostingId,
+  isVerifiedVaiaApplicationUrl,
+  vaiaPostingId,
   matlenPostingId,
   protagonaPostingId,
   youHiredPostingId,
@@ -287,6 +289,26 @@ export function trustedExecutionRequestReason(value: unknown): string | undefine
     }
     if (!postingId || careerJob.job.sourceUrl !== careerJob.job.applicationUrl) {
       return "The Protagona source and application URL must be the same verified job route.";
+    }
+    return undefined;
+  }
+
+  if (isVerifiedVaiaApplicationUrl(careerJob.job.applicationUrl)) {
+    const postingId = vaiaPostingId(careerJob.job.applicationUrl);
+    const resolution = careerJob.destinationResolution;
+    const destinationMatches = resolution?.status === "resolved" &&
+      resolution.actionable === true &&
+      resolution.ats === "Custom" &&
+      resolution.destinationUrl === careerJob.job.applicationUrl;
+    const directCuratedSource = sourceId === "curated-live" &&
+      Boolean(postingId) &&
+      careerJob.sourceRecordId === `vaia:${postingId}` &&
+      careerJob.job.sourceUrl === careerJob.job.applicationUrl;
+    if (!destinationMatches && !directCuratedSource) {
+      return "The Vaia destination is not independently verified for this posting.";
+    }
+    if (!postingId || careerJob.job.sourceUrl !== careerJob.job.applicationUrl) {
+      return "The Vaia source and application URL must be the same verified apply-form route.";
     }
     return undefined;
   }

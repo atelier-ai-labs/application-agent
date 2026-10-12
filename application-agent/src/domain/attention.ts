@@ -122,6 +122,39 @@ export interface NotificationAdapter {
   closeAttentionEvent?(event: AttentionEvent): Promise<void>;
   /** Replaces a verification handoff with an explicit expired-session notice. */
   publishExpiredSessionNotice?(event: AttentionEvent): Promise<void>;
+  /** One-way notice that a queue row needs the human to open its link. */
+  publishQueueHandoffNotice?(notice: QueueHandoffNotice): Promise<void>;
+  /** Pre-submit review of one prepared application with an explicit Submit action. */
+  publishSubmissionReview?(notice: SubmissionReviewNotice): Promise<void>;
+}
+
+/**
+ * A prepared, not-yet-submitted application. Its only action is an explicit,
+ * per-application Submit approval from the configured human; it never
+ * changes the automatic submission authority.
+ */
+export interface SubmissionReviewNotice {
+  campaignId: string;
+  jobId: string;
+  applicationId: string;
+  company: string;
+  role: string;
+  resumeFamily?: string;
+  filled: readonly { label: string; value: string }[];
+  leftBlank: readonly string[];
+}
+
+/**
+ * A queue row the agent cannot open safely (login wall, unverified or
+ * unsupported destination). It carries only the public link and the reason;
+ * it asks no question and accepts no answer.
+ */
+export interface QueueHandoffNotice {
+  jobId: string;
+  company: string;
+  role: string;
+  url: string;
+  reason: string;
 }
 
 /** Deterministic adapter used by local acceptance tests. */

@@ -92,6 +92,12 @@ function response(status: "resolved" | "duplicate" = "resolved") {
   return async () => ({ status });
 }
 
+const SUBMIT_IDS = {
+  campaign: "campaign-83493d54-f0c4-416d-92ec-3d78848ce38c",
+  job: "career-job-5031ff6a-36f0-4216-8364-00242349e2af",
+  application: "application-2db1933e-dcd8-453f-9423-88dc0e0f5846",
+};
+
 function slackResponse(actionValue = "attention-1|yes", overrides: Record<string, unknown> = {}) {
   return {
     type: "block_actions",
@@ -273,6 +279,103 @@ describe("Slack human-attention adapter", () => {
         }),
       ),
     ).resolves.toEqual({ status: "rejected", reason: "unexpected_action" });
+  });
+
+  it("posts a pre-submit review with one confirm-gated Submit button for the exact application", async () => {
+    const requests: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        requests.push(typeof init?.body === "string" ? init.body : "");
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000010" }) } as Response;
+      },
+    });
+    await adapter.publishSubmissionReview({
+      campaignId: SUBMIT_IDS.campaign, jobId: SUBMIT_IDS.job, applicationId: SUBMIT_IDS.application,
+      company: "Changeis, Inc.", role: "Junior Cloud Engineer", resumeFamily: "cloud-platform",
+      filled: [{ label: "ZIP code", value: "15057" }], leftBlank: ["Street (optional)"],
+    });
+    const body = JSON.parse(requests[0]!);
+    expect(JSON.stringify(body)).toContain("ZIP code");
+    expect(JSON.stringify(body)).toContain("15057");
+    const button = body.blocks.find((block: { type: string }) => block.type === "actions").elements[0];
+    expect(button.action_id).toBe("career_agent_submit_prepared");
+    expect(button.value).toBe(`${SUBMIT_IDS.campaign}|${SUBMIT_IDS.job}|${SUBMIT_IDS.application}`);
+    expect(button.confirm.confirm.text).toBe("Submit");
+    await expect(adapter.publishSubmissionReview({
+      campaignId: "campaign-x", jobId: SUBMIT_IDS.job, applicationId: SUBMIT_IDS.application, company: "A", role: "B", filled: [], leftBlank: [],
+    })).rejects.toThrow("exact campaign");
+  });
+
+  it("runs the Submit approval only for the configured user and an exact target, removing the button first", async () => {
+    const requests: string[] = [];
+    const approvals: unknown[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        requests.push(typeof init?.body === "string" ? init.body : "");
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000010" }) } as Response;
+      },
+      submissionApprovalHandler: async (approval) => {
+        approvals.push(approval);
+        return { submitted: true, message: "Submitted: Changeis, Inc. — Junior Cloud Engineer." };
+      },
+    });
+    const value = `${SUBMIT_IDS.campaign}|${SUBMIT_IDS.job}|${SUBMIT_IDS.application}`;
+    const click = (overrides: Record<string, unknown> = {}) => slackResponse(value, {
+      actions: [{ action_id: "career_agent_submit_prepared", value }],
+      container: { message_ts: "1710000000.000010" },
+      ...overrides,
+    });
+
+    await expect(adapter.handleInteraction(click({ user: { id: "U999999" } }))).resolves.toMatchObject({ status: "rejected", reason: "unauthorized_user" });
+    await expect(adapter.handleInteraction(click({ channel: { id: "C999999" } }))).resolves.toMatchObject({ status: "rejected", reason: "unexpected_channel" });
+    await expect(adapter.handleInteraction(slackResponse("campaign-x|y|z", { actions: [{ action_id: "career_agent_submit_prepared", value: "campaign-x|y|z" }] })))
+      .resolves.toMatchObject({ status: "rejected", reason: "malformed_action_value" });
+    expect(approvals).toHaveLength(0);
+
+    await expect(adapter.handleInteraction(click())).resolves.toEqual({ status: "resolved" });
+    expect(approvals).toEqual([{ campaignId: SUBMIT_IDS.campaign, jobId: SUBMIT_IDS.job, applicationId: SUBMIT_IDS.application, actorIdentity: { provider: "slack", userId: "U123456", workspaceId: "T123456" } }]);
+    // First update removes the button before the click; the second reports the result.
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toContain("Submitting");
+    expect(requests[0]).not.toContain("career_agent_submit_prepared");
+    expect(requests[1]).toContain("Submitted: Changeis");
+  });
+
+  it("reports a refused Submit approval without claiming success", async () => {
+    const requests: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        requests.push(typeof init?.body === "string" ? init.body : "");
+        return { ok: true, status: 200, json: async () => ({ ok: true }) } as Response;
+      },
+      submissionApprovalHandler: async () => { throw new Error("Submit requires the retained real local execution to be ready_to_submit."); },
+    });
+    const value = `${SUBMIT_IDS.campaign}|${SUBMIT_IDS.job}|${SUBMIT_IDS.application}`;
+    await expect(adapter.handleInteraction(slackResponse(value, { actions: [{ action_id: "career_agent_submit_prepared", value }], container: { message_ts: "1.2" } })))
+      .resolves.toMatchObject({ status: "rejected", reason: "submission_refused" });
+    expect(requests.at(-1)).toContain("Not submitted");
+  });
+
+  it("posts a link-only queue handoff notice and rejects non-HTTPS links", async () => {
+    const requests: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        requests.push(typeof init?.body === "string" ? init.body : "");
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000009" }) } as Response;
+      },
+    });
+    await adapter.publishQueueHandoffNotice({ jobId: "tracker-url:1", company: "Acme <Corp>", role: "Engineer", url: "https://builtin.com/job/engineer/1", reason: "The listing site requires you to log in or create an account before applying." });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toContain("https://builtin.com/job/engineer/1");
+    expect(requests[0]).toContain("Acme &lt;Corp&gt;");
+    expect(requests[0]).toContain("did not sign in, create an account, or fill anything");
+    expect(requests[0]).not.toContain('"type":"actions"');
+    await expect(adapter.publishQueueHandoffNotice({ jobId: "x", company: "A", role: "B", url: "http://insecure.example/job", reason: "r" })).rejects.toThrow("HTTPS");
+    expect(requests).toHaveLength(1);
   });
 
   it("publishes a bounded free-text question with a clear threaded-reply action", async () => {

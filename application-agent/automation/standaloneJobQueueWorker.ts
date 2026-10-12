@@ -19,12 +19,15 @@ import {
   workdayPostingId,
   isVerifiedYouHiredApplicationUrl,
   youHiredPostingId,
+  canonicalVaiaApplicationUrl,
+  isVerifiedVaiaApplicationUrl,
 } from "../src/domain/jobUrlClassifier";
 import { isVerifiedGreenhouseApplicationUrl, isVerifiedGreenhouseHostedUrl } from "../src/domain/greenhouseJobSource";
 import { isVerifiedLeverApplicationUrl, isVerifiedLeverHostedUrl } from "../src/domain/leverJobSource";
 import { isContractRole } from "../src/domain/policies";
 import type { ApplicationRouteDiscoveryInput } from "./applicationRouteDiscovery";
 import type { BrowserApplicationRouteDiscovery } from "../src/domain/executor";
+import type { QueueHandoffNotice } from "../src/domain/attention";
 
 export interface StandaloneJobProcessor {
   process(job: ClaimedSheetJob): Promise<{ status: "Needs Input" | "Ready to Submit" | "Submitted" | "Confirmed" | "Expired" | "Skipped" | "Failed"; proofId?: string; confirmationEvidence?: string; error?: string }>;
@@ -46,6 +49,8 @@ export interface StandaloneJobQueueTickOptions {
 /** Ashby queue rows commonly store the direct /application URL. The career
  * service still needs the paired public posting URL for identity verification. */
 export function deriveQueuePostingUrl(jobLink: string): string {
+  const vaia = canonicalVaiaApplicationUrl(jobLink);
+  if (vaia) return vaia;
   const classification = classifyJobUrl(jobLink);
   if (!["lever", "rippling", "ashby", "workday", "custom"].includes(classification.kind)) return jobLink;
   try {
@@ -71,6 +76,8 @@ export function deriveQueuePostingUrl(jobLink: string): string {
 
 /** Ashby queue rows may contain the public posting route; make its form route explicit. */
 export function deriveQueueApplicationUrl(jobLink: string): string {
+  const vaia = canonicalVaiaApplicationUrl(jobLink);
+  if (vaia) return vaia;
   const classification = classifyJobUrl(jobLink);
   if (!["lever", "rippling", "ashby", "workday", "custom"].includes(classification.kind)) return jobLink;
   try {
@@ -129,7 +136,8 @@ export function queueDestinationPreflightReason(job: Pick<ClaimedSheetJob, "jobL
   if (isVerifiedMatlenApplicationUrl(classification.canonicalUrl) && source.canonicalUrl === classification.canonicalUrl && matlenPostingId(classification.canonicalUrl)) return undefined;
   if (isVerifiedProtagonaApplicationUrl(classification.canonicalUrl) && source.canonicalUrl === classification.canonicalUrl && protagonaPostingId(classification.canonicalUrl)) return undefined;
   if (isVerifiedGustoApplicationUrl(classification.canonicalUrl) && isVerifiedGustoHostedUrl(source.canonicalUrl) && gustoPostingId(source.canonicalUrl) === gustoPostingId(classification.canonicalUrl)) return undefined;
-  return "Needs review: this listing is not an executable verified Lever, Greenhouse, Rippling, Ashby, Workday, YouHired, Matlen Silver, Protagona, or Gusto application route. The queue will not open it automatically.";
+  if (isVerifiedVaiaApplicationUrl(applicationUrl) && sourceUrl === applicationUrl) return undefined;
+  return "Needs review: this listing is not an executable verified Lever, Greenhouse, Rippling, Ashby, Workday, YouHired, Matlen Silver, Protagona, Gusto, or Vaia application route. The queue will not open it automatically.";
 }
 
 /**
@@ -156,6 +164,8 @@ export interface CareerServiceQueueBoundary {
   processCuratedJobThroughHost?(campaignId: string, input: { companyHint?: string; titleHint?: string; sourceUrl: string; applicationUrl: string; rawText: string; description: string; isExample?: boolean; queueSelected?: boolean; resumeFamily?: string; queueFit?: string; queuePriority?: string }): Promise<CareerJob>;
   discoverApplicationRoute?(input: ApplicationRouteDiscoveryInput): Promise<BrowserApplicationRouteDiscovery>;
   getApplication?(applicationId: string): { submissionProof?: { externalApplicationId: string } };
+  /** Optional Slack link notice for rows a human must open; failures never change the queue result. */
+  notifyQueueHandoff?(notice: QueueHandoffNotice): Promise<boolean>;
 }
 
 function recoverableBrowserInteractionError(error: unknown): boolean {
@@ -172,12 +182,22 @@ export function createCareerServiceQueueProcessor(service: CareerServiceQueueBou
       let applicationUrl = deriveQueueApplicationUrl(job.jobLink);
       let discoveredApplicationUrl: string | undefined;
       const destinationReason = queueDestinationPreflightReason(job);
+      const handoff = async (error: string, reason: string, url: string) => {
+        let notified = false;
+        try {
+          notified = await service.notifyQueueHandoff?.({ jobId: job.jobId, company: job.company, role: job.role, url, reason }) ?? false;
+        } catch {
+          notified = false;
+        }
+        return { status: "Needs Input" as const, error: notified ? `${error} Link sent to Slack.` : error };
+      };
       if (destinationReason) {
         if (!service.discoverApplicationRoute) {
-          return {
-            status: "Needs Input",
-            error: `${QUEUE_DESTINATION_INPUT_MARKER} Needs Input — ${destinationReason.replace(/^Needs review:\s*/i, "")} Update this tracker row with a verified application URL before retrying.`,
-          };
+          return handoff(
+            `${QUEUE_DESTINATION_INPUT_MARKER} Needs Input — ${destinationReason.replace(/^Needs review:\s*/i, "")} Update this tracker row with a verified application URL before retrying.`,
+            destinationReason.replace(/^Needs review:\s*/i, ""),
+            job.jobLink,
+          );
         }
         let discovery: BrowserApplicationRouteDiscovery;
         try {
@@ -188,17 +208,19 @@ export function createCareerServiceQueueProcessor(service: CareerServiceQueueBou
             sourceUrl: job.jobLink,
           });
         } catch {
-          return {
-            status: "Needs Input",
-            error: `${QUEUE_DESTINATION_INPUT_MARKER} Needs Input — the listing could not be inspected for a safe Apply link. Update this tracker row with a verified application URL before retrying.`,
-          };
+          return handoff(
+            `${QUEUE_DESTINATION_INPUT_MARKER} Needs Input — the listing could not be inspected for a safe Apply link. Update this tracker row with a verified application URL before retrying.`,
+            "The listing could not be inspected for a safe Apply link.",
+            job.jobLink,
+          );
         }
         if (discovery.status !== "resolved" || !discovery.applicationUrl) {
           const reason = discovery.reason ?? "the listing did not produce one safe, supported application destination";
-          return {
-            status: "Needs Input",
-            error: `${QUEUE_DESTINATION_INPUT_MARKER} Needs Input — ${reason} Update this tracker row with a verified application URL before retrying.`,
-          };
+          return handoff(
+            `${QUEUE_DESTINATION_INPUT_MARKER} Needs Input — ${reason} Update this tracker row with a verified application URL before retrying.`,
+            reason,
+            job.jobLink,
+          );
         }
         const discoveredJob = { ...job, jobLink: discovery.applicationUrl };
         const discoveredReason = queueDestinationPreflightReason(discoveredJob);
@@ -207,10 +229,11 @@ export function createCareerServiceQueueProcessor(service: CareerServiceQueueBou
             .filter((item) => item.startsWith("destination-host:"))
             .slice(0, 1)
             .join("; ");
-          return {
-            status: "Needs Input",
-            error: `${QUEUE_DESTINATION_INPUT_MARKER} Needs Input — the Apply link led to a destination the agent could not verify as a supported application route${destinationEvidence ? ` (${destinationEvidence})` : ""}. Update this tracker row with a verified application URL before retrying.`,
-          };
+          return handoff(
+            `${QUEUE_DESTINATION_INPUT_MARKER} Needs Input — the Apply link led to a destination the agent could not verify as a supported application route${destinationEvidence ? ` (${destinationEvidence})` : ""}. Update this tracker row with a verified application URL before retrying.`,
+            "The Apply link led to an application site the agent does not support yet; you can apply there directly.",
+            discovery.applicationUrl,
+          );
         }
         discoveredApplicationUrl = discovery.applicationUrl;
         sourceUrl = deriveQueuePostingUrl(discovery.applicationUrl);

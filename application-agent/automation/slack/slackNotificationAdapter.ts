@@ -4,6 +4,8 @@ import type {
   AttentionProviderDelivery,
   NotificationAdapter,
   PersistedAttentionEvent,
+  QueueHandoffNotice,
+  SubmissionReviewNotice,
 } from "../../src/domain/attention";
 import { formatPostedCompensation } from "../../src/domain/attention";
 import type { SlackNotificationConfig } from "./config";
@@ -30,9 +32,18 @@ export type SlackAttentionResponseHandler = (response: AttentionResponse) => Pro
   status: "resolved" | "duplicate";
 }>;
 
+/** Runs one explicit, human-approved submit of an exact prepared application. */
+export type SlackSubmissionApprovalHandler = (approval: {
+  campaignId: string;
+  jobId: string;
+  applicationId: string;
+  actorIdentity: { provider: "slack"; userId: string; workspaceId?: string };
+}) => Promise<{ submitted: boolean; message: string }>;
+
 export interface SlackNotificationAdapterOptions {
   config: SlackNotificationConfig;
   responseHandler?: SlackAttentionResponseHandler;
+  submissionApprovalHandler?: SlackSubmissionApprovalHandler;
   eventLookup?: (eventId: string) => AttentionEvent | undefined;
   persistedAttentionEventsLookup?: () => readonly PersistedAttentionEvent[] | Promise<readonly PersistedAttentionEvent[]>;
   fetcher?: Fetcher;
@@ -58,6 +69,8 @@ interface SlackApiResponse {
 }
 
 const ACTION_ID = "career_agent_attention_option";
+const SUBMIT_ACTION_ID = "career_agent_submit_prepared";
+const SUBMIT_ACTION_VALUE = /^(campaign-[0-9a-f-]{36})\|(career-job-[0-9a-f-]{36})\|(application-[0-9a-f-]{36})$/;
 const GENERATED_ACTION_ID_PATTERN = new RegExp(`^${ACTION_ID}_([0-9]+)$`);
 
 function actionIdForOption(index: number): string {
@@ -299,6 +312,7 @@ function slackErrorCode(value: unknown): string | undefined {
 export class SlackNotificationAdapter implements NotificationAdapter {
   private readonly config: SlackNotificationConfig;
   private readonly responseHandler?: SlackAttentionResponseHandler;
+  private readonly submissionApprovalHandler?: SlackSubmissionApprovalHandler;
   private readonly eventLookup?: (eventId: string) => AttentionEvent | undefined;
   private readonly persistedAttentionEventsLookup?: SlackNotificationAdapterOptions["persistedAttentionEventsLookup"];
   private readonly fetcher: Fetcher;
@@ -320,6 +334,7 @@ export class SlackNotificationAdapter implements NotificationAdapter {
   constructor(options: SlackNotificationAdapterOptions) {
     this.config = options.config;
     this.responseHandler = options.responseHandler;
+    this.submissionApprovalHandler = options.submissionApprovalHandler;
     this.eventLookup = options.eventLookup;
     this.persistedAttentionEventsLookup = options.persistedAttentionEventsLookup;
     this.fetcher = options.fetcher ?? ((input, init) => fetch(input, init));
@@ -474,6 +489,101 @@ export class SlackNotificationAdapter implements NotificationAdapter {
       text,
       blocks,
     });
+  }
+
+  /** Posts a link-only notice for a queue row the agent will not open itself. */
+  async publishQueueHandoffNotice(notice: QueueHandoffNotice): Promise<void> {
+    let url: URL;
+    try {
+      url = new URL(notice.url);
+    } catch {
+      throw new Error("Queue handoff notice requires a valid HTTPS link.");
+    }
+    if (url.protocol !== "https:") throw new Error("Queue handoff notice requires a valid HTTPS link.");
+    const title = "Career Agent needs you to open this application";
+    const job = `${markdownText(notice.company, 160)} — ${markdownText(notice.role, 200)}`;
+    const body = `${markdownText(notice.reason, 400)}\n\nOpen the listing yourself: ${markdownText(url.toString(), 500)}\n\nThe agent did not sign in, create an account, or fill anything on this page. Queue row: ${markdownText(notice.jobId, 120)}`;
+    await this.callApi("chat.postMessage", this.config.botToken, {
+      channel: this.config.channelId,
+      text: `${title}\n${job}\n\n${body}`,
+      blocks: [
+        { type: "header", text: { type: "plain_text", text: title } },
+        { type: "section", text: { type: "mrkdwn", text: `*${job}*\n\n${body}` } },
+      ],
+    });
+  }
+
+  /** Posts what the agent filled and one explicit Submit button for that exact application. */
+  async publishSubmissionReview(notice: SubmissionReviewNotice): Promise<void> {
+    const value = `${notice.campaignId}|${notice.jobId}|${notice.applicationId}`;
+    if (!SUBMIT_ACTION_VALUE.test(value)) throw new Error("Submission review requires exact campaign, job, and application IDs.");
+    const job = `${markdownText(notice.company, 160)} — ${markdownText(notice.role, 200)}`;
+    const filled = notice.filled.slice(0, 40)
+      .map((entry) => `• ${markdownText(entry.label, 80)}: ${entry.value ? `\`${markdownText(entry.value, 120).replace(/`/g, "'")}\`` : "_(empty)_"}`)
+      .join("\n") || "_No filled fields were reported._";
+    const blank = notice.leftBlank.length > 0
+      ? `Left blank: ${notice.leftBlank.slice(0, 12).map((label) => markdownText(label, 60)).join(", ")}`
+      : "Nothing was left blank.";
+    const resume = notice.resumeFamily ? `Résumé: *${markdownText(notice.resumeFamily, 60)}*` : "";
+    const text = `Ready to submit: ${job}\n\n${filled}\n\n${blank}`;
+    await this.callApi("chat.postMessage", this.config.botToken, {
+      channel: this.config.channelId,
+      text,
+      blocks: [
+        { type: "header", text: { type: "plain_text", text: "Application ready to submit" } },
+        { type: "section", text: { type: "mrkdwn", text: `*${job}*${resume ? `\n${resume}` : ""}` } },
+        { type: "section", text: { type: "mrkdwn", text: filled.slice(0, 2900) } },
+        { type: "context", elements: [{ type: "mrkdwn", text: blank.slice(0, 2900) }] },
+        {
+          type: "actions",
+          elements: [{
+            type: "button",
+            style: "primary",
+            text: { type: "plain_text", text: "Submit application" },
+            action_id: SUBMIT_ACTION_ID,
+            value,
+            confirm: {
+              title: { type: "plain_text", text: "Submit this application?" },
+              text: { type: "mrkdwn", text: `The agent will click Submit once for *${job}*. This can't be undone.` },
+              confirm: { type: "plain_text", text: "Submit" },
+              deny: { type: "plain_text", text: "Cancel" },
+            },
+          }],
+        },
+      ],
+    });
+  }
+
+  private async handleSubmissionApproval(
+    body: Record<string, unknown>,
+    rawValue: string | undefined,
+    actorIdentity: { provider: "slack"; userId: string; workspaceId?: string },
+  ): Promise<SlackInteractionResult> {
+    const match = rawValue?.match(SUBMIT_ACTION_VALUE);
+    if (!match) return { status: "rejected", reason: "malformed_action_value" };
+    if (!this.submissionApprovalHandler) return { status: "rejected", reason: "listener_not_ready" };
+    const container = responsePayload(body.container);
+    const message = responsePayload(body.message);
+    const messageTs = stringValue(container?.message_ts, 64) ?? stringValue(message?.ts, 64);
+    const update = async (text: string) => {
+      if (!messageTs) return;
+      await this.callApi("chat.update", this.config.botToken, {
+        channel: this.config.channelId,
+        ts: messageTs,
+        text,
+        blocks: [{ type: "section", text: { type: "mrkdwn", text: markdownText(text, 2900) } }],
+      }).catch(() => undefined);
+    };
+    // Remove the button before the browser click so a second tap cannot queue.
+    await update("Submitting… the agent is clicking Submit once for this application.");
+    try {
+      const result = await this.submissionApprovalHandler({ campaignId: match[1]!, jobId: match[2]!, applicationId: match[3]!, actorIdentity });
+      await update(result.message);
+      return { status: result.submitted ? "resolved" : "rejected", ...(result.submitted ? {} : { reason: "submission_not_completed" }) };
+    } catch (error) {
+      await update(`Not submitted: ${error instanceof Error ? error.message : "the submission was refused."}`);
+      return { status: "rejected", reason: "submission_refused" };
+    }
   }
 
   /** Hydrates durable application threads and open event message correlations before Socket Mode starts. */
@@ -792,6 +902,13 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     if (!userId || userId !== this.config.allowedUserId) return { status: "rejected", reason: "unauthorized_user" };
     if (this.config.allowedTeamId && teamId !== this.config.allowedTeamId) return { status: "rejected", reason: "unauthorized_workspace" };
     if (channelId !== this.config.channelId) return { status: "rejected", reason: "unexpected_channel" };
+    if (Array.isArray(body.actions) && body.actions.length === 1 && responsePayload(body.actions[0])?.action_id === SUBMIT_ACTION_ID) {
+      return this.handleSubmissionApproval(body, stringValue(responsePayload(body.actions[0])?.value, 256), {
+        provider: "slack",
+        userId,
+        ...(teamId ? { workspaceId: teamId } : {}),
+      });
+    }
     if (!this.responseHandler || !Array.isArray(body.actions) || body.actions.length !== 1) {
       return { status: "rejected", reason: "listener_not_ready" };
     }

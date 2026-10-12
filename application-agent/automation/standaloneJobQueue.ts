@@ -58,8 +58,14 @@ export async function runStandaloneJobQueueCommand(argv = process.argv.slice(2),
             timeoutMs: positive(env.ATELIER_EXECUTION_BROWSER_TIMEOUT_MS, 15_000, "ATELIER_EXECUTION_BROWSER_TIMEOUT_MS"),
           }))
         : undefined;
+      // Bind explicitly: the runtime is a class instance, and object spread
+      // would drop its prototype methods (processCuratedJob*, getApplication).
+      const configuredRuntime = runtime;
       processor = createCareerServiceQueueProcessor({
-        ...runtime,
+        processCuratedJob: configuredRuntime.processCuratedJob.bind(configuredRuntime),
+        processCuratedJobThroughHost: configuredRuntime.processCuratedJobThroughHost.bind(configuredRuntime),
+        getApplication: configuredRuntime.getApplication.bind(configuredRuntime),
+        notifyQueueHandoff: configuredRuntime.notifyQueueHandoff.bind(configuredRuntime),
         ...(routeDiscoverer ? { discoverApplicationRoute: routeDiscoverer.discover.bind(routeDiscoverer) } : {}),
       }, env.ATELIER_CAREER_AGENT_CAMPAIGN_ID.trim());
     } catch (error) {

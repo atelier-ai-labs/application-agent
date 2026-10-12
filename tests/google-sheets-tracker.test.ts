@@ -213,6 +213,32 @@ describe("Google Sheets job tracker", () => {
     expect(transport.updateCalls[0].some((entry) => entry.range.endsWith("E2") || entry.range.endsWith("F2"))).toBe(false);
   });
 
+  it("updates the user's existing row when the agent applied through a different link and legal name", async () => {
+    // Sidekick Solutions: the tracker row held an Indeed link, the agent
+    // applied through Gusto as "Sidekick Solutions LLC".
+    const empty = ["", "", "", "", "", "", "", "", "", "", "", "", ""];
+    const transport = new FakeSheetsTransport([
+      headers,
+      ["Acme Cloud", "Cloud Platform Engineer", "https://www.indeed.com/viewjob?jk=d37add03ff4d0bc6", "Remote — U.S.", ...empty],
+    ]);
+    const llcPosting = { ...posting, company: "Acme Cloud LLC" };
+    const result = await tracker(transport).recordApplied({ ...update, company: "Acme Cloud LLC" }, { ...context, job: llcPosting });
+    expect(result).toMatchObject({ ok: true, trackerRecordId: "Job Tracker!row:2" });
+    expect(transport.rows).toHaveLength(2);
+    expect(transport.rows[1]?.[8]).toBe("Applied");
+  });
+
+  it("still appends when the same company and role are in a different location", async () => {
+    const empty = ["", "", "", "", "", "", "", "", "", "", "", "", ""];
+    const transport = new FakeSheetsTransport([
+      headers,
+      ["Acme Cloud", "Cloud Platform Engineer", "https://www.indeed.com/viewjob?jk=1", "Remote — Canada", ...empty],
+    ]);
+    const result = await tracker(transport).recordApplied(update, context);
+    expect(result).toMatchObject({ ok: true, trackerRecordId: "Job Tracker!row:3" });
+    expect(transport.rows[1]?.[8]).toBe("");
+  });
+
   it("uses the provider-plus-record identity when URLs are unavailable", async () => {
     const providerHeaders = [...headers, "Provider Job ID"];
     const transport = new FakeSheetsTransport([providerHeaders]);

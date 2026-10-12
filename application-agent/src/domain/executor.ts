@@ -303,6 +303,14 @@ export interface LeverBrowserSession {
   detectUnavailablePage?(): Promise<BrowserUnavailablePage | null>;
   /** Clicks one uniquely identified public-listing Apply control and returns the resulting URL. */
   discoverApplicationRoute?(company: string, role: string): Promise<BrowserApplicationRouteDiscovery>;
+  /**
+   * Vaia's Easy Apply wizard gates its contact form behind an email step and a
+   * résumé-upload step. Completes only those two intro steps on the verified
+   * page so the details form can be inspected; never advances past details.
+   */
+  prepareVaiaApplication?(input: { email: string; resumePath: string; company: string; role: string }): Promise<void>;
+  /** Clicks Vaia's details-step Continue once, after preparation, and stops on the next (review) step. */
+  advanceVaiaToReview?(): Promise<void>;
   inspectFields(): Promise<readonly LeverBrowserField[]>;
   /** Read-only origin of the page form action, when present. */
   formActionOrigin?(): Promise<string | null>;
@@ -355,6 +363,11 @@ export interface BrowserExecutionTelemetry {
   captcha?: BrowserCaptchaDiagnostics;
 }
 
+export interface ExecutionReviewEntry {
+  label: string;
+  value: string;
+}
+
 export interface ExecutionInspection {
   status: ExecutionInspectionStatus;
   fields: readonly ApplicationFieldDescriptor[];
@@ -362,6 +375,8 @@ export interface ExecutionInspection {
   unresolvedFields: readonly string[];
   blockers: readonly CareerBlockerDraft[];
   resumeUsed?: string;
+  /** Read-back of what the executor filled, for the candidate's pre-submit review. */
+  reviewSummary?: readonly ExecutionReviewEntry[];
   evidence: readonly string[];
   /** Active inspection duration, excluding any human wait between attempts. */
   durationMs?: number;

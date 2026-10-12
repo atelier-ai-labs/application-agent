@@ -26,6 +26,7 @@ import {
   salaryValuesEqual,
 } from "../application-agent/src";
 import { isTrustedAutomaticConfirmation } from "../application-agent/src/domain/leverBrowserExecutor";
+import { canonicalJobUrl } from "../application-agent/src/domain/scout";
 import {
   classifyCaptchaEvidence,
   classifyUnavailablePage,
@@ -1276,6 +1277,145 @@ describe("LeverBrowserExecutor", () => {
     expect(fields[1]?.current).toBe(exampleCandidateProfile.identity.email);
     expect(fields[2]?.uploadCalls).toEqual(["/tmp/synthetic-cloud-platform.pdf"]);
     expect(session.navigations).toBe(1);
+    expect(session.submitClicks).toBe(0);
+  });
+
+  it("runs the Vaia email and résumé intro steps with grounded data before preparing details", async () => {
+    const vaiaUrl = canonicalJobUrl("https://partner.studysmarter.de/apply-form/?job_id=113902352&domain=us&lang=en-US&company=Changeis%2C%20Inc.&title=Junior%20Cloud%20Engineer")!;
+    const fields = [
+      new FakeField({ id: "name", label: "Full name", type: "text", required: true }),
+      new FakeField({ id: "email", label: "Email", type: "email", required: true }),
+    ];
+    const prepared: unknown[] = [];
+    class VaiaSession extends FakeSession {
+      async prepareVaiaApplication(input: { email: string; resumePath: string; company: string; role: string }): Promise<void> {
+        prepared.push(input);
+      }
+      async advanceVaiaToReview(): Promise<void> {
+        prepared.push("advanced-to-review");
+      }
+    }
+    const session = new VaiaSession(fields);
+    const base = request();
+    const vaiaJob = careerJob({
+      sourceId: "curated-live",
+      sourceRecordId: "vaia:113902352",
+      job: { ...base.careerJob.job, company: "Changeis, Inc.", title: "Junior Cloud Engineer", sourceUrl: vaiaUrl, applicationUrl: vaiaUrl },
+    });
+    const vaiaRequest = request({ careerJob: vaiaJob, application: application({ job: vaiaJob.job }) });
+    const executor = new LeverBrowserExecutor({
+      provider: "auto",
+      sessionFactory: new FakeSessionFactory(session),
+      resumePaths: { "cloud-platform": "/tmp/synthetic-cloud-platform.pdf" },
+      resumeFileExists: () => true,
+      now: () => capturedAt,
+    });
+
+    expect(executor.supports(vaiaRequest)).toBe(true);
+    const result = await executor.execute(vaiaRequest);
+
+    expect(result.state).toBe("ready_to_submit");
+    // Intro steps first, then exactly one details → review advance after filling.
+    expect(prepared).toEqual([
+      { email: exampleCandidateProfile.identity.email, resumePath: "/tmp/synthetic-cloud-platform.pdf", company: "Changeis, Inc.", role: "Junior Cloud Engineer" },
+      "advanced-to-review",
+    ]);
+    // The pre-submit review carries what is actually in each filled control.
+    expect(result.state === "ready_to_submit" ? result.inspection.reviewSummary : undefined).toEqual([
+      { label: "Full name", value: exampleCandidateProfile.identity.fullName },
+      { label: "Email", value: exampleCandidateProfile.identity.email },
+    ]);
+    // Vaia drops the job_id when /apply-form is opened without its trailing slash.
+    expect(session.url).toMatch(/^https:\/\/partner\.studysmarter\.de\/apply-form\/\?/);
+    expect(session.url).toContain("job_id=113902352");
+    expect(session.navigations).toBe(1);
+    expect(session.submitClicks).toBe(0);
+  });
+
+  it("stops for review without submitting when Vaia rejects the details step", async () => {
+    const vaiaUrl = canonicalJobUrl("https://partner.studysmarter.de/apply-form/?job_id=113902352&domain=us")!;
+    class VaiaSession extends FakeSession {
+      async prepareVaiaApplication(): Promise<void> {}
+      async advanceVaiaToReview(): Promise<void> { throw new Error("Vaia did not accept the details step: ZIP code is invalid."); }
+    }
+    const session = new VaiaSession([new FakeField({ id: "email", label: "Email", type: "email", required: true })]);
+    const base = request();
+    const vaiaJob = careerJob({ sourceId: "curated-live", sourceRecordId: "vaia:113902352", job: { ...base.careerJob.job, sourceUrl: vaiaUrl, applicationUrl: vaiaUrl } });
+    const result = await new LeverBrowserExecutor({
+      provider: "auto",
+      sessionFactory: new FakeSessionFactory(session),
+      resumePaths: { "cloud-platform": "/tmp/synthetic-cloud-platform.pdf" },
+      resumeFileExists: () => true,
+      now: () => capturedAt,
+    }).execute(request({ careerJob: vaiaJob, application: application({ job: vaiaJob.job }) }));
+
+    expect(result.state).not.toBe("ready_to_submit");
+    expect(JSON.stringify(result)).toContain("ZIP code is invalid");
+    expect(session.submitClicks).toBe(0);
+  });
+
+  it("fills a ZIP control labelled only through its accessible name with the profile postal code", async () => {
+    const profile = { ...exampleCandidateProfile, identity: { ...exampleCandidateProfile.identity, location: "McDonald, Pennsylvania, USA", postalCode: "15057" } };
+    const zip = new FakeField({ id: "f-plz", label: "10001", type: "text", required: true,
+      questionDescriptor: { accessibleName: "ZIP code", promptText: "ZIP code", sourceStrategy: "aria_labelledby", confidence: "high" } });
+    const city = new FakeField({ id: "f-city", label: "New York", type: "text", required: true,
+      questionDescriptor: { accessibleName: "City of residence", promptText: "City of residence", sourceStrategy: "aria_labelledby", confidence: "high" } });
+    const session = new FakeSession([new FakeField({ id: "email", label: "Email", type: "email", required: true }), city, zip]);
+    await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      resumePaths: { "cloud-platform": "/tmp/synthetic-cloud-platform.pdf" },
+      resumeFileExists: () => true,
+      now: () => capturedAt,
+    }).execute(request({ profile }));
+
+    expect(zip.current).toBe("15057");
+    expect(zip.current).not.toBe("McDonald, Pennsylvania, USA");
+    expect(city.current).toBe("McDonald");
+  });
+
+  it("does not report empty-value select options that the host snapshot validator rejects", async () => {
+    // Vaia's optional veteran select uses an empty value for "Prefer not to say".
+    const session = new FakeSession([
+      new FakeField({ id: "f-military", label: "Military / veteran status (optional)", type: "select", required: false,
+        options: [{ label: "Prefer not to say", value: "" }, { label: "Not a veteran", value: "not_veteran" }] }),
+    ]);
+    const inspection = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), now: () => capturedAt }).inspect(request());
+    expect(inspection.fields[0]?.options).toEqual([{ label: "Not a veteran", value: "not_veteran" }]);
+    expect(isExecutionInspection(inspection)).toBe(true);
+  });
+
+  it("trusts a Vaia confirmation only on the same verified apply form with the Done evidence", () => {
+    const vaiaUrl = "https://partner.studysmarter.de/apply-form/?job_id=113902352&domain=us";
+    const target = { provider: "vaia" as const, applicationUrl: vaiaUrl, postingId: "113902352" };
+    const confirmed = { clicked: true, confirmed: true, externalApplicationId: "vaia:113902352:t", confirmationOrigin: "https://partner.studysmarter.de", confirmationUrl: vaiaUrl, evidence: "submit:clicked; confirmation:vaia-done" };
+    expect(isTrustedAutomaticConfirmation(confirmed, target)).toBe(true);
+    expect(isTrustedAutomaticConfirmation({ ...confirmed, evidence: "submit:clicked; confirmation:missing" }, target)).toBe(false);
+    expect(isTrustedAutomaticConfirmation({ ...confirmed, confirmationUrl: "https://partner.studysmarter.de/apply-form/?job_id=999" }, target)).toBe(false);
+    expect(isTrustedAutomaticConfirmation({ ...confirmed, confirmationUrl: "https://evil.example/apply-form/?job_id=113902352", confirmationOrigin: "https://evil.example" }, target)).toBe(false);
+  });
+
+  it("does not start the Vaia intro steps without a configured résumé file", async () => {
+    const vaiaUrl = canonicalJobUrl("https://partner.studysmarter.de/apply-form/?job_id=113902352&domain=us")!;
+    let prepared = 0;
+    class VaiaSession extends FakeSession {
+      async prepareVaiaApplication(): Promise<void> { prepared += 1; }
+    }
+    const session = new VaiaSession([new FakeField({ id: "email", label: "Email", type: "email", required: true })]);
+    const base = request();
+    const vaiaJob = careerJob({
+      sourceId: "curated-live",
+      sourceRecordId: "vaia:113902352",
+      job: { ...base.careerJob.job, sourceUrl: vaiaUrl, applicationUrl: vaiaUrl },
+    });
+    const result = await new LeverBrowserExecutor({
+      provider: "auto",
+      sessionFactory: new FakeSessionFactory(session),
+      resumePaths: {},
+      now: () => capturedAt,
+    }).execute(request({ careerJob: vaiaJob, application: application({ job: vaiaJob.job }) }));
+
+    expect(result.state).not.toBe("ready_to_submit");
+    expect(prepared).toBe(0);
     expect(session.submitClicks).toBe(0);
   });
 
