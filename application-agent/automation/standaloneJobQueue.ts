@@ -6,6 +6,7 @@ import { createConfiguredBackgroundCareerAgentRuntime } from "./runtime/careerAg
 import { importTrackerRowsToQueue } from "./googleSheetsJobQueueImport";
 import { PlaywrightApplicationRouteDiscoverer } from "./applicationRouteDiscovery";
 import { PlaywrightLeverBrowserSessionFactory } from "./playwrightLeverBrowserSession";
+import { resolveTrackerLinks } from "./resolveTrackerLinksCli";
 
 function flag(args: readonly string[], name: string): string | undefined { const index = args.indexOf(name); return index >= 0 ? args[index + 1] : undefined; }
 function has(args: readonly string[], name: string): boolean { return args.includes(name); }
@@ -75,12 +76,29 @@ export async function runStandaloneJobQueueCommand(argv = process.argv.slice(2),
   } else if (processorMode === "noop") {
     processor = { async process() { return { status: "Needs Input", error: "No application processor is configured; queue claim was safely returned to human input." }; } };
   } else throw new Error("--processor must be noop or career-service.");
+  // Upgrade aggregator tracker links to verified direct postings before each
+  // import, trying each row once per process so polling stays cheap.
+  const attemptedLinkResolutions = new Set<string>();
   const once = async (poll = false) => {
     // The daily hunt writes approved roles to Job Tracker. Import them in the
     // same worker cycle so the queue cannot silently lag behind the tracker.
     // Import failures skip processing this cycle; processing stale rows could
     // otherwise make a transient Sheets failure look like a healthy poll.
     let trackerImport: Awaited<ReturnType<typeof importTrackerRowsToQueue>> | undefined;
+    if (poll && !has(args, "--skip-tracker-import") && !has(args, "--skip-link-resolution")) {
+      try {
+        const reports = await resolveTrackerLinks({
+          transport, queue, spreadsheetId,
+          trackerTab: flag(args, "--tracker-tab")?.trim() || env.ATELIER_GOOGLE_SHEET_TRACKER_TAB?.trim() || env.ATELIER_GOOGLE_SHEET_TAB?.trim() || "Job Tracker",
+          apply: true,
+          attempted: attemptedLinkResolutions,
+        });
+        const fixed = reports.filter((report) => report.applied?.startsWith("tracker"));
+        if (fixed.length > 0) console.log(JSON.stringify({ linkResolution: fixed.map((report) => ({ row: report.row, company: report.company, role: report.role, link: report.resolution.status === "resolved" ? report.resolution.url : undefined })) }));
+      } catch (error) {
+        console.log(JSON.stringify({ linkResolution: { status: "Failed", error: error instanceof Error ? error.message.slice(0, 300) : "Link resolution failed." } }));
+      }
+    }
     if (poll && !has(args, "--skip-tracker-import")) {
       try {
         trackerImport = await importTrackerRowsToQueue(queue, transport, spreadsheetId, flag(args, "--tracker-tab")?.trim() || env.ATELIER_GOOGLE_SHEET_TRACKER_TAB?.trim() || env.ATELIER_GOOGLE_SHEET_TAB?.trim() || "Job Tracker", false);
