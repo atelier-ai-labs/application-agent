@@ -138,6 +138,29 @@ class BlockingPreparationExecutor implements ApplicationExecutor {
   }
 }
 
+/** Holds its first execute open so a second resume can arrive mid-run. */
+class SlowFirstResumeExecutor extends BlockingPreparationExecutor {
+  readonly seenUpdatedAt: string[] = [];
+  private release?: () => void;
+
+  async execute(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult> {
+    this.executeCalls += 1;
+    this.seenUpdatedAt.push(request.careerJob.updatedAt);
+    if (this.executeCalls === 1) {
+      await new Promise<void>((resolve) => { this.release = resolve; });
+      return {
+        state: "requires_human",
+        blocker: { kind: "unknown_form_field", unit: "submission", field: "q2", question: "Second question", reason: "Not answered yet.", evidence: [], resumeAfterHuman: true },
+      };
+    }
+    return { state: "ready_to_submit", inspection: inspection() };
+  }
+
+  finishFirstRun(): void {
+    this.release?.();
+  }
+}
+
 class SubmittedProofExecutor extends BlockingPreparationExecutor {
   async execute(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult> {
     return {
@@ -944,6 +967,25 @@ describe("trusted local execution host", () => {
     };
 
     expect(trustedExecutionRequestReason(request)).toContain("not independently verified");
+  });
+
+  it("applies a resume that arrives while the previous one is still filling the form", async () => {
+    const executor = new SlowFirstResumeExecutor();
+    const { request } = await fixture("held-resume", executor);
+    const registry = new ExecutionSessionRegistry({ executor, sessionTimeoutMs: 30_000 });
+
+    const started = registry.start(request);
+    await registry.waitForStatus(started.id, ["waiting_for_human"]);
+    executor.completeHumanStep();
+    registry.resume(started.id, request);
+    while (executor.executeCalls === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+    const second = { ...request, careerJob: { ...request.careerJob, updatedAt: "2026-11-02T01:29:43.583Z" } };
+    expect(() => registry.resume(started.id, second)).not.toThrow();
+
+    executor.finishFirstRun();
+    const ready = await registry.waitForStatus(started.id, ["ready_to_submit"]);
+    expect(ready.result?.state).toBe("ready_to_submit");
+    expect(executor.seenUpdatedAt).toEqual([request.careerJob.updatedAt, "2026-11-02T01:29:43.583Z"]);
   });
 
   it("keeps the browser handle server-side and resumes the same session", async () => {

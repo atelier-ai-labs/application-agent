@@ -590,6 +590,27 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(country.current).toBe("United States +1");
   });
 
+  it("uses the newest answer when a question was asked again", async () => {
+    const full = "I learned about Upstart through this job posting or from a recruiter";
+    const prompt = "Before applying, how familiar were you with Upstart?*";
+    const familiar = new FakeField({ id: "question_67832269", label: prompt, type: "select", required: true,
+      options: ["I was already familiar with Upstart", full].map((label) => ({ label, value: label })),
+      questionDescriptor: { promptText: prompt, sourceStrategy: "question_container", confidence: "high" } });
+    const session = new FakeSession([familiar]);
+    const base = request(session);
+    const answered = (id: string, value: string, resolvedAt: string): CareerJob["blockers"][number] => ({
+      id, kind: "unknown_form_field", unit: "submission", field: "question_67832269", question: "Before applying, how familiar were you with Upstart?*",
+      context: { jobId: base.careerJob.id, company: "Upstart", role: "DevOps Engineer II" }, reason: "test", evidence: [`question-prompt:${prompt}`], status: "resolved", createdAt: capturedAt, resolvedAt, value,
+    });
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({
+      ...base,
+      careerJob: { ...base.careerJob, blockers: [answered("older", full.slice(0, 64), "2026-11-02T01:16:49.205Z"), answered("newer", full, "2026-11-02T01:29:43.583Z")] },
+    });
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(familiar.current).toBe(full);
+  });
+
   it("answers a location-preference checkbox group with Remote only", async () => {
     const descriptor = { promptText: "Location Preference", sectionTitle: "Application questions", sourceStrategy: "question_container", confidence: "high" } as const;
     const options = ["Burlingame, CA", "Austin, TX", "Remote"].map((label, index) =>

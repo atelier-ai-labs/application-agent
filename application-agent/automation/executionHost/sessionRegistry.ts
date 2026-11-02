@@ -78,6 +78,8 @@ interface ExecutionSession {
   snapshot: ExecutionHostSnapshot;
   timer?: ReturnType<typeof setTimeout>;
   running: boolean;
+  /** A resume that arrived while the form was busy; applied when it next stops. */
+  pendingResume?: ExecutionHostRequest;
   terminal: boolean;
   attempt: number;
   captchaWatchToken: number;
@@ -375,10 +377,6 @@ export class ExecutionSessionRegistry {
     const session = this.sessions.get(id);
     if (!session) throw new ExecutionHostRegistryError("Execution session was not found.", "not_found");
     if (session.terminal) throw new ExecutionHostRegistryError("That execution session is closed and cannot be resumed.", "state");
-    if (session.running) throw new ExecutionHostRegistryError("That execution session is already running.", "conflict");
-    if (session.snapshot.status !== "needs_input" && session.snapshot.status !== "waiting_for_human") {
-      throw new ExecutionHostRegistryError("Only a blocked browser execution can be resumed.", "state");
-    }
     if (replacement) {
       try {
         assertTrustedExecutionRequest(replacement);
@@ -390,8 +388,18 @@ export class ExecutionSessionRegistry {
         replacement.application.id !== session.request.application.id) {
         throw new ExecutionHostRegistryError("The replacement request does not belong to this browser execution.", "invalid_request");
       }
-      session.request = replacement;
     }
+    // Two Slack answers can arrive seconds apart. Rejecting the second one
+    // while the first resume is still filling the form would drop its answer,
+    // so hold the newest request and apply it once this run stops.
+    if (session.running) {
+      session.pendingResume = replacement ?? session.request;
+      return this.snapshot(session);
+    }
+    if (session.snapshot.status !== "needs_input" && session.snapshot.status !== "waiting_for_human") {
+      throw new ExecutionHostRegistryError("Only a blocked browser execution can be resumed.", "state");
+    }
+    if (replacement) session.request = replacement;
     this.stopCaptchaWatch(session);
     session.attempt += 1;
     session.snapshot = {
@@ -690,6 +698,16 @@ export class ExecutionSessionRegistry {
     } finally {
       this.addTelemetry(session, { browserPreparationDurationMs: monotonicNow() - browserPreparationStartedAt });
       session.running = false;
+      const pending = session.pendingResume;
+      session.pendingResume = undefined;
+      if (pending && !session.terminal &&
+        (session.snapshot.status === "needs_input" || session.snapshot.status === "waiting_for_human")) {
+        try {
+          this.resume(session.id, pending);
+        } catch (error) {
+          this.log(session, "failed", safeReason(error, "A held resume could not be applied."));
+        }
+      }
     }
   }
 

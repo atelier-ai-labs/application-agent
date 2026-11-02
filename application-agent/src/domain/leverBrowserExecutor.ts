@@ -1153,10 +1153,12 @@ function resolvedCareerValue(
   field: ApplicationFieldDescriptor,
   request: ApplicationExecutionRequest,
 ): AnswerValue | undefined {
+  // Newest answer first: when a question was asked again because the form
+  // rejected the earlier answer, the later reply is the one to use.
   const candidates = request.careerJob.blockers.filter(
     (blocker) => blocker.status === "resolved" && isAnswerValuePresent(blocker.value) &&
       (field.classification !== "unknown" || blocker.kind === "unknown_form_field"),
-  );
+  ).sort((left, right) => (right.resolvedAt ?? "").localeCompare(left.resolvedAt ?? ""));
   const exact = candidates.find((blocker) => blocker.field === field.id);
   if (exact && careerBlockerMatchesField(exact, field)) return exact.value;
   const byQuestion = candidates.find((blocker) => normalized(blocker.question) === normalized(field.label));
