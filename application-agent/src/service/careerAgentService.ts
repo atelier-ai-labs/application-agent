@@ -2264,9 +2264,15 @@ export class CareerAgentService {
       }
     }
 
+    // An older answer to the same form field (one the form rejected) must not
+    // outlive this one: drop it so a later rerun cannot pick it up again. The
+    // attention events keep the full answer history.
+    const superseded = (candidate: CareerBlocker) => candidate.id !== blocker.id &&
+      candidate.status === "resolved" && Boolean(blocker.field) && candidate.field === blocker.field &&
+      candidate.question.trim().toLowerCase() === blocker.question.trim().toLowerCase();
     const resolved: CareerJob = {
       ...job,
-      blockers: job.blockers.map((candidate) =>
+      blockers: job.blockers.filter((candidate) => !superseded(candidate)).map((candidate) =>
         candidate.id === blocker.id
           ? {
               ...candidate,

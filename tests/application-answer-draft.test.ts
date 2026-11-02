@@ -111,7 +111,9 @@ class SubjectiveQuestionExecutor implements ApplicationExecutor {
   }
 }
 
-function draftService(options: { profile?: CandidateProfile; onDraftRequest?: () => void; draftEnabled?: () => boolean; allowGroundedDrafts?: boolean; reviewModelDrafts?: boolean; now?: () => string } = {}) {
+function draftService(options: { profile?: CandidateProfile; onDraftRequest?: () => void; draftEnabled?: () => boolean; allowGroundedDrafts?: boolean; reviewModelDrafts?: boolean; now?: () => string; uniqueIds?: boolean } = {}) {
+  let idCounter = 0;
+  const createId = (prefix: string) => options.uniqueIds ? `${prefix}-answer-draft-${(idCounter += 1)}` : `${prefix}-answer-draft`;
   const profile = options.profile ?? privateProfile();
   const careerRepository = new InMemoryCareerRepository();
   const applicationRepository = new InMemoryApplicationRepository();
@@ -123,7 +125,7 @@ function draftService(options: { profile?: CandidateProfile; onDraftRequest?: ()
     {
       applicationService: new ApplicationService(applicationRepository, profile, new DeterministicModelClient(), {
         now: () => capturedAt,
-        createId: (prefix) => `${prefix}-answer-draft`,
+        createId,
       }),
       careerRepository,
       scout: new JobScout({ [source.id]: source }, () => capturedAt),
@@ -139,7 +141,7 @@ function draftService(options: { profile?: CandidateProfile; onDraftRequest?: ()
         };
       },
     },
-    { now: options.now ?? (() => capturedAt), createId: (prefix) => `${prefix}-answer-draft` },
+    { now: options.now ?? (() => capturedAt), createId },
   );
   const campaign = service.createCampaign({
     name: "Answer draft acceptance",
@@ -748,6 +750,7 @@ describe("local ATS answer drafting", () => {
     let tick = 0;
     const { service, campaign, executor, notifications } = draftService({
       draftEnabled: () => false,
+      uniqueIds: true,
       now: () => new Date(Date.parse(capturedAt) + (tick += 1000)).toISOString(),
     });
     service.activateCampaign(campaign.id);
@@ -765,6 +768,18 @@ describe("local ATS answer drafting", () => {
     const events = service.listAttentionEvents(campaign.id);
     expect(events.map((event) => event.status)).toEqual(["resolved", "open"]);
     expect(notifications.publishedEvents.length).toBeGreaterThan(0);
+
+    const retry = events.find((event) => event.status === "open")!;
+    await service.resolveAttentionResponse({
+      eventId: retry.id,
+      selectedOption: "The answer that fits",
+      actorIdentity: { provider: "test", userId: "human-1" },
+      respondedAt: capturedAt,
+    });
+    const answers = service.getJob(service.listJobs(campaign.id)[0].id).blockers
+      .filter((blocker) => blocker.field === "behavioral-question-1" && blocker.status === "resolved")
+      .map((blocker) => blocker.value);
+    expect(answers).toEqual(["The answer that fits"]);
   });
 
   it("passes an edited Slack answer through as the exact blocker value", async () => {
