@@ -2496,6 +2496,20 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
             // typeahead cannot expose and commit a unique option.
           }
         }
+        // A multi-select drops its picked options from the menu, so a resumed
+        // run sees "Man" as the value but not among the options. Accept it
+        // only when the normal decision, given that value as a candidate,
+        // chooses exactly it.
+        if (fieldDescriptor.type === "select" && typeof effectiveCurrent === "string" && effectiveCurrent.trim() &&
+          !fieldDescriptor.options?.some((option) => normalized(option.label) === normalized(effectiveCurrent))) {
+          const withCurrent = { ...fieldDescriptor, options: [...(fieldDescriptor.options ?? []), { label: effectiveCurrent, value: effectiveCurrent }] };
+          const decision = decisionForField(withCurrent, request, resumePath, executorEvidenceLabel(observed.target.provider));
+          if (typeof decision.value === "string" && normalized(decision.value) === normalized(effectiveCurrent)) {
+            fieldsFilled.add(fieldDescriptor.id);
+            evidence.push(`existing-value-verified:${fieldDescriptor.id}`);
+            continue;
+          }
+        }
         if (meaningfulCurrentValue(effectiveCurrent) && (fieldDescriptor.type === "select" || fieldDescriptor.type === "radio" || fieldDescriptor.type === "checkbox")) {
           const blocker = formBlocker(fieldDescriptor, "The existing control value did not exactly match one verified option; it was left untouched.", "unknown_form_field", "ATS_FORM", executorEvidenceLabel(observed.target.provider));
           blockers.push(blocker);

@@ -675,6 +675,24 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(employed.current).toBeNull();
   });
 
+  it("accepts a multi-select's picked chip only when it is the agent's own answer", async () => {
+    const run = async (current: string) => {
+      // The picked option is no longer listed in the menu once it is a chip.
+      const all = ["Man", "Non-binary", "Woman", "I don't wish to answer"];
+      const gender = new FakeField({ id: "4016404008", label: "How would you describe your gender identity?", type: "select", required: true, current,
+        options: all.filter((label) => label !== current).map((label) => ({ label, value: label })) });
+      const session = new FakeSession([gender]);
+      const base = request(session);
+      const profile: CandidateProfile = {
+        ...exampleCandidateProfile,
+        approvedReusableAnswers: { ...exampleCandidateProfile.approvedReusableAnswers, gender_identity: "Male" },
+      };
+      return new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...base, profile });
+    };
+    expect((await run("Man")).state).toBe("ready_to_submit");
+    expect((await run("Woman")).state).toBe("requires_human");
+  });
+
   it("answers a location-preference checkbox group with Remote only", async () => {
     const descriptor = { promptText: "Location Preference", sectionTitle: "Application questions", sourceStrategy: "question_container", confidence: "high" } as const;
     const options = ["Burlingame, CA", "Austin, TX", "Remote"].map((label, index) =>
