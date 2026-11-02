@@ -688,7 +688,10 @@ describe("Slack human-attention adapter", () => {
     expect(requests).toHaveLength(1);
     expect(JSON.parse(requests[0]).thread_ts).toBeUndefined();
     expect(JSON.parse(requests[0]).text).toContain("reply DONE");
-    expect(JSON.parse(requests[0]).text).toContain("protected browser handoff below");
+    // The handoff link is view-only; the message sends the user to the real window.
+    expect(JSON.parse(requests[0]).text).toContain("agent's Chromium window");
+    expect(JSON.parse(requests[0]).text).toContain("only shows a picture");
+    expect(JSON.parse(requests[0]).text).toContain("Open the protected browser handoff");
     expect(JSON.parse(requests[0]).text).not.toContain("open local browser");
     expect(JSON.parse(requests[0]).text).not.toContain("No interactive browser link is provided");
     expect(JSON.parse(requests[0]).unfurl_links).toBe(false);
@@ -832,6 +835,32 @@ describe("Slack human-attention adapter", () => {
       messageTs: "1710000000.000011",
       channelId: "C123456",
     });
+  });
+
+  it("answers a reply in a non-question thread instead of ignoring it silently", async () => {
+    const requests: Record<string, unknown>[] = [];
+    const responses: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      eventLookup: () => freeTextEvent(),
+      responseHandler: async () => {
+        responses.push("unexpected");
+        return { status: "resolved" };
+      },
+      fetcher: async (_input, init) => {
+        requests.push(JSON.parse(typeof init?.body === "string" ? init.body : "{}"));
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000002" }) } as Response;
+      },
+    });
+    await adapter.publishAttentionEvent(freeTextEvent());
+    // "skip" posted under a different message (a review or "not confirmed" notice).
+    await adapter.handleSocketEnvelope(JSON.stringify(messageEnvelope({ thread_ts: "1710000000.999999", text: "skip" })));
+
+    expect(responses).toEqual([]);
+    const reply = requests.at(-1)!;
+    expect(reply.thread_ts).toBe("1710000000.999999");
+    expect(String(reply.text)).toContain("couldn't match this reply");
+    expect(String(reply.text)).toContain("What compensation do you expect for this role?");
   });
 
   it("does not create a correlation timestamp when Slack omits the message timestamp", async () => {

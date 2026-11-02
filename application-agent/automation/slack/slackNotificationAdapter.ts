@@ -146,8 +146,10 @@ function eventMessage(
         ? "Open the browser below and look at the page. If it says your application was submitted, reply DONE. Otherwise, reply with what you see."
         : "Look at the agent's browser window. If it says your application was submitted, reply DONE. Otherwise, reply with what you see."
       : renderOptions.handoffUrl
-        ? "Use the protected browser handoff below to complete the verification, then reply DONE in this thread."
-        : "Complete the verification in the open local browser, then reply DONE in this thread. If the browser session has closed, reply DONE and I will report that the session expired without retrying submission.";
+        // The handoff page is a view-only picture plus a "verify you are human"
+        // button; image CAPTCHAs need the real window on the user's computer.
+        ? "Solve it in the agent's Chromium window on your computer (the link below only shows a picture of the page, plus a button for simple \"verify you're human\" checks), then reply DONE in this thread."
+        : "Solve it in the agent's Chromium window on your computer, then reply DONE in this thread. If the browser session has closed, reply DONE and I will report that the session expired without retrying submission.";
     const link = renderOptions.handoffUrl ? `\n\nOpen the protected browser handoff: ${markdownText(renderOptions.handoffUrl, 500)}` : "";
     const text = `${markdownText(event.title, 160)}\n${markdownText(event.context.company, 160)} — ${markdownText(event.context.role, 200)}\n\n${handoffText}\n\n${instruction}${link}`;
     return {
@@ -496,6 +498,25 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     });
   }
 
+  /**
+   * A reply under one of the agent's own messages that is not an open
+   * question (a review or "not confirmed" notice) was silently ignored, so
+   * the user waited for nothing. Say so in that thread and list what is open.
+   */
+  private async pointToOpenQuestions(threadTs: string): Promise<void> {
+    // Questions this adapter posted plus those hydrated from durable state.
+    const ids = new Set([...this.publishedAttentionEvents.keys(), ...[...this.threadEventIds.values()].flatMap((set) => [...set])]);
+    const open = [...ids]
+      .map((id) => this.eventLookup?.(id) ?? this.publishedAttentionEvents.get(id))
+      .filter((event): event is AttentionEvent => Boolean(event && event.status === "open" && event.type === "needs_input" && event.question))
+      .slice(0, 5)
+      .map((event) => `• *${markdownText(event.context.company, 80)}*: ${markdownText(event.question!.prompt, 160)}`);
+    const text = open.length > 0
+      ? `I couldn't match this reply to an open question, so I didn't use it. Reply in the thread of the question you're answering:\n${open.join("\n")}`
+      : "I couldn't match this reply to an open question, so I didn't use it. Nothing is waiting on you right now.";
+    await this.callApi("chat.postMessage", this.config.botToken, { channel: this.config.channelId, thread_ts: threadTs, text });
+  }
+
   /** Posts a link-only notice for a queue row the agent will not open itself. */
   async publishQueueHandoffNotice(notice: QueueHandoffNotice): Promise<void> {
     let url: URL;
@@ -820,6 +841,9 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     const eventIds = this.threadEventIds.get(threadTs);
     if (!eventIds) {
       this.diagnosticLogger.info("ignored: unmatched thread");
+      await this.pointToOpenQuestions(threadTs).catch(() => {
+        this.diagnosticLogger.warn("could not reply to an unmatched thread");
+      });
       return;
     }
     // A listener can receive a reply for an event persisted by another
