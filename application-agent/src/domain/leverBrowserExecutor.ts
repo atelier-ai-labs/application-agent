@@ -2349,7 +2349,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
 
   async execute(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult> {
     const startedAt = this.now();
-    const observed = await this.inspectForm(request, startedAt, "executor");
+    let observed = await this.inspectForm(request, startedAt, "executor");
     if (observed.inspection.status === "failed") {
       return failedResult(
         observed.inspection.evidence.find((item) => item.startsWith("error:"))?.slice("error:".length) ?? `${providerLabel(observed.target.provider)} form inspection failed.`,
@@ -2399,150 +2399,163 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
     const orderedFields = [...observed.fields].sort((left, right) =>
       Number(descriptor(left).classification === "resume_upload") -
       Number(descriptor(right).classification === "resume_upload"));
-    for (const field of orderedFields) {
-      const fieldDescriptor = descriptor(field);
-      let current: string | boolean | null | undefined;
-      try {
-        current = field.readValue ? await field.readValue() : undefined;
-      } catch {
-        current = undefined;
-      }
-      const effectiveCurrent = isUnansweredCustomSelectValue(fieldDescriptor, current) ? null : current;
-      if (fieldDescriptor.classification === "resume_upload" && /uploaded\s+successfully/i.test(fieldDescriptor.label)) {
-        fieldsFilled.add(fieldDescriptor.id);
-        resumeAlreadyUploaded = true;
-        resumeUsed = request.application.resume?.familyId;
-        evidence.push(`resume-existing:${fieldDescriptor.id}`);
-        continue;
-      }
-      if (meaningfulCurrentValue(effectiveCurrent) && verifiedCommittedCurrentValue(
-        fieldDescriptor,
-        effectiveCurrent,
-        request.profile?.identity.location ?? request.profile?.location ?? undefined,
-      )) {
-        fieldsFilled.add(fieldDescriptor.id);
-        if (fieldDescriptor.classification === "resume_upload") {
-          resumeUsed = request.application.resume?.familyId;
-        }
-        continue;
-      }
-      const groundedLocation = request.profile?.identity.location ?? request.profile?.location ?? undefined;
-      // Ashby's location autocomplete can hide its options after a committed
-      // value is re-inspected. When the existing value is still positively
-      // tied to the grounded profile location, reselect that same value
-      // through the normal typeahead/commit path so the browser can re-open
-      // and verify the live option. Never use this recovery for another ATS,
-      // an arbitrary value, or a control with an available option snapshot.
-      if (observed.target.provider === "ashby" &&
-        fieldDescriptor.classification === "location" &&
-        fieldDescriptor.type === "select" &&
-        (!fieldDescriptor.options || fieldDescriptor.options.length === 0) &&
-        groundedLocation &&
-        typeof effectiveCurrent === "string" &&
-        groundedLocationStringsMatch(effectiveCurrent, groundedLocation)) {
+    // Answering one question can reveal another: Greenhouse renders "Please
+    // identify your race" only after Hispanic/Latino is answered. After each
+    // pass, re-read the form and fill any newly revealed controls (bounded).
+    const formFields = [...observed.fields];
+    observed = { ...observed, fields: formFields };
+    let pending: readonly LeverBrowserField[] = orderedFields;
+    for (let pass = 0; pass < 3 && pending.length > 0; pass += 1) {
+      for (const field of pending) {
+        const fieldDescriptor = descriptor(field);
+        let current: string | boolean | null | undefined;
         try {
-          await field.select(groundedLocation, { groundedLocation });
-          const recommitted = field.readValue ? await field.readValue() : undefined;
-          if (typeof recommitted === "string" && groundedLocationStringsMatch(recommitted, groundedLocation)) {
-            fieldsFilled.add(fieldDescriptor.id);
-            evidence.push(`reselected-grounded-location:${fieldDescriptor.id}`);
-            continue;
-          }
+          current = field.readValue ? await field.readValue() : undefined;
         } catch {
-          // Preserve the normal fail-closed blocker below when the live
-          // typeahead cannot expose and commit a unique option.
+          current = undefined;
         }
-      }
-      if (meaningfulCurrentValue(effectiveCurrent) && (fieldDescriptor.type === "select" || fieldDescriptor.type === "radio" || fieldDescriptor.type === "checkbox")) {
-        const blocker = formBlocker(fieldDescriptor, "The existing control value did not exactly match one verified option; it was left untouched.", "unknown_form_field", "ATS_FORM", executorEvidenceLabel(observed.target.provider));
-        blockers.push(blocker);
-        unresolvedFields.add(fieldDescriptor.label);
-        continue;
-      }
-
-      if (this.options.allowedFieldClassifications && !this.options.allowedFieldClassifications.includes(fieldDescriptor.classification)) {
-        if (fieldDescriptor.required || isReferralField(fieldDescriptor)) blockers.push(formBlocker(fieldDescriptor,
-          "This field requires human input under the current preparation restrictions.",
-          blockerKind(fieldDescriptor.classification), "ATS_FORM", executorEvidenceLabel(observed.target.provider)));
-        unresolvedFields.add(fieldDescriptor.label);
-        continue;
-      }
-
-      const decision = decisionForField(fieldDescriptor, request, resumePath, executorEvidenceLabel(observed.target.provider));
-      if (decision.blocker) {
-        blockers.push(decision.blocker);
-        unresolvedFields.add(fieldDescriptor.label);
-        continue;
-      }
-      if (decision.leaveUntouched || decision.value === undefined) {
-        unresolvedFields.add(fieldDescriptor.label);
-        continue;
-      }
-
-      if (fieldDescriptor.classification === "resume_upload" && resumeAlreadyUploaded) {
-        // Never upload the selected resume into a second unlabeled attachment
-        // control once the primary Rippling resume is already present.
-        evidence.push(`resume-upload-skipped:${fieldDescriptor.id}`);
-        unresolvedFields.add(fieldDescriptor.label);
-        continue;
-      }
-
-      try {
-        if (fieldDescriptor.type === "file") {
-          const path = valueAsString(decision.value);
-          if (!path || (this.options.resumeFileExists && !(await this.options.resumeFileExists(path)))) {
-            const blocker = formBlocker(fieldDescriptor, "The configured resume artifact is not available at execution time.", "required_file_missing", "ATS_FORM", executorEvidenceLabel(observed.target.provider));
-            if (fieldDescriptor.required) blockers.push(blocker);
-            unresolvedFields.add(fieldDescriptor.label);
-            continue;
-          }
-          await field.uploadFile(path);
+        const effectiveCurrent = isUnansweredCustomSelectValue(fieldDescriptor, current) ? null : current;
+        if (fieldDescriptor.classification === "resume_upload" && /uploaded\s+successfully/i.test(fieldDescriptor.label)) {
+          fieldsFilled.add(fieldDescriptor.id);
+          resumeAlreadyUploaded = true;
           resumeUsed = request.application.resume?.familyId;
-          evidence.push(`resume-uploaded:${fieldDescriptor.id}`);
-        } else if (fieldDescriptor.type === "checkbox") {
-          const checked = checkboxValue(decision.value);
-          if (checked === undefined) throw new Error("Checkbox value was not boolean.");
-          await field.setChecked(checked);
-        } else if (fieldDescriptor.type === "select" || fieldDescriptor.type === "radio") {
-          const selected = optionValue(fieldDescriptor, decision.value);
-          if (!selected) throw new Error("Selected option was empty.");
-          await field.select(selected, fieldDescriptor.classification === "location" && request.profile
-            ? { groundedLocation: request.profile.identity.location ?? request.profile.location ?? undefined }
-            : undefined);
-        } else {
-          const value = valueAsString(decision.value);
-          if (!value) throw new Error("Text value was empty.");
-          const isSalary = fieldDescriptor.classification === "salary";
-          const fillValue = isSalary ? normalizeNumericSalaryValue(value) : value;
-          if (isSalary && !fillValue) throw new Error("The authorized salary value was not a supported numeric amount.");
-          await field.fill(fillValue ?? value);
-          const committed = field.readValue ? await field.readValue() : undefined;
-          const committedMatches = isSalary && typeof committed === "string"
-            ? salaryValuesEqual(fillValue ?? value, committed)
-            : committed === value;
-          if (typeof committed === "string" && !committedMatches) {
-            throw new Error(`The value for ${fieldDescriptor.label} was not committed by the form.`);
+          evidence.push(`resume-existing:${fieldDescriptor.id}`);
+          continue;
+        }
+        if (meaningfulCurrentValue(effectiveCurrent) && verifiedCommittedCurrentValue(
+          fieldDescriptor,
+          effectiveCurrent,
+          request.profile?.identity.location ?? request.profile?.location ?? undefined,
+        )) {
+          fieldsFilled.add(fieldDescriptor.id);
+          if (fieldDescriptor.classification === "resume_upload") {
+            resumeUsed = request.application.resume?.familyId;
+          }
+          continue;
+        }
+        const groundedLocation = request.profile?.identity.location ?? request.profile?.location ?? undefined;
+        // Ashby's location autocomplete can hide its options after a committed
+        // value is re-inspected. When the existing value is still positively
+        // tied to the grounded profile location, reselect that same value
+        // through the normal typeahead/commit path so the browser can re-open
+        // and verify the live option. Never use this recovery for another ATS,
+        // an arbitrary value, or a control with an available option snapshot.
+        if (observed.target.provider === "ashby" &&
+          fieldDescriptor.classification === "location" &&
+          fieldDescriptor.type === "select" &&
+          (!fieldDescriptor.options || fieldDescriptor.options.length === 0) &&
+          groundedLocation &&
+          typeof effectiveCurrent === "string" &&
+          groundedLocationStringsMatch(effectiveCurrent, groundedLocation)) {
+          try {
+            await field.select(groundedLocation, { groundedLocation });
+            const recommitted = field.readValue ? await field.readValue() : undefined;
+            if (typeof recommitted === "string" && groundedLocationStringsMatch(recommitted, groundedLocation)) {
+              fieldsFilled.add(fieldDescriptor.id);
+              evidence.push(`reselected-grounded-location:${fieldDescriptor.id}`);
+              continue;
+            }
+          } catch {
+            // Preserve the normal fail-closed blocker below when the live
+            // typeahead cannot expose and commit a unique option.
           }
         }
-        fieldsFilled.add(fieldDescriptor.id);
-        evidence.push(`filled:${fieldDescriptor.id}`);
-      } catch (error) {
-        const reason = safeErrorMessage(error, "The field could not be filled.");
-        return failedResult(`Could not fill ${fieldDescriptor.label}: ${reason}`, startedAt, this.now(), inspection(
-          "failed",
-          observed.inspection.fields,
-          observed.inspection.startedAt,
-          this.now(),
-          {
-            fieldsFilled: [...fieldsFilled],
-            unresolvedFields: [...unresolvedFields],
-            blockers,
-            ...(resumeUsed ? { resumeUsed } : {}),
-            ...inspectionTelemetry(observed.inspection),
-            evidence: [...evidence, `error:${reason}`],
-          },
-        ), true, true);
+        if (meaningfulCurrentValue(effectiveCurrent) && (fieldDescriptor.type === "select" || fieldDescriptor.type === "radio" || fieldDescriptor.type === "checkbox")) {
+          const blocker = formBlocker(fieldDescriptor, "The existing control value did not exactly match one verified option; it was left untouched.", "unknown_form_field", "ATS_FORM", executorEvidenceLabel(observed.target.provider));
+          blockers.push(blocker);
+          unresolvedFields.add(fieldDescriptor.label);
+          continue;
+        }
+
+        if (this.options.allowedFieldClassifications && !this.options.allowedFieldClassifications.includes(fieldDescriptor.classification)) {
+          if (fieldDescriptor.required || isReferralField(fieldDescriptor)) blockers.push(formBlocker(fieldDescriptor,
+            "This field requires human input under the current preparation restrictions.",
+            blockerKind(fieldDescriptor.classification), "ATS_FORM", executorEvidenceLabel(observed.target.provider)));
+          unresolvedFields.add(fieldDescriptor.label);
+          continue;
+        }
+
+        const decision = decisionForField(fieldDescriptor, request, resumePath, executorEvidenceLabel(observed.target.provider));
+        if (decision.blocker) {
+          blockers.push(decision.blocker);
+          unresolvedFields.add(fieldDescriptor.label);
+          continue;
+        }
+        if (decision.leaveUntouched || decision.value === undefined) {
+          unresolvedFields.add(fieldDescriptor.label);
+          continue;
+        }
+
+        if (fieldDescriptor.classification === "resume_upload" && resumeAlreadyUploaded) {
+          // Never upload the selected resume into a second unlabeled attachment
+          // control once the primary Rippling resume is already present.
+          evidence.push(`resume-upload-skipped:${fieldDescriptor.id}`);
+          unresolvedFields.add(fieldDescriptor.label);
+          continue;
+        }
+
+        try {
+          if (fieldDescriptor.type === "file") {
+            const path = valueAsString(decision.value);
+            if (!path || (this.options.resumeFileExists && !(await this.options.resumeFileExists(path)))) {
+              const blocker = formBlocker(fieldDescriptor, "The configured resume artifact is not available at execution time.", "required_file_missing", "ATS_FORM", executorEvidenceLabel(observed.target.provider));
+              if (fieldDescriptor.required) blockers.push(blocker);
+              unresolvedFields.add(fieldDescriptor.label);
+              continue;
+            }
+            await field.uploadFile(path);
+            resumeUsed = request.application.resume?.familyId;
+            evidence.push(`resume-uploaded:${fieldDescriptor.id}`);
+          } else if (fieldDescriptor.type === "checkbox") {
+            const checked = checkboxValue(decision.value);
+            if (checked === undefined) throw new Error("Checkbox value was not boolean.");
+            await field.setChecked(checked);
+          } else if (fieldDescriptor.type === "select" || fieldDescriptor.type === "radio") {
+            const selected = optionValue(fieldDescriptor, decision.value);
+            if (!selected) throw new Error("Selected option was empty.");
+            await field.select(selected, fieldDescriptor.classification === "location" && request.profile
+              ? { groundedLocation: request.profile.identity.location ?? request.profile.location ?? undefined }
+              : undefined);
+          } else {
+            const value = valueAsString(decision.value);
+            if (!value) throw new Error("Text value was empty.");
+            const isSalary = fieldDescriptor.classification === "salary";
+            const fillValue = isSalary ? normalizeNumericSalaryValue(value) : value;
+            if (isSalary && !fillValue) throw new Error("The authorized salary value was not a supported numeric amount.");
+            await field.fill(fillValue ?? value);
+            const committed = field.readValue ? await field.readValue() : undefined;
+            const committedMatches = isSalary && typeof committed === "string"
+              ? salaryValuesEqual(fillValue ?? value, committed)
+              : committed === value;
+            if (typeof committed === "string" && !committedMatches) {
+              throw new Error(`The value for ${fieldDescriptor.label} was not committed by the form.`);
+            }
+          }
+          fieldsFilled.add(fieldDescriptor.id);
+          evidence.push(`filled:${fieldDescriptor.id}`);
+        } catch (error) {
+          const reason = safeErrorMessage(error, "The field could not be filled.");
+          return failedResult(`Could not fill ${fieldDescriptor.label}: ${reason}`, startedAt, this.now(), inspection(
+            "failed",
+            observed.inspection.fields,
+            observed.inspection.startedAt,
+            this.now(),
+            {
+              fieldsFilled: [...fieldsFilled],
+              unresolvedFields: [...unresolvedFields],
+              blockers,
+              ...(resumeUsed ? { resumeUsed } : {}),
+              ...inspectionTelemetry(observed.inspection),
+              evidence: [...evidence, `error:${reason}`],
+            },
+          ), true, true);
+        }
       }
+      const known = new Set(formFields.map((field) => field.id));
+      const revealed = (await observed.session.inspectFields().catch(() => [] as readonly LeverBrowserField[]))
+        .filter((field) => !known.has(field.id));
+      formFields.push(...revealed);
+      pending = revealed;
     }
 
     // A later React rerender can replace Ashby's canonical file input after

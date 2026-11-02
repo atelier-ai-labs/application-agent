@@ -611,6 +611,25 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(familiar.current).toBe(full);
   });
 
+  it("fills the race question Greenhouse reveals after Hispanic/Latino is answered", async () => {
+    const hispanic = new FakeField({ id: "hispanic_ethnicity", label: "Are you Hispanic/Latino?*", type: "select", required: true,
+      options: ["Yes", "No", "Decline To Self Identify"].map((label) => ({ label, value: label })) });
+    const race = new FakeField({ id: "race", label: "Please identify your race*", type: "select", required: true,
+      options: ["Asian", "Black or African American", "White", "Decline To Self Identify"].map((label) => ({ label, value: label })) });
+    const session = new FakeSession([hispanic]);
+    session.inspectFields = async () => hispanic.current === "No" ? [hispanic, race] : [hispanic];
+    const base = request(session);
+    const profile: CandidateProfile = {
+      ...exampleCandidateProfile,
+      approvedReusableAnswers: { ...exampleCandidateProfile.approvedReusableAnswers, hispanic_latino: "No", race_ethnicity: "White" },
+    };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...base, profile });
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(hispanic.current).toBe("No");
+    expect(race.current).toBe("White");
+  });
+
   it("answers a location-preference checkbox group with Remote only", async () => {
     const descriptor = { promptText: "Location Preference", sectionTitle: "Application questions", sourceStrategy: "question_container", confidence: "high" } as const;
     const options = ["Burlingame, CA", "Austin, TX", "Remote"].map((label, index) =>
