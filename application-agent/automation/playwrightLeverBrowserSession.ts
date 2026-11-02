@@ -3199,6 +3199,19 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       const candidate = invalidControls.nth(index);
       if (!(await visibleFormControl(candidate))) continue;
       if (evidence.length >= 12) continue;
+      // Not real gaps (Greenhouse): a fieldset is :invalid only through its
+      // controls; an aria-hidden "requiredInput" mirrors a combobox that the
+      // provider validates itself (optional demographics carry one too); and
+      // every box of a multi-choice group is `required` even once one is checked.
+      const providerOwned = await candidate.evaluate((element) => {
+        if (element.tagName === "FIELDSET" || element.getAttribute("aria-hidden") === "true") return true;
+        const input = element as HTMLInputElement;
+        if (input.type === "checkbox" && input.name) {
+          return Array.from(document.getElementsByName(input.name)).some((other) => (other as HTMLInputElement).checked);
+        }
+        return false;
+      }).catch(() => false);
+      if (providerOwned) continue;
       const observation = await candidate.evaluate((element): NativeValidityObservation => {
         const validity = (element as HTMLInputElement).validity;
         const flags = ["valueMissing", "typeMismatch", "patternMismatch", "tooLong", "tooShort", "rangeUnderflow", "rangeOverflow", "stepMismatch", "badInput", "customError"]

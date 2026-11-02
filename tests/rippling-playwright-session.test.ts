@@ -203,6 +203,29 @@ describe("Rippling Playwright DOM integration", () => {
     expect(clicks).toBe(0);
   });
 
+  it("does not block Submit on Greenhouse's provider-validated controls", async () => {
+    let clicks = 0;
+    const box = (value: string, checked: boolean) =>
+      `<input type="checkbox" name="question_1[]" id="question_1[]_${value}" value="${value}" required${checked ? " checked" : ""}>`;
+    document.body.innerHTML = `<form>
+      <input role="combobox" id="gender" value=""><input required tabindex="-1" aria-hidden="true" class="remix-requiredInput" value="">
+      <fieldset class="checkbox" aria-required="true"><legend>Location Preference</legend>${box("austin", false)}${box("remote", true)}</fieldset>
+      <button type="submit">Submit</button><p>Application submitted</p></form>`;
+    document.querySelector("button")?.addEventListener("click", (event) => { event.preventDefault(); clicks += 1; });
+    const result = await sessionForDocument("https://example.invalid/confirmation").submit();
+    expect(result).toMatchObject({ clicked: true, confirmed: true });
+    expect(clicks).toBe(1);
+  });
+
+  it("still blocks Submit on a checkbox group with nothing checked", async () => {
+    let clicks = 0;
+    document.body.innerHTML = `<form><input type="checkbox" name="question_2[]" value="a" required><input type="checkbox" name="question_2[]" value="b" required><button type="submit">Submit</button></form>`;
+    document.querySelector("button")?.addEventListener("click", () => { clicks += 1; });
+    const result = await sessionForDocument().submit();
+    expect(result.clicked).toBe(false);
+    expect(clicks).toBe(0);
+  });
+
   it("allows a valid form to click and confirms the resulting page", async () => {
     let clicks = 0;
     document.body.innerHTML = `<form><input id="safe" value="ok"><button type="submit">Submit</button><p>Application submitted</p></form>`;
