@@ -179,6 +179,15 @@ The campaign page exposes a broad live source, optional targeted live sources, a
 
 Remotive is used for broad discovery and usually has no verified employer application URL. Lever is targeted by employer/site and retains the provider’s verified `hostedUrl` and `applyUrl`; only those exact Lever-hosted paths, paired with a live provider ID, are labelled `ACTIONABLE`. Greenhouse is targeted by board token and retains the public board posting URL; an official HTTPS Greenhouse-hosted URL with the matching board and numeric provider ID is labelled actionable for structured discovery. The same destination pipeline recognizes verified Rippling and Workday application routes. Actionable means that a verified endpoint is available to a compatible preparation executor, not that HQ can submit an application today. The provider API contracts are documented by [Remotive](https://github.com/remotive-io/remote-jobs-api), [Lever](https://github.com/lever/postings-api), and the official [Greenhouse Job Board API](https://docs.greenhouse.io/job-board.html).
 
+### Choosing what and where to search
+
+Discovery is configured with two local files (copy the examples into `.local/career-agent/` and edit them):
+
+- **`search-intent.json`** (example: `application-agent/search-intent.example.json`) — *what* to look for: `primaryLanes`, `adjacentLanes`, `secondaryLanes` (and `broadLanes` for `"breadth": "broad"`), `preferredSeniorities` / `excludedSeniorities`, `excludedTitleTerms` (for example `contract`, `part-time`), `locations` (a country for remote searches plus any cities, such as `"Pittsburgh, PA"`), `remotePreference` (`remote_only`, `remote_preferred`, or `any`), `employmentTypes`, and `breadth` (`targeted`, `balanced`, or `broad`).
+- **`discovery.json`** (example: `application-agent/discovery.example.json`) — *where* to look: `sources` switches for Remotive, Himalayas, and The Muse (all free, no key) and Brave web search (needs `ATELIER_BRAVE_SEARCH_API_KEY`; Brave asks for a card), plus `employerBoards` — Greenhouse, Lever, and Ashby board names searched directly, whose links are already application-ready.
+
+Go broad by enabling every source and using wide lanes, or narrow by turning feeds off and listing only the companies you want. Override the file locations with `ATELIER_CAREER_AGENT_SEARCH_INTENT_FILE` and `ATELIER_CAREER_AGENT_DISCOVERY_FILE`.
+
 ### Source discovery and ATS routing
 
 Discovery references are intentionally separate from full job extraction:

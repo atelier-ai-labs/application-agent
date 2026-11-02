@@ -1,0 +1,13 @@
+{
+  "sources": {
+    "remotive": true,
+    "himalayas": true,
+    "themuse": true,
+    "brave": false
+  },
+  "employerBoards": {
+    "greenhouse": ["duolingo", "stackav"],
+    "lever": ["gopuff"],
+    "ashby": ["abridge"]
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "primaryLanes": [
+    "Cloud Engineer",
+    "Azure Engineer",
+    "DevOps Engineer",
+    "Platform Engineer",
+    "Cloud Infrastructure Engineer"
+  ],
+  "adjacentLanes": [
+    "AI Platform Engineer",
+    "AI Infrastructure Engineer",
+    "Agent Engineer",
+    "Applied AI Engineer",
+    "production agentic-systems/software roles"
+  ],
+  "secondaryLanes": [
+    "Frontend Engineer",
+    "Software Engineer",
+    "Full Stack Engineer",
+    "React / TypeScript"
+  ],
+  "broadLanes": [],
+  "preferredSeniorities": [
+    "junior",
+    "associate",
+    "mid-level"
+  ],
+  "excludedSeniorities": [
+    "senior",
+    "principal",
+    "lead",
+    "director"
+  ],
+  "excludedTitleTerms": [
+    "senior",
+    "principal",
+    "lead",
+    "director",
+    "architect",
+    "contract",
+    "contractor",
+    "contract-to-hire",
+    "part-time",
+    "freelance",
+    "1099"
+  ],
+  "locations": [
+    "United States",
+    "Pittsburgh, PA"
+  ],
+  "remotePreference": "remote_preferred",
+  "employmentTypes": [
+    "full time"
+  ],
+  "breadth": "balanced"
+}

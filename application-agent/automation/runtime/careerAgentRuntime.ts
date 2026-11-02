@@ -18,7 +18,10 @@ import {
 } from "../../src/domain/applicationDestinationResolver";
 import type { Campaign, CampaignRunResult, CareerJob, CreateCampaignInput } from "../../src/domain/campaignTypes";
 import type { DailyHuntProcessingResult } from "../../src/service/careerAgentService";
-import { HIMALAYAS_SOURCE_ID } from "../../src/domain/campaignTypes";
+import { HIMALAYAS_SOURCE_ID, jobSourceConfigId } from "../../src/domain/campaignTypes";
+import { AshbyBoardSource } from "../../src/domain/ashbyBoardSource";
+import { DEFAULT_DISCOVERY_CONFIG, parseDiscoveryConfig, type DiscoveryConfig } from "../../src/domain/discoveryConfig";
+import { MUSE_SOURCE_ID, MuseJobSource } from "../../src/domain/museJobSource";
 import type { ExecutionHostRequest, ExecutionHostSnapshot, ExecutionHostStatus } from "../../src/domain/executionHostTypes";
 import { createGreenhouseJobSources, DEFAULT_GREENHOUSE_API_BASE_URL, parseGreenhouseBoards } from "../../src/domain/greenhouseJobSource";
 import { JobReferenceResolver, JobReferenceSource } from "../../src/domain/jobReferenceResolver";
@@ -75,6 +78,7 @@ export interface BackgroundCareerAgentEnvironment extends ExecutionHostEnvironme
   ATELIER_CAREER_AGENT_STATE_FILE?: string;
   ATELIER_CAREER_AGENT_PROFILE_FILE?: string;
   ATELIER_CAREER_AGENT_SEARCH_INTENT_FILE?: string;
+  ATELIER_CAREER_AGENT_DISCOVERY_FILE?: string;
   /** Optional bounded public destination evidence; never read by the browser client. */
   ATELIER_CAREER_AGENT_DESTINATION_EVIDENCE_FILE?: string;
   ATELIER_CAREER_AGENT_BROWSER_ENABLED?: string;
@@ -276,6 +280,26 @@ export function loadBackgroundCandidateProfile(
 }
 
 export const DEFAULT_CAREER_AGENT_SEARCH_INTENT_FILE = ".local/career-agent/search-intent.json";
+export const DEFAULT_CAREER_AGENT_DISCOVERY_FILE = ".local/career-agent/discovery.json";
+
+/** Load the optional source/board choices; without a file the defaults apply. */
+export function loadBackgroundDiscoveryConfig(
+  env: Pick<BackgroundCareerAgentEnvironment, "ATELIER_CAREER_AGENT_DISCOVERY_FILE">,
+): DiscoveryConfig {
+  const configuredPath = env.ATELIER_CAREER_AGENT_DISCOVERY_FILE?.trim();
+  const path = configuredPath || DEFAULT_CAREER_AGENT_DISCOVERY_FILE;
+  if (!existsSync(resolve(path))) {
+    if (configuredPath) throw new Error("The configured Career Agent discovery file could not be found.");
+    return DEFAULT_DISCOVERY_CONFIG;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(resolve(path), "utf8"));
+  } catch {
+    throw new Error("The configured Career Agent discovery file could not be read or parsed.");
+  }
+  return parseDiscoveryConfig(parsed);
+}
 
 /** Load optional server-side user intent without putting it in the client bundle. */
 export function loadBackgroundSearchIntent(
@@ -332,14 +356,24 @@ interface RuntimeSources {
   officialDestinationCandidates: ReturnType<typeof parseDestinationCandidates>;
 }
 
+/** The campaign searches exactly the sources built from discovery.json (switched-off feeds removed, The Muse and Ashby boards added). */
+function discoveryCampaignInput(input: CreateCampaignInput, sources: Readonly<Record<string, JobSource>>): CreateCampaignInput {
+  const ids = (input.searchSources.length > 0 ? input.searchSources : (input.sourceConfigs ?? []).map(jobSourceConfigId))
+    .filter((id) => id in sources || id.startsWith("references:"));
+  for (const id of Object.keys(sources)) if (!ids.includes(id)) ids.push(id);
+  return { ...input, searchSources: ids, ...(input.sourceConfigs ? { sourceConfigs: input.sourceConfigs.filter((config) => jobSourceConfigId(config) in sources || config.type === "brave_search") } : {}) };
+}
+
 function createRuntimeSources(env: BackgroundCareerAgentEnvironment): RuntimeSources {
   const remotiveEndpoint = valueOrDefault(env.VITE_REMOTIVE_API_BASE_URL, DEFAULT_REMOTIVE_API_BASE_URL);
   const himalayasEndpoint = valueOrDefault(env.ATELIER_HIMALAYAS_API_BASE_URL, DEFAULT_HIMALAYAS_API_BASE_URL);
   const leverEndpoint = valueOrDefault(env.VITE_LEVER_API_BASE_URL, DEFAULT_LEVER_POSTINGS_BASE_URL);
   const greenhouseEndpoint = valueOrDefault(env.VITE_GREENHOUSE_API_BASE_URL, DEFAULT_GREENHOUSE_API_BASE_URL);
-  const leverSites = parseLeverSites(env.VITE_LEVER_SITES ?? "");
-  const greenhouseBoards = parseGreenhouseBoards(env.VITE_GREENHOUSE_BOARDS ?? "");
-  const broadDiscoveryEnabled = parseBroadDiscoveryEnabled(env.VITE_BROAD_DISCOVERY_ENABLED ?? "false");
+  const discovery = loadBackgroundDiscoveryConfig(env);
+  // Boards from discovery.json join any listed in the older env variables.
+  const leverSites = parseLeverSites([env.VITE_LEVER_SITES ?? "", ...discovery.employerBoards.lever].join(","));
+  const greenhouseBoards = parseGreenhouseBoards([env.VITE_GREENHOUSE_BOARDS ?? "", ...discovery.employerBoards.greenhouse].join(","));
+  const broadDiscoveryEnabled = discovery.sources.brave || parseBroadDiscoveryEnabled(env.VITE_BROAD_DISCOVERY_ENABLED ?? "false");
   const searchIntent = loadBackgroundSearchIntent(env);
   const destinationCandidates = loadBackgroundDestinationCandidates(env);
   const leverSources = createLeverJobSources(leverSites, leverEndpoint);
@@ -358,11 +392,14 @@ function createRuntimeSources(env: BackgroundCareerAgentEnvironment): RuntimeSou
 
   const remotive = createRemotiveJobSource(remotiveEndpoint);
   const himalayas = createHimalayasJobSource(himalayasEndpoint);
+  const ashbySources = discovery.employerBoards.ashby.map((board) => new AshbyBoardSource({ board }));
   const sources: Record<string, JobSource> = {
-    [remotive.id]: remotive,
-    [HIMALAYAS_SOURCE_ID]: himalayas,
+    ...(discovery.sources.remotive ? { [remotive.id]: remotive } : {}),
+    ...(discovery.sources.himalayas ? { [HIMALAYAS_SOURCE_ID]: himalayas } : {}),
+    ...(discovery.sources.themuse ? { [MUSE_SOURCE_ID]: new MuseJobSource() } : {}),
     ...Object.fromEntries(leverSources.map((source) => [source.id, source])),
     ...Object.fromEntries(greenhouseSources.map((source) => [source.id, source])),
+    ...Object.fromEntries(ashbySources.map((source) => [source.id, source])),
   };
   if (broadDiscoveryEnabled) {
     const brave = new BraveSearchDiscoveryProvider({
@@ -374,7 +411,7 @@ function createRuntimeSources(env: BackgroundCareerAgentEnvironment): RuntimeSou
 
   return {
     scout: new JobScout(sources),
-    campaignInput: createLiveCampaignInput(leverSites, greenhouseBoards, broadDiscoveryEnabled, searchIntent, true),
+    campaignInput: discoveryCampaignInput(createLiveCampaignInput(leverSites, greenhouseBoards, broadDiscoveryEnabled, searchIntent, true), sources),
     destinationResolver: new BoundedApplicationDestinationResolver({
       lookup: new StaticDestinationEvidenceLookup(destinationCandidates),
     }),
