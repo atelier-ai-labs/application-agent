@@ -233,6 +233,7 @@ export function isCandidateProfile(value: unknown): value is CandidateProfile {
     isStringOrNull(identity.fullName) &&
     (identity.preferredName === undefined || isStringOrNull(identity.preferredName)) &&
     isOptionalHttpUrlOrNull(identity.linkedinUrl) &&
+    isOptionalHttpUrlOrNull(identity.githubUrl) &&
     isOptionalHttpUrlOrNull(identity.websiteUrl) &&
     isStringOrNull(identity.email) &&
     isStringOrNull(identity.phone) &&

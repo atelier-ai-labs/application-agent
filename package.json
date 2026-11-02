@@ -26,7 +26,7 @@
     "test:acceptance": "npm run build && vite-node application-agent/automation/acceptance/run.ts",
     "test:evals": "vite-node evals/run.ts",
     "test:evals:negatives": "vite-node evals/runNegatives.ts",
-    "career-agent:resolve-links": "vite-node application-agent/automation/resolveTrackerLinksCli.ts"
+    "career-agent:resolve-links": "vite-node application-agent/automation/resolveTrackerLinksRun.ts"
   },
   "dependencies": {
     "react": "^19.1.1",

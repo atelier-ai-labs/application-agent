@@ -389,6 +389,7 @@ function isApplicationPolicy(value: unknown): value is ApplicationPolicy {
   return (
     typeof value.autoPrepare === "boolean" &&
     typeof value.allowGroundedDrafts === "boolean" &&
+    (value.reviewModelDrafts === undefined || typeof value.reviewModelDrafts === "boolean") &&
     Array.isArray(value.approvedResumeFamilies) &&
     value.approvedResumeFamilies.every(isResumeFamilyId)
   );

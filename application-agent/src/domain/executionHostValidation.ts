@@ -150,7 +150,7 @@ function isFieldType(value: unknown): boolean {
 }
 
 function isFieldClassification(value: unknown): boolean {
-  return value === "contact" || value === "linkedin" || value === "website" || value === "resume_upload" || value === "location" ||
+  return value === "contact" || value === "linkedin" || value === "github" || value === "website" || value === "resume_upload" || value === "location" ||
     value === "desired_work_location" || value === "start_availability" ||
     value === "employment_history" || value === "education" || value === "work_authorization" ||
     value === "sponsorship" || value === "salary" || value === "relocation" || value === "travel" ||

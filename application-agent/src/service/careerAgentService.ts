@@ -1712,6 +1712,9 @@ export class CareerAgentService {
         ...(input.applicationPolicy?.allowGroundedDrafts !== undefined
           ? { allowGroundedDrafts: input.applicationPolicy.allowGroundedDrafts }
           : {}),
+        ...(input.applicationPolicy?.reviewModelDrafts !== undefined
+          ? { reviewModelDrafts: input.applicationPolicy.reviewModelDrafts }
+          : {}),
         ...(input.applicationPolicy?.approvedResumeFamilies
           ? {
               approvedResumeFamilies: [...input.applicationPolicy.approvedResumeFamilies],
@@ -3255,7 +3258,7 @@ export class CareerAgentService {
     job: CareerJob,
     drafts: readonly CareerBlockerDraft[],
   ): Promise<CareerJob> {
-    if (!campaign.applicationPolicy.allowGroundedDrafts || !this.applicationAnswerDraftGenerator) return job;
+    if (!campaign.applicationPolicy.allowGroundedDrafts || campaign.applicationPolicy.reviewModelDrafts || !this.applicationAnswerDraftGenerator) return job;
 
     let current = job;
     for (const draft of drafts) {

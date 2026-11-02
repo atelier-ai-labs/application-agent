@@ -122,6 +122,11 @@ export interface FitPolicy {
 export interface ApplicationPolicy {
   autoPrepare: boolean;
   allowGroundedDrafts: boolean;
+  /**
+   * When true, a local-model answer to an exact ATS question is never typed
+   * into the form on its own; it is sent to Slack as a draft for approval.
+   */
+  reviewModelDrafts?: boolean;
   approvedResumeFamilies: readonly ResumeFamilyId[];
 }
 

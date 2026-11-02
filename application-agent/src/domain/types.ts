@@ -70,6 +70,8 @@ export interface CandidateIdentity {
   /** Optional explicit profile fact; never inferred from fullName or another URL. */
   linkedinUrl?: string | null;
   /** Optional explicit profile fact; never inferred from fullName or another URL. */
+  githubUrl?: string | null;
+  /** Optional explicit profile fact; never inferred from fullName or another URL. */
   websiteUrl?: string | null;
   email: string | null;
   phone: string | null;

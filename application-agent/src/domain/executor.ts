@@ -40,6 +40,7 @@ export type ApplicationFieldType =
 export type ApplicationFieldClassification =
   | "contact"
   | "linkedin"
+  | "github"
   | "website"
   | "resume_upload"
   | "location"

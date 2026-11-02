@@ -559,6 +559,10 @@ describe("LeverBrowserExecutor", () => {
     expect(ashbyName.current).toBe(exampleCandidateProfile.identity.fullName);
 
     expect(classifyLeverApplicationField({ id: "source", label: "How did you hear about this job?", type: "text" })).toBe("unknown");
+    // "capacity" contains "city" and "statement" contains "state"; neither is a location question.
+    expect(classifyLeverApplicationField({ id: "q1", label: "What is your total work experience in a similar role/ capacity?", type: "text" })).toBe("free_text");
+    expect(classifyLeverApplicationField({ id: "q2", label: "Personal statement", type: "textarea" })).toBe("free_text");
+    expect(classifyLeverApplicationField({ id: "q3", label: "City", type: "text" })).toBe("location");
     const source = new FakeField({ id: "source", label: "How did you hear about this job?", type: "text", required: true });
     const sourceSession = new FakeSession([source]);
     const staleSourceBlocker: CareerBlocker = {
@@ -2392,11 +2396,13 @@ describe("LeverBrowserExecutor", () => {
   it.each([
     ["LinkedIn URL", "linkedin_url", "LinkedIn URL", "linkedinUrl", "https://www.linkedin.com/in/example-candidate"],
     ["website URL", "website", "Personal website", "websiteUrl", "https://example.com"],
+    ["GitHub URL", "github", "GitHub profile", "githubUrl", "https://github.com/example-candidate"],
     ["preferred work location", "desired_location", "What is your preferred work location?", "preferredWorkLocation", "Remote - United States"],
     ["available start date", "availability", "When are you available to start?", "availabilityStartDate", "2026-10-01"],
   ] as const)("does not map an unrelated fact into %s, but fills the explicit fact when present", async (_name, id, label, fact, expected) => {
     expect(classifyLeverApplicationField({ id, label, type: "text" })).toBe(
       fact === "linkedinUrl" ? "linkedin" :
+        fact === "githubUrl" ? "github" :
         fact === "websiteUrl" ? "website" :
           fact === "preferredWorkLocation" ? "desired_work_location" : "start_availability",
     );
@@ -2418,6 +2424,7 @@ describe("LeverBrowserExecutor", () => {
       identity: {
         ...exampleCandidateProfile.identity,
         ...(fact === "linkedinUrl" ? { linkedinUrl: expected } : {}),
+        ...(fact === "githubUrl" ? { githubUrl: expected } : {}),
         ...(fact === "websiteUrl" ? { websiteUrl: expected } : {}),
       },
       workPreferences: {

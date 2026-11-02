@@ -92,7 +92,8 @@ export async function resolveTrackerLinks(options: {
   return reports;
 }
 
-async function main(): Promise<void> {
+/** Entry point for `npm run career-agent:resolve-links`. */
+export async function runResolveTrackerLinksCommand(): Promise<void> {
   const loaded = loadEnv(process.env.NODE_ENV ?? "development", process.cwd(), "");
   for (const [name, value] of Object.entries(loaded)) if (process.env[name] === undefined) process.env[name] = value;
   const env = process.env as GoogleSheetsEnvironment & Record<string, string | undefined>;
@@ -116,11 +117,4 @@ async function main(): Promise<void> {
   }
   const resolved = reports.filter((report) => report.resolution.status === "resolved").length;
   console.log(`[career-agent-links] ${reports.length} rows checked, ${resolved} direct links found${apply ? "" : " (dry run; pass --apply to write them)"}.`);
-}
-
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("resolveTrackerLinksCli.ts")) {
-  void main().catch((error) => {
-    console.error(`[career-agent-links] ${error instanceof Error ? error.message : "Link resolution failed."}`);
-    process.exitCode = 1;
-  });
 }

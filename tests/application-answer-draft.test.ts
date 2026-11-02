@@ -105,7 +105,7 @@ class SubjectiveQuestionExecutor implements ApplicationExecutor {
   }
 }
 
-function draftService(options: { profile?: CandidateProfile; onDraftRequest?: () => void; draftEnabled?: () => boolean; allowGroundedDrafts?: boolean } = {}) {
+function draftService(options: { profile?: CandidateProfile; onDraftRequest?: () => void; draftEnabled?: () => boolean; allowGroundedDrafts?: boolean; reviewModelDrafts?: boolean } = {}) {
   const profile = options.profile ?? privateProfile();
   const careerRepository = new InMemoryCareerRepository();
   const applicationRepository = new InMemoryApplicationRepository();
@@ -149,6 +149,7 @@ function draftService(options: { profile?: CandidateProfile; onDraftRequest?: ()
     applicationPolicy: {
       autoPrepare: true,
       allowGroundedDrafts: options.allowGroundedDrafts ?? false,
+      ...(options.reviewModelDrafts !== undefined ? { reviewModelDrafts: options.reviewModelDrafts } : {}),
       approvedResumeFamilies: [],
     },
     submissionPolicy: {
@@ -678,6 +679,19 @@ describe("local ATS answer drafting", () => {
     expect(executor.receivedValues).toEqual(["I improved service observability by adding runbooks and operational checks."]);
     expect(notifications.publishedEvents).toHaveLength(0);
     expect(service.getJob(service.listJobs(campaign.id)[0].id).status).toBe("ready_to_submit");
+  });
+
+  it("sends a local-model answer to Slack for approval when the campaign reviews model drafts", async () => {
+    const { service, campaign, executor, notifications } = draftService({ allowGroundedDrafts: true, reviewModelDrafts: true });
+    service.activateCampaign(campaign.id);
+    await service.runCampaign(campaign.id);
+
+    expect(executor.receivedValues).toEqual([]);
+    expect(notifications.publishedEvents).toHaveLength(1);
+    expect(service.listAttentionEvents(campaign.id)[0].draft).toMatchObject({
+      answer: "I improved service observability by adding runbooks and operational checks.",
+    });
+    expect(service.getJob(service.listJobs(campaign.id)[0].id).status).toBe("needs_input");
   });
 
   it("backfills a newly available draft onto the already-published exact ATS event", async () => {

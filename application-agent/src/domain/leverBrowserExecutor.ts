@@ -229,11 +229,12 @@ function directFieldPromptText(field: Pick<LeverBrowserField, "id" | "label" | "
   ].filter(Boolean).join(" "));
 }
 
-type ProfileFactField = "linkedin" | "website" | "desired_work_location" | "start_availability";
+type ProfileFactField = "linkedin" | "github" | "website" | "desired_work_location" | "start_availability";
 
 function profileFactField(field: Pick<LeverBrowserField, "id" | "label" | "section">): ProfileFactField | undefined {
   const text = inspectedPromptText(field).replace(/[_-]+/g, " ");
   if (hasPhrase(text, /linkedin|linked in/)) return "linkedin";
+  if (hasPhrase(text, /\bgit ?hub\b/)) return "github";
   if (hasPhrase(text, /website|personal site|web site/)) return "website";
   if (hasPhrase(text, /(?:desired|preferred|target) (?:work )?location|location preference|where do you prefer to work|where would you like to work/)) {
     return "desired_work_location";
@@ -588,6 +589,9 @@ export function classifyLeverApplicationField(
   if (hasPhrase(text, /\bmost interesting problem\b|\byour take\b|\bwhy does it pull you in\b/)) return "free_text";
   if (hasPhrase(text, /\b(?:ai|ml|machine\s+learning|aws|terraform|cloudformation|startup|early[ -]stage|production)\b/)) return "free_text";
   if (hasPhrase(text, /salary|compensation|pay expectation|desired pay|desired annual compensation/)) return "salary";
+  // Overall experience ("total work experience in a similar role") is a résumé
+  // summary for a reviewed draft; years with one named system stays unknown.
+  if (hasPhrase(text, /\b(?:total|overall|relevant|prior) (?:work |professional )?experience\b/)) return "free_text";
   if (hasPhrase(text, /relocat/)) return "relocation";
   if (hasPhrase(text, /travel/)) return "travel";
   if (hasPhrase(text, /education|degree|university|college|school|major|study/)) return "education";
@@ -596,7 +600,8 @@ export function classifyLeverApplicationField(
   if (hasPhrase(text, /employ|employer|company|work history|job history|position held|job title|occupation|start date|end date/)) return "employment_history";
   // Contact (incl. email/e-mail) must win over bare "address" in location (e.g. "Email address").
   if (hasPhrase(text, /first name|given name|last name|family name|surname|full name|your name|applicant name|email|e-mail|phone|telephone|mobile|linkedin|portfolio|website/)) return "contact";
-  if (hasPhrase(text, /location|city|state|country|address|postal|zip|phone country|dialing code|country code/)) return "location";
+  // Whole words only: "capacity" contains "city" and "statement" contains "state".
+  if (hasPhrase(text, /\b(?:location|city|state|country|address|postal|zip)\b|phone country|dialing code|country code/)) return "location";
   // Opaque widget labels with a real question prompt are treated by prompt semantics above;
   // remaining long free-response prompts stay free_text rather than unknown.
   const prompt = field.questionDescriptor?.promptText?.trim();
@@ -1028,7 +1033,7 @@ function answerAliases(classification: ApplicationFieldClassification, text: str
     case "contact":
       if (hasPhrase(text, /email|e-mail/)) return ["email"];
       if (hasPhrase(text, /phone|telephone|mobile/)) return ["phone"];
-      if (hasPhrase(text, /location|city|state|country/)) return ["location"];
+      if (hasPhrase(text, /\b(?:location|city|state|country)\b/)) return ["location"];
       return ["name"];
     case "employment_history": return ["employment_history"];
     case "location": return ["location"];
@@ -1039,6 +1044,7 @@ function answerAliases(classification: ApplicationFieldClassification, text: str
 function profileFactAnswerAliases(factField: ProfileFactField): readonly string[] {
   switch (factField) {
     case "linkedin": return ["linkedin", "linkedin_url", "linkedinUrl"];
+    case "github": return ["github", "github_url", "githubUrl"];
     case "website": return ["website", "website_url", "websiteUrl", "personal_website"];
     case "desired_work_location": return ["preferred_work_location", "preferredWorkLocation", "desired_work_location"];
     case "start_availability": return ["availability_start_date", "availabilityStartDate", "start_availability", "available_start_date"];
@@ -1285,6 +1291,7 @@ function profileValueForField(
   const factField = profileFactField(field);
   if (isPreferredNameField(field)) return profile.identity.preferredName ?? undefined;
   if (factField === "linkedin") return profile.identity.linkedinUrl ?? undefined;
+  if (factField === "github") return profile.identity.githubUrl ?? undefined;
   if (factField === "website") return profile.identity.websiteUrl ?? undefined;
   if (factField === "desired_work_location") return profile.workPreferences.preferredWorkLocation ?? undefined;
   if (factField === "start_availability") {
