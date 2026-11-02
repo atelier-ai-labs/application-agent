@@ -2845,10 +2845,13 @@ export class CareerAgentService {
       throw new Error("Recovery is forbidden when any submission proof exists.");
     }
     if (application.status !== "ready_for_review") throw new Error("Recovery requires the application packet to remain ready for review.");
+    // The same explicit assertion also covers the safer case where the
+    // executor reports it never clicked Submit (a pre-click check stopped it).
     const blocker = job.blockers.find((candidate) => candidate.status === "open" &&
       candidate.kind === "external_verification" && candidate.unit === "submission" &&
       candidate.field === "submission-confirmation" && candidate.resumeAfterHuman === false &&
-      candidate.evidence.some((evidence) => evidence === "submit:clicked" || evidence.includes("submit:clicked;")));
+      candidate.evidence.some((evidence) => evidence === "submit:clicked" || evidence.includes("submit:clicked;") ||
+        evidence === "submit:not-clicked" || evidence.includes("submit:not-clicked;")));
     const execution = job.execution;
     const historicalBlocker = job.blockers.find((candidate) => candidate.status === "resolved" &&
       candidate.kind === "external_verification" && candidate.unit === "submission" &&

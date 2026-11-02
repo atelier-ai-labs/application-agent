@@ -248,6 +248,23 @@ describe("manual applied state and tracker sync", () => {
     expect(authority.reconcile(fixture.careerJob.applicationId!, fixture.careerJob.id).state).toBe("submitted");
   });
 
+  it("recovers a submission whose Submit was never clicked after the same explicit assertion", async () => {
+    const fixture = await readyFixture(new RecordingTracker());
+    const blocker = { id: "submission-confirmation", kind: "external_verification" as const, unit: "submission" as const, field: "submission-confirmation", questionProvenance: "POLICY" as const, question: "Verify whether the application was submitted", context: { jobId: fixture.careerJob.id, applicationId: fixture.careerJob.applicationId, company: fixture.careerJob.job.company, role: fixture.careerJob.job.title }, reason: "A pre-click check stopped Submit", evidence: ["submit:not-clicked; submit:rejected; error:validation-error"], status: "open" as const, createdAt: at, resumeAfterHuman: false };
+    fixture.careerRepository.saveJob({ ...fixture.careerJob, status: "needs_input", blockers: [blocker] });
+    const authority = new DurableSubmissionAuthority("test-worker", { stateFile: `/tmp/atelier-recover-unclicked-${fixture.careerJob.id}-${Math.random().toString(36).slice(2)}.json` });
+    const fence = authority.claim(fixture.careerJob.applicationId!, fixture.careerJob.id, at);
+    authority.beforeClick(fence, at);
+    authority.markUnknown(fence, at);
+
+    const recovered = await fixture.service.recoverUnsubmittedHumanVerification(
+      fixture.campaign.id, fixture.careerJob.id, fixture.careerJob.applicationId!, authority,
+      { confirmedNotSubmitted: true, reason: "User saw the unsubmitted form in the handoff browser." },
+    );
+    expect(recovered.status).toBe("ready_to_submit");
+    expect(authority.get(fixture.careerJob.applicationId!, fixture.careerJob.id)?.state).toBe("recovered");
+  });
+
   it("recovers a CAPTCHA-stopped submission only after an explicit no-submission assertion", async () => {
     const fixture = await readyFixture(new RecordingTracker());
     const blocker = { id: "submission-confirmation", kind: "external_verification" as const, unit: "submission" as const, field: "submission-confirmation", questionProvenance: "POLICY" as const, question: "Verify whether the application was submitted", context: { jobId: fixture.careerJob.id, applicationId: fixture.careerJob.applicationId, company: fixture.careerJob.job.company, role: fixture.careerJob.job.title }, reason: "CAPTCHA stopped the click", evidence: ["submit:clicked", "external-verification:captcha"], status: "open" as const, createdAt: at, resumeAfterHuman: false };
