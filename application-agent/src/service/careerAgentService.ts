@@ -3363,9 +3363,14 @@ export class CareerAgentService {
    * a sequential review again if a browser reinspection re-materializes it.
    */
   private nextAttentionBlocker(campaign: Campaign, job: CareerJob): CareerBlocker | undefined {
+    // An answered question is not asked again while its answer is on the way
+    // to the form. If the form ran after the answer and still reports the
+    // same blocker, the answer did not fit, so the question is asked again.
+    const executedAt = job.execution?.updatedAt;
     const previouslyResolved = new Set(
       (campaign.attentionEvents ?? [])
-        .filter((event) => event.jobId === job.id && event.status === "resolved" && event.blockerId)
+        .filter((event) => event.jobId === job.id && event.status === "resolved" && event.blockerId &&
+          !(executedAt && event.resolvedAt && executedAt > event.resolvedAt))
         .map((event) => event.blockerId as string),
     );
     return job.blockers.find(

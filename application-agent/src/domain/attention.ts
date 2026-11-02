@@ -332,6 +332,8 @@ function descriptorMetadata(blocker: CareerBlocker): AttentionDescriptorMetadata
     : undefined;
 }
 
+const MAX_OPTION_LABEL_LENGTH = 200;
+
 function optionId(label: string, index: number): string {
   const slug = label
     .toLowerCase()
@@ -342,13 +344,16 @@ function optionId(label: string, index: number): string {
 }
 
 function structuredOptions(blocker: CareerBlocker): readonly AttentionOption[] | undefined {
-  const raw = evidenceValue(blocker, "options:", 240);
+  // Keep the provider's complete labels: the chosen label is typed into the
+  // form, so a shortened one ("Upstart careers webs") can never match.
+  const raw = evidenceValue(blocker, "options:", 6_000);
   if (!raw) return undefined;
   const labels = raw
     .split("|")
-    .map((value) => safeString(value, 64))
+    .map((value) => safeString(value, MAX_OPTION_LABEL_LENGTH))
     .filter((value): value is string => Boolean(value));
-  if (labels.length === 0 || labels.length > 16 || new Set(labels.map((value) => value.toLowerCase())).size !== labels.length)
+  // Slack renders at most 25 buttons in one actions block.
+  if (labels.length === 0 || labels.length > 25 || new Set(labels.map((value) => value.toLowerCase())).size !== labels.length)
     return undefined;
   if (
     labels.length === 2 &&
@@ -624,7 +629,7 @@ export function isAttentionOption(value: unknown): value is AttentionOption {
     value &&
     typeof value === "object" &&
     boundedText((value as { id?: unknown }).id, 32) &&
-    boundedText((value as { label?: unknown }).label, 64),
+    boundedText((value as { label?: unknown }).label, MAX_OPTION_LABEL_LENGTH),
   );
 }
 

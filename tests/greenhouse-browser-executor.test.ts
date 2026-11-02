@@ -575,6 +575,19 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(session.submitChecks).toBe(0);
   });
 
+  it("selects the grounded country in Greenhouse's phone-country dropdown", async () => {
+    const options = ["United States +1", "Afghanistan +93", "Canada +1", "Albania +355", "Algeria +213", "Andorra +376"].map((label) => ({ label, value: label }));
+    const country = new FakeField({ id: "country", label: "Country*", type: "select", required: true, options,
+      questionDescriptor: { promptText: "Phone", sectionTitle: "Phone", sourceStrategy: "fieldset_legend", confidence: "high" } });
+    const session = new FakeSession([country]);
+    const base = request(session);
+    const profile: CandidateProfile = { ...exampleCandidateProfile, identity: { ...exampleCandidateProfile.identity, location: "McDonald, Pennsylvania, USA" } };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...base, profile });
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(country.current).toBe("United States +1");
+  });
+
   it("answers a location-preference checkbox group with Remote only", async () => {
     const descriptor = { promptText: "Location Preference", sectionTitle: "Application questions", sourceStrategy: "question_container", confidence: "high" } as const;
     const options = ["Burlingame, CA", "Austin, TX", "Remote"].map((label, index) =>

@@ -501,7 +501,8 @@ export function looksLikeInternationalDialingOptions(
   let dialing = 0;
   for (const option of options) {
     const sample = `${option.label} ${option.value}`.trim();
-    if (/^\+\d{1,4}\b/.test(sample) || (/\b\+\d{1,4}\b/.test(sample) && /[A-Z]{2}\s*-/.test(sample))) {
+    // "+1 US - United States" (Rippling) or "United States +1" (Greenhouse).
+    if (/^\+\d{1,4}\b/.test(sample) || /\s\+\d{1,4}$/.test(option.label.trim()) || (/\b\+\d{1,4}\b/.test(sample) && /[A-Z]{2}\s*-/.test(sample))) {
       dialing += 1;
     }
   }

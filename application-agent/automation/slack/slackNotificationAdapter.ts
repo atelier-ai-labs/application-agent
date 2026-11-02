@@ -172,7 +172,7 @@ function eventMessage(
       : "";
   const answerOptions =
     event.question.kind === "single_choice" && event.question.options.length > 0
-      ? `Options: ${event.question.options.map((option) => markdownText(option.label, 64)).join(" / ")}`
+      ? `Options: ${event.question.options.map((option) => markdownText(option.label, 200)).join(" / ")}`
       : "";
   const draftReview = event.draft
     ? [
@@ -239,7 +239,9 @@ function eventMessage(
       elements: event.question.options.map((option, index) => ({
         type: "button",
         action_id: actionIdForOption(index),
-        text: { type: "plain_text", text: safeText(option.label, 64) },
+        // Slack caps button text at 75 characters; the button value is the
+        // option id, so the full label is still what reaches the form.
+        text: { type: "plain_text", text: safeText(option.label, 75) },
         value: `${event.id}|${option.id}`,
       })),
     });

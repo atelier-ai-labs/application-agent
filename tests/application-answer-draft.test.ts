@@ -90,6 +90,8 @@ function subjectiveBlocker(): CareerBlockerDraft {
 class SubjectiveQuestionExecutor implements ApplicationExecutor {
   readonly id = "answer-draft-executor";
   readonly receivedValues: string[] = [];
+  /** Reject the next answer the way a form rejects a value that matches no option. */
+  rejectNextAnswer = false;
 
   executionMode(): "preparation_only" {
     return "preparation_only";
@@ -101,11 +103,15 @@ class SubjectiveQuestionExecutor implements ApplicationExecutor {
       return { state: "requires_human", blocker: subjectiveBlocker() };
     }
     this.receivedValues.push(String(blocker.value));
+    if (this.rejectNextAnswer) {
+      this.rejectNextAnswer = false;
+      return { state: "requires_human", blocker: subjectiveBlocker() };
+    }
     return { state: "ready_to_submit", inspection: inspection("inspected") };
   }
 }
 
-function draftService(options: { profile?: CandidateProfile; onDraftRequest?: () => void; draftEnabled?: () => boolean; allowGroundedDrafts?: boolean; reviewModelDrafts?: boolean } = {}) {
+function draftService(options: { profile?: CandidateProfile; onDraftRequest?: () => void; draftEnabled?: () => boolean; allowGroundedDrafts?: boolean; reviewModelDrafts?: boolean; now?: () => string } = {}) {
   const profile = options.profile ?? privateProfile();
   const careerRepository = new InMemoryCareerRepository();
   const applicationRepository = new InMemoryApplicationRepository();
@@ -133,7 +139,7 @@ function draftService(options: { profile?: CandidateProfile; onDraftRequest?: ()
         };
       },
     },
-    { now: () => capturedAt, createId: (prefix) => `${prefix}-answer-draft` },
+    { now: options.now ?? (() => capturedAt), createId: (prefix) => `${prefix}-answer-draft` },
   );
   const campaign = service.createCampaign({
     name: "Answer draft acceptance",
@@ -736,6 +742,29 @@ describe("local ATS answer drafting", () => {
     ).rejects.toThrow("No review draft is attached");
     expect(service.listAttentionEvents(campaign.id)[0].status).toBe("open");
     expect(executor.receivedValues).toEqual([]);
+  });
+
+  it("asks again when the form rejects an answered question", async () => {
+    let tick = 0;
+    const { service, campaign, executor, notifications } = draftService({
+      draftEnabled: () => false,
+      now: () => new Date(Date.parse(capturedAt) + (tick += 1000)).toISOString(),
+    });
+    service.activateCampaign(campaign.id);
+    await service.runCampaign(campaign.id);
+    executor.rejectNextAnswer = true;
+    const first = service.listAttentionEvents(campaign.id)[0];
+    await service.resolveAttentionResponse({
+      eventId: first.id,
+      selectedOption: "An answer the form does not accept",
+      actorIdentity: { provider: "test", userId: "human-1" },
+      respondedAt: capturedAt,
+    });
+
+    expect(executor.receivedValues).toEqual(["An answer the form does not accept"]);
+    const events = service.listAttentionEvents(campaign.id);
+    expect(events.map((event) => event.status)).toEqual(["resolved", "open"]);
+    expect(notifications.publishedEvents.length).toBeGreaterThan(0);
   });
 
   it("passes an edited Slack answer through as the exact blocker value", async () => {
