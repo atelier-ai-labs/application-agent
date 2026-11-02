@@ -117,6 +117,17 @@ describe("bounded Brave broad discovery", () => {
     ]);
   });
 
+  it("adds an on-site search for each configured city next to the remote search", () => {
+    const intent = {
+      primaryLanes: ["Cloud Engineer"], adjacentLanes: [], secondaryLanes: [], preferredSeniorities: [], excludedSeniorities: [],
+      excludedTitleTerms: [], locations: ["United States", "Pittsburgh, PA"], remotePreference: "remote_preferred", breadth: "balanced",
+    } as const;
+    expect(buildBraveSearchQueries(criteria, 4, [{ lane: "primary", term: "Cloud Engineer" }], intent)).toEqual([
+      "Cloud Engineer remote United States jobs",
+      "Cloud Engineer Pittsburgh, PA jobs",
+    ]);
+  });
+
   it("normalizes URL-first results, removes obvious noise, and records query evidence", async () => {
     const requested: Array<{ url: string; headers: HeadersInit | undefined }> = [];
     const provider = new BraveSearchDiscoveryProvider({
