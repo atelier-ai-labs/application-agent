@@ -213,6 +213,8 @@ describe("Greenhouse destination execution through the existing browser policy",
     // Country-only questions (Upstart's "What is your current location?").
     expect(greenhouseLocationOptionMatches("United States", "United States", "McDonald, Pennsylvania, USA")).toBe(true);
     expect(greenhouseLocationOptionMatches("Canada", "Canada", "McDonald, Pennsylvania, USA")).toBe(false);
+    expect(greenhouseLocationOptionMatches("United States +1", "United States +1", "McDonald, Pennsylvania, USA")).toBe(true);
+    expect(greenhouseLocationOptionMatches("Canada +1", "Canada +1", "McDonald, Pennsylvania, USA")).toBe(false);
     expect(greenhouseOptionMatches("United States+1", null, "Canada")).toBe(false);
 
     const country = new FakeField({ id: "country", label: "Country", type: "select", required: true });

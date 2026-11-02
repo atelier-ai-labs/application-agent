@@ -682,9 +682,10 @@ export function greenhouseLocationOptionMatches(optionLabel: string, desiredCity
   };
   // A country-level question ("United States" among country options) matches
   // when that country is the grounded location's country.
+  // Phone-country lists append the dialing code ("United States +1").
   if (optionParts.length === 1 && !desiredCity.includes(",")) {
     const groundedCountry = normalize(groundedLocation.split(",").at(-1) ?? "");
-    return (aliases[groundedCountry] ?? [groundedCountry]).includes(normalizedCity);
+    return (aliases[groundedCountry] ?? [groundedCountry]).includes(normalizedCity.replace(/\s*\+\d{1,4}$/, ""));
   }
   return groundedLocation.split(",").map(normalize).filter(Boolean).slice(1).every((part) =>
     optionParts.slice(1).some((candidate) => (aliases[part] ?? [part]).includes(candidate)),
