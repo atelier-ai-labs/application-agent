@@ -2454,6 +2454,10 @@ export class CareerAgentService {
     }
     const applicationPreparationResume = blocker.unit === "application_preparation";
     const hostExecutionResumable = job.execution?.mode === "real_local" && Boolean(job.execution.hostExecutionId);
+    // A refreshed packet (new resume family) has no browser yet. Keep the
+    // answer and start a fresh run instead of discarding the reply.
+    const freshHostStart = !hostExecutionResumable && job.execution?.mode === "real_local" &&
+      job.execution.status === "not_started" && !job.submissionProof && !job.manualSubmissionConfirmation;
     let preparationOnlyResume = false;
     if (!hostExecutionResumable) {
       try {
@@ -2469,7 +2473,7 @@ export class CareerAgentService {
         preparationOnlyResume = false;
       }
     }
-    if (!hostExecutionResumable && !preparationOnlyResume && !applicationPreparationResume) {
+    if (!hostExecutionResumable && !freshHostStart && !preparationOnlyResume && !applicationPreparationResume) {
       throw new AttentionResponseError("That application no longer has a resumable local browser execution.");
     }
 
@@ -2530,7 +2534,7 @@ export class CareerAgentService {
     // session after DONE. The durable submission fence remains authoritative:
     // any resumed execution that reaches the submission lane cannot claim or
     // cross an already-used fence, so this never creates a second Submit click.
-    if (hostExecutionResumable && (blocker.resumeAfterHuman !== false || postSubmitVerification)) {
+    if ((hostExecutionResumable || freshHostStart) && (blocker.resumeAfterHuman !== false || postSubmitVerification)) {
       const current = this.getJob(job.id);
       const nextBlocker = this.nextAttentionBlocker(this.getCampaign(campaign.id), current);
       if (nextBlocker) {

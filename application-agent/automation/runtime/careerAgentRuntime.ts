@@ -849,9 +849,15 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
   private async resumeHostExecution(campaignId: string, jobId: string, options: { verificationHandoff?: boolean } = {}): Promise<void> {
     if (!this.executionHost) return;
     const job = this.service.getJob(jobId);
-    const executionId = job.execution?.mode === "real_local" ? job.execution.hostExecutionId : undefined;
-    if (!executionId) return;
+    if (job.execution?.mode !== "real_local") return;
+    const executionId = job.execution.hostExecutionId;
     const request = executionRequestFor(this.service, this.serviceProfile(), campaignId, jobId);
+    // A refreshed packet has no browser yet; the answer starts its first run.
+    if (!executionId) {
+      if (options.verificationHandoff) return;
+      await this.reconcileHostExecution(campaignId, jobId, await this.executionHost.start(request));
+      return;
+    }
     let snapshot: ExecutionHostSnapshot;
     try {
       snapshot = await this.executionHost.resume(executionId, request);
@@ -991,7 +997,7 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
         );
         return { status: result.status };
       } catch (error) {
-        console.warn("[career-agent-slack] CareerAgentService resume failed");
+        console.warn(`[career-agent-slack] CareerAgentService resume failed: ${error instanceof Error ? error.message.slice(0, 200) : "unknown error"}`);
         throw error;
       }
     },
