@@ -139,12 +139,12 @@ function eventMessage(
   if (humanVerificationHandoff) {
     const postSubmit = event.submissionAlreadyClicked === true || event.blockerType === "external_verification";
     const handoffText = postSubmit
-      ? "The application Submit action has already crossed the submission boundary, but the employer's confirmation could not be verified automatically. Do not click Submit again."
+      ? "I clicked Submit, but I couldn't confirm that the employer received the application, so I won't click Submit again."
       : "The open browser needs a human verification step before the application can continue.";
     const instruction = postSubmit
       ? renderOptions.handoffUrl
-        ? "Do not click Submit again. Use the protected browser handoff below to verify the employer result, then reply with what you observed."
-        : "Do not click Submit again. Verify the employer result through the available handoff, then reply with what you observed. No interactive browser link is provided by this notifier."
+        ? "Open the browser below and look at the page. If it says your application was submitted, reply DONE. Otherwise, reply with what you see."
+        : "Look at the agent's browser window. If it says your application was submitted, reply DONE. Otherwise, reply with what you see."
       : renderOptions.handoffUrl
         ? "Use the protected browser handoff below to complete the verification, then reply DONE in this thread."
         : "Complete the verification in the open local browser, then reply DONE in this thread. If the browser session has closed, reply DONE and I will report that the session expired without retrying submission.";

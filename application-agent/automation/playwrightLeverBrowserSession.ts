@@ -3388,7 +3388,9 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       externalApplicationId: `confirmation:${parsed.hostname}${parsed.pathname}`,
       confirmationOrigin: parsed.origin,
       confirmationUrl: parsed.toString(),
-      evidence: `${confirmationUrl ? "submit:clicked; confirmation:url" : "submit:clicked; confirmation:text"}${securityCode ? `; security-code:${securityCode}` : ""}`,
+      // The path and parameter names (never values) show why a confirmation
+      // was or was not tied to the posting.
+      evidence: `${confirmationUrl ? "submit:clicked; confirmation:url" : "submit:clicked; confirmation:text"}${securityCode ? `; security-code:${securityCode}` : ""}; confirmation-path:${parsed.pathname.slice(0, 120)}${[...parsed.searchParams.keys()].length > 0 ? `?${[...new Set(parsed.searchParams.keys())].slice(0, 8).join("&")}` : ""}`,
     };
   }
 

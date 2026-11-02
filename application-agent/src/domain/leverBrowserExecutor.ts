@@ -1844,7 +1844,7 @@ function sameApplicationPage(value: string, target: TrustedTarget): boolean {
 /** Automatic proof requires a provider-owned confirmation route, not generic text. */
 export function isTrustedAutomaticConfirmation(
   result: BrowserSubmissionResult,
-  target: Pick<TrustedTarget, "provider" | "applicationUrl" | "postingId">,
+  target: Pick<TrustedTarget, "provider" | "applicationUrl" | "postingId"> & { site?: string },
 ): boolean {
   if (!result.confirmed || !result.externalApplicationId || !result.confirmationOrigin || !result.confirmationUrl || !target.postingId) return false;
   let expected: URL;
@@ -1869,6 +1869,12 @@ export function isTrustedAutomaticConfirmation(
   const correlationKeys = new Set(["job", "jobId", "posting", "postingId", "gh_jid", "lever_job_id"]);
   const correlatedQuery = [...observed.searchParams.entries()].some(([key, value]) =>
     correlationKeys.has(key) && value === target.postingId,
+  ) || (
+    // Greenhouse's embed form keeps the posting in `token` (and the board in
+    // `for`): /embed/job_app/confirmation?for=upstart&token=8030908.
+    target.provider === "greenhouse" &&
+    observed.searchParams.get("token") === target.postingId &&
+    (!target.site || (observed.searchParams.get("for") ?? "").toLowerCase() === target.site.toLowerCase())
   );
   if (!decodedSegments.includes(target.postingId) && !correlatedQuery) return false;
   if (!result.evidence.includes("submit:clicked; confirmation:url")) return false;

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { greenhouseEmbedApplicationUrl, isVerifiedGreenhouseEmbedUrl } from "../application-agent/src/domain/greenhouseJobSource";
+import { isTrustedAutomaticConfirmation } from "../application-agent/src/domain/leverBrowserExecutor";
 import {
   greenhouseLocationOptionMatches,
   greenhouseOptionMatches,
@@ -628,6 +629,17 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(result.state).toBe("ready_to_submit");
     expect(hispanic.current).toBe("No");
     expect(race.current).toBe("White");
+  });
+
+  it("trusts Greenhouse's embed confirmation only for the same board and posting", () => {
+    const target = { provider: "greenhouse" as const, site: "upstart", postingId: "8030908", applicationUrl: "https://job-boards.greenhouse.io/upstart/jobs/8030908" };
+    const confirmation = (url: string) => ({
+      clicked: true, confirmed: true, externalApplicationId: `confirmation:${url}`, confirmationOrigin: "https://job-boards.greenhouse.io",
+      confirmationUrl: url, evidence: "submit:clicked; confirmation:url; security-code:entered",
+    });
+    expect(isTrustedAutomaticConfirmation(confirmation("https://job-boards.greenhouse.io/embed/job_app/confirmation?for=upstart&token=8030908"), target)).toBe(true);
+    expect(isTrustedAutomaticConfirmation(confirmation("https://job-boards.greenhouse.io/embed/job_app/confirmation?for=upstart&token=1111111"), target)).toBe(false);
+    expect(isTrustedAutomaticConfirmation(confirmation("https://job-boards.greenhouse.io/embed/job_app/confirmation?for=other&token=8030908"), target)).toBe(false);
   });
 
   it("answers a location-preference checkbox group with Remote only", async () => {
