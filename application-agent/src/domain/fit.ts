@@ -140,8 +140,12 @@ function selectResumeFamily(job: JobPosting, profile: CandidateProfile): {
   };
   for (const candidate of ranked) candidate.score = familyScore(candidate.family);
 
+  // A React skill on an AI or platform role ("AI Engineer – Agentic
+  // Automation" listing React) does not make it a frontend posting; the
+  // title decides when it names other work.
+  const otherLaneTitle = /\b(?:ai|ml|llm|agentic|agents?|machine learning|devops|cloud|infrastructure|platform|sre|site reliability|data)\b/i.test(job.title);
   const frontendPosting = /\b(frontend|front[- ]end|ui|web|react)\b/i.test(job.title) ||
-    job.requiredSkills.concat(job.preferredSkills).some((skill) => /\b(frontend|react|web)\b/i.test(skill));
+    (!otherLaneTitle && job.requiredSkills.concat(job.preferredSkills).some((skill) => /\b(frontend|react|web)\b/i.test(skill)));
   if (frontendPosting && !ranked.some((candidate) => candidate.matches.some((match) =>
     /frontend|react|typescript|javascript|web|software/i.test(match)))) {
     throw new Error("No verified frontend/software resume family is available for this frontend posting.");

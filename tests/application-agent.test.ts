@@ -180,6 +180,15 @@ describe("Application Agent job intake and grounding", () => {
     expect(() => assessFit(canonicalPosting({ company: "Reddit", title: "Frontend Engineer, Ads", requiredSkills: ["React"] }), cloudOnly)).toThrow("No verified frontend/software resume family");
   });
 
+  it("does not treat a React skill on an AI-titled role as a frontend posting", () => {
+    const fit = assessFit(canonicalPosting({
+      company: "Cargomatic",
+      title: "AI Engineer – Agentic Automation",
+      requiredSkills: ["Agentic systems", "AWS", "React", "Node.js", "LLM"],
+    }), exampleCandidateProfile);
+    expect(fit.recommendedResumeFamily).toBe("ai-platform-agentic");
+  });
+
   it("routes an AI platform posting by dominant role signals, not supporting cloud keywords", () => {
     const fit = assessFit(canonicalPosting({
       title: "AI Platform Engineer",
