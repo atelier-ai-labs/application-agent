@@ -349,7 +349,7 @@ export function loadBackgroundDestinationCandidates(
   }
 }
 
-interface RuntimeSources {
+export interface RuntimeSources {
   scout: JobScout;
   campaignInput: CreateCampaignInput;
   destinationResolver: BoundedApplicationDestinationResolver;
@@ -364,7 +364,8 @@ function discoveryCampaignInput(input: CreateCampaignInput, sources: Readonly<Re
   return { ...input, searchSources: ids, ...(input.sourceConfigs ? { sourceConfigs: input.sourceConfigs.filter((config) => jobSourceConfigId(config) in sources || config.type === "brave_search") } : {}) };
 }
 
-function createRuntimeSources(env: BackgroundCareerAgentEnvironment): RuntimeSources {
+/** The scout and campaign shape built from search-intent.json and discovery.json. */
+export function createRuntimeSources(env: BackgroundCareerAgentEnvironment): RuntimeSources {
   const remotiveEndpoint = valueOrDefault(env.VITE_REMOTIVE_API_BASE_URL, DEFAULT_REMOTIVE_API_BASE_URL);
   const himalayasEndpoint = valueOrDefault(env.ATELIER_HIMALAYAS_API_BASE_URL, DEFAULT_HIMALAYAS_API_BASE_URL);
   const leverEndpoint = valueOrDefault(env.VITE_LEVER_API_BASE_URL, DEFAULT_LEVER_POSTINGS_BASE_URL);
@@ -410,7 +411,8 @@ function createRuntimeSources(env: BackgroundCareerAgentEnvironment): RuntimeSou
   }
 
   return {
-    scout: new JobScout(sources),
+    // Large boards (Gopuff's Lever board lists ~800 postings) need longer than the 8s default.
+    scout: new JobScout(sources, undefined, { timeoutMs: 20_000 }),
     campaignInput: discoveryCampaignInput(createLiveCampaignInput(leverSites, greenhouseBoards, broadDiscoveryEnabled, searchIntent, true), sources),
     destinationResolver: new BoundedApplicationDestinationResolver({
       lookup: new StaticDestinationEvidenceLookup(destinationCandidates),
