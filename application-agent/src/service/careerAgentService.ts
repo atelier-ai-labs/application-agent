@@ -27,6 +27,7 @@ import {
   type PersistedAttentionEvent,
 } from "../domain/attention";
 import type { ApplicationAnswerDraftGenerator } from "../domain/applicationAnswerDraft";
+import { OPTIONAL_ANSWER_SKIPPED } from "../domain/executor";
 import {
   EXECUTION_RUN_HISTORY_LIMIT,
   ExecutionTraceBuilder,
@@ -2505,7 +2506,9 @@ export class CareerAgentService {
     // inspected option label/value rather than the synthetic Slack ID. Keep
     // canonical yes/no IDs stable for existing boolean answer semantics.
     const blockerValue =
-      record.draft && isDraftApprovalCommand(response.selectedOption)
+      record.question.required === false && /^\s*skip\s*$/i.test(response.selectedOption)
+        ? OPTIONAL_ANSWER_SKIPPED
+        : record.draft && isDraftApprovalCommand(response.selectedOption)
         ? record.draft.answer
         : record.question.kind === "single_choice" && option.id !== option.label.trim().toLowerCase()
           ? option.label

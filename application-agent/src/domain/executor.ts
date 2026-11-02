@@ -542,3 +542,10 @@ export class UnavailableApplicationExecutor implements ApplicationExecutor {
     };
   }
 }
+
+/**
+ * Stored answer for an optional ATS question the user chose to skip (Slack
+ * reply "SKIP"). It is never typed into a form; it only stops the question
+ * from being asked again for that application.
+ */
+export const OPTIONAL_ANSWER_SKIPPED = "__atelier_optional_answer_skipped__";

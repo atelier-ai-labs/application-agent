@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { greenhouseEmbedApplicationUrl, isVerifiedGreenhouseEmbedUrl } from "../application-agent/src/domain/greenhouseJobSource";
 import { isTrustedAutomaticConfirmation } from "../application-agent/src/domain/leverBrowserExecutor";
+import { OPTIONAL_ANSWER_SKIPPED } from "../application-agent/src/domain/executor";
 import {
   greenhouseLocationOptionMatches,
   greenhouseOptionMatches,
@@ -746,6 +747,35 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(result.state).toBe("ready_to_submit");
     expect(location.current).toBe("McDonald, PA, USA");
     expect(current.current).toBe("No");
+  });
+
+  it("asks an optional essay question once, and leaves it blank after SKIP", async () => {
+    const prompt = "We understand that applicants don’t always have all the preferred requirements. Please highlight which requirement you have the least experience in.";
+    const essay = () => new FakeField({ id: "question_essay", label: prompt, type: "textarea", required: false,
+      questionDescriptor: { promptText: prompt, sourceStrategy: "question_container", confidence: "high" } });
+    const other = new FakeField({ id: "anything", label: "Is there anything else you would like us to know about you? Please share.", type: "textarea", required: false });
+
+    const first = essay();
+    const firstSession = new FakeSession([first, other]);
+    const asked = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(firstSession), provider: "greenhouse" }).execute(request(firstSession));
+    expect(asked.state).toBe("requires_human");
+    expect(asked.state === "requires_human" && asked.blocker.kind).toBe("subjective_answer");
+    expect(asked.state === "requires_human" && asked.blocker.field).toBe("question_essay");
+
+    const second = essay();
+    const secondSession = new FakeSession([second]);
+    const base = request(secondSession);
+    const skipped = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(secondSession), provider: "greenhouse" }).execute({
+      ...base,
+      careerJob: { ...base.careerJob, blockers: [{
+        id: "skip", kind: "subjective_answer", unit: "submission", field: "question_essay", question: prompt,
+        context: { jobId: base.careerJob.id, company: "Kapitus", role: "Engineer" }, reason: "optional", evidence: [],
+        status: "resolved", createdAt: capturedAt, resolvedAt: capturedAt, value: OPTIONAL_ANSWER_SKIPPED,
+      }] },
+    });
+    expect(skipped.state).toBe("ready_to_submit");
+    expect(second.current).toBeNull();
+    expect(second.fillCalls).toBe(0);
   });
 
   it("answers a location-preference checkbox group with Remote only", async () => {

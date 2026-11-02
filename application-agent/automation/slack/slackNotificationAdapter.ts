@@ -201,11 +201,14 @@ function eventMessage(
   ]
     .filter(Boolean)
     .join("\n\n");
-  const replyInstruction = event.draft
+  const optionalNote = event.question.required === false && event.question.kind === "free_text"
+    ? " This question is optional: reply SKIP to leave it blank."
+    : "";
+  const replyInstruction = (event.draft
     ? "\n\nReply APPROVE to use this draft, or reply with your edited answer. The draft is never used without your explicit approval."
     : event.question.kind === "free_text"
       ? "\n\nReply in this Slack thread with one grounded answer."
-      : "";
+      : "") + (optionalNote && (event.draft || event.question.kind === "free_text") ? optionalNote : "");
   const threadReply = renderOptions.threadReply === true;
   const text = threadReply
     ? `${questionDetails}${replyInstruction}`

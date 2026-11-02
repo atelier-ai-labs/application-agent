@@ -23,6 +23,7 @@ import type {
 import {
   BrowserExecutionDiagnosticError,
   browserDiagnosticForError,
+  OPTIONAL_ANSWER_SKIPPED,
   safeBrowserDiagnosticMessage,
 } from "./executor";
 import type {
@@ -1232,7 +1233,7 @@ function resolvedCareerValue(
   // Newest answer first: when a question was asked again because the form
   // rejected the earlier answer, the later reply is the one to use.
   const candidates = request.careerJob.blockers.filter(
-    (blocker) => blocker.status === "resolved" && isAnswerValuePresent(blocker.value) &&
+    (blocker) => blocker.status === "resolved" && isAnswerValuePresent(blocker.value) && blocker.value !== OPTIONAL_ANSWER_SKIPPED &&
       (field.classification !== "unknown" || blocker.kind === "unknown_form_field"),
   ).sort((left, right) => (right.resolvedAt ?? "").localeCompare(left.resolvedAt ?? ""));
   const exact = candidates.find((blocker) => blocker.field === field.id);
@@ -1602,6 +1603,25 @@ function booleanAnswer(value: AnswerValue | undefined): boolean | undefined {
   return undefined;
 }
 
+/**
+ * An optional field that is a real essay question ("Please highlight which
+ * requirement you have the least experience in…") is worth answering, so it
+ * is asked in Slack as optional. Generic boxes ("Anything else?") are not.
+ */
+function isOptionalEssayQuestion(field: ApplicationFieldDescriptor): boolean {
+  if (field.required || field.classification !== "free_text" || (field.type !== "textarea" && field.type !== "text")) return false;
+  const prompt = (field.questionDescriptor?.promptText ?? field.label ?? "").replace(/\s+/g, " ").trim();
+  if (prompt.length < 60) return false;
+  if (/\b(?:anything else|additional (?:information|comments)|other comments|cover letter|website|portfolio|linkedin|github|twitter|referr)/i.test(prompt)) return false;
+  return /\?|\b(?:please|tell us|describe|share|highlight|explain|walk us through)\b/i.test(prompt);
+}
+
+/** True when the user replied SKIP to this optional question for this application. */
+function optionalQuestionSkipped(field: ApplicationFieldDescriptor, request: ApplicationExecutionRequest): boolean {
+  return request.careerJob.blockers.some((blocker) => blocker.status === "resolved" && blocker.value === OPTIONAL_ANSWER_SKIPPED &&
+    (blocker.field === field.id || normalized(blocker.question) === normalized(field.questionDescriptor?.promptText ?? field.label)));
+}
+
 function missingFieldDecision(
   field: ApplicationFieldDescriptor,
   reason: string,
@@ -1651,6 +1671,9 @@ function decisionForField(
   }
 
   if (supplied.value === undefined) {
+    if (isOptionalEssayQuestion(field) && !optionalQuestionSkipped(field, request)) {
+      return { explicit: false, blocker: formBlocker(field, "Optional question worth answering; reply SKIP to leave it blank.", "subjective_answer", "ATS_FORM", executor) };
+    }
     if (isReferralField(field)) {
       return missingFieldDecision(
         field,

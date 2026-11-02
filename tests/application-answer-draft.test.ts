@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { OPTIONAL_ANSWER_SKIPPED } from "../application-agent/src/domain/executor";
 import {
   DEFAULT_ANSWER_POLICIES,
   ApplicationService,
@@ -66,7 +67,7 @@ function inspection(status: ExecutionInspection["status"]): ExecutionInspection 
   };
 }
 
-function subjectiveBlocker(): CareerBlockerDraft {
+function subjectiveBlocker(optional = false): CareerBlockerDraft {
   return {
     kind: "subjective_answer",
     unit: "submission",
@@ -78,7 +79,7 @@ function subjectiveBlocker(): CareerBlockerDraft {
       "executor:lever-browser",
       "field-id:behavioral-question-1",
       "field-type:textarea",
-      "field-required:true",
+      `field-required:${optional ? "false" : "true"}`,
       "classification:free_text",
       "question-prompt:Tell us about a difficult technical problem you solved.",
       "question-section:Experience",
@@ -92,6 +93,8 @@ class SubjectiveQuestionExecutor implements ApplicationExecutor {
   readonly receivedValues: string[] = [];
   /** Reject the next answer the way a form rejects a value that matches no option. */
   rejectNextAnswer = false;
+  /** Present the question as optional (field-required:false). */
+  optionalQuestion = false;
 
   executionMode(): "preparation_only" {
     return "preparation_only";
@@ -100,7 +103,7 @@ class SubjectiveQuestionExecutor implements ApplicationExecutor {
   async execute(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult> {
     const blocker = request.careerJob.blockers.find((candidate) => candidate.field === "behavioral-question-1");
     if (!blocker?.value) {
-      return { state: "requires_human", blocker: subjectiveBlocker() };
+      return { state: "requires_human", blocker: subjectiveBlocker(this.optionalQuestion) };
     }
     this.receivedValues.push(String(blocker.value));
     if (this.rejectNextAnswer) {
@@ -780,6 +783,18 @@ describe("local ATS answer drafting", () => {
       .filter((blocker) => blocker.field === "behavioral-question-1" && blocker.status === "resolved")
       .map((blocker) => blocker.value);
     expect(answers).toEqual(["The answer that fits"]);
+  });
+
+  it("stores SKIP on an optional question as the skip marker, never as an answer", async () => {
+    const { service, campaign, executor } = draftService({ draftEnabled: () => false });
+    executor.optionalQuestion = true;
+    service.activateCampaign(campaign.id);
+    await service.runCampaign(campaign.id);
+    const event = service.listAttentionEvents(campaign.id)[0];
+    expect(event.question?.required).toBe(false);
+
+    await service.resolveAttentionResponse({ eventId: event.id, selectedOption: "skip", actorIdentity: { provider: "test", userId: "human-1" }, respondedAt: capturedAt });
+    expect(executor.receivedValues).toEqual([OPTIONAL_ANSWER_SKIPPED]);
   });
 
   it("passes an edited Slack answer through as the exact blocker value", async () => {

@@ -397,6 +397,20 @@ describe("Slack human-attention adapter", () => {
     expect(requests[0]).not.toContain('"type":"actions"');
   });
 
+  it("tells the user an optional free-text question can be skipped", async () => {
+    const requests: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        requests.push(typeof init?.body === "string" ? init.body : "");
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000003" }) } as Response;
+      },
+    });
+    const event = freeTextEvent();
+    await adapter.publishAttentionEvent({ ...event, question: { ...event.question!, required: false } });
+    expect(requests[0]).toContain("This question is optional: reply SKIP to leave it blank.");
+  });
+
   it("reannounces one buried open question as a fresh top-level message", async () => {
     const requests: string[] = [];
     let sequence = 1;
