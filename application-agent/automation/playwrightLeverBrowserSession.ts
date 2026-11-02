@@ -543,6 +543,10 @@ async function logicalOptionIdentity(locator: Locator): Promise<string | null> {
   }).catch(() => null);
 }
 
+/** Provider pages that say, in words, that the application went through. */
+export const SUBMISSION_CONFIRMATION_TEXT =
+  /\b(?:your application (?:has been |was )?(?:successfully )?(?:submitted|received|sent)|application (?:has been |was )?(?:successfully )?(?:submitted|received|sent)|thank(?:s| you) for (?:applying|your application|submitting your application)|you(?:'ve| have) (?:successfully )?applied)\b/i;
+
 function hostnameOf(value: string): string | undefined {
   try {
     return new URL(value).hostname || undefined;
@@ -3235,12 +3239,22 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
     }
 
     await this.page.waitForLoadState("domcontentloaded", { timeout: Math.min(this.timeoutMs, 5_000) }).catch(() => undefined);
-    await this.page.waitForTimeout(Math.min(750, this.timeoutMs));
-    const afterUrl = this.page.url();
-    const bodyText = await this.page.locator("body").innerText({ timeout: this.timeoutMs }).catch(() => "");
-    const confirmationText = /\b(?:your application (?:has been )?submitted|application (?:has been )?submitted|thank you for applying|thanks for applying|application received)\b/i.test(bodyText);
-    const confirmationUrl = /\/(?:confirmation|success|thank[-_]?you)(?:\/|$)/i.test(new URL(afterUrl).pathname);
-    const confirmed = clicked && (confirmationText || confirmationUrl);
+    // Providers can take several seconds to finish (Ashby runs an invisible
+    // reCAPTCHA before posting), so keep looking for the confirmation instead
+    // of reading the page once right after the click.
+    let afterUrl = this.page.url();
+    let confirmed = false;
+    let confirmationUrl = false;
+    const deadline = Date.now() + (clicked ? 20_000 : 0);
+    do {
+      await this.page.waitForTimeout(Math.min(750, this.timeoutMs));
+      afterUrl = this.page.url();
+      const bodyText = await this.page.locator("body").innerText({ timeout: this.timeoutMs }).catch(() => "");
+      const confirmationText = SUBMISSION_CONFIRMATION_TEXT.test(bodyText);
+      confirmationUrl = /\/(?:confirmation|success|thank[-_]?you)(?:\/|$)/i.test(new URL(afterUrl).pathname);
+      const ashbySuccess = await this.page.locator(".ashby-application-form-success-container").count().catch(() => 0) > 0;
+      confirmed = clicked && (confirmationText || confirmationUrl || ashbySuccess);
+    } while (!confirmed && Date.now() < deadline);
     if (!confirmed) {
       const postClickBoundary = clicked ? await this.detectHumanBoundary() : null;
       if (postClickBoundary) {
