@@ -33,7 +33,8 @@ export type InboxDecision =
 /** Hiring-system senders, and subjects that usually mean an application email. */
 export const GMAIL_JOB_QUERY = "(from:(greenhouse-mail.io OR greenhouse.io OR lever.co OR ashbyhq.com OR myworkday.com OR workday.com OR icims.com " +
   "OR smartrecruiters.com OR jobvite.com OR rippling.com OR bamboohr.com OR breezy.hr OR workable.com OR recruitee.com) " +
-  "OR subject:(application OR applying OR interview OR candidacy OR \"next steps\"))";
+  "OR subject:(application OR applying OR interview OR candidacy OR \"next steps\") " +
+  "OR \"your application\" OR \"applying to\" OR \"your candidacy\" OR \"interest in joining\")";
 
 /** Company names that are ordinary words and must not match from an email body. */
 const COMMON_WORDS = new Set(["future", "plane", "span", "phantom", "clair", "pogo", "reflow", "implicit", "upstart", "instructure", "outmarket"]);

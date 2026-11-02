@@ -19,14 +19,14 @@ const NOT_JOB = [
 ];
 
 const REJECTION = [
-  /\b(?:decided|chosen|elected) (?:not )?to (?:move forward|proceed|continue|pursue) with (?:other|another|a different)\b/,
+  /\b(?:decided|chosen|elected) (?:not )?to (?:move forward|proceed|continue|pursue) with (?:others?|another|a different)\b/,
   /\bnot (?:to )?(?:move|moving) forward with your (?:application|candidacy)\b/,
   /\bwill not be (?:moving|proceeding|progressing) (?:forward )?with your\b/,
   /\b(?:we are|we're|we have|we've) (?:decided )?(?:not )?(?:moving|move|moved) forward with other candidates\b/,
   /\b(?:the |this )?(?:position|role) has (?:been|now been) filled\b/,
   /\bno longer (?:considering|being considered|under consideration)\b/,
   /\b(?:have|has) not been selected\b|\bwere not selected\b|\bnot been selected\b/,
-  /\bregret to inform\b/,
+  /\bregret to inform\b|\bregrettably\b.{0,80}\b(?:not|others?|another)\b/,
   /\bother candidates whose (?:experience|qualifications|background)\b/,
   /\bunable to (?:move forward|offer you)\b/,
   /\bdecided to (?:pursue|go with) other\b/,

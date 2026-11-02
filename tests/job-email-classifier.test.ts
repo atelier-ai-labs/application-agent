@@ -9,6 +9,7 @@ describe("job email classification", () => {
     expect(classifyJobEmail(email("Your application to Upstart", "Thank you for your interest in Upstart. After careful review, we have decided to move forward with other candidates whose experience more closely matches our needs."))).toBe("rejection");
     expect(classifyJobEmail(email("Update on your candidacy", "Unfortunately, we will not be moving forward with your application at this time."))).toBe("rejection");
     expect(classifyJobEmail(email("Plane - Software Engineer", "We regret to inform you that the position has been filled."))).toBe("rejection");
+    expect(classifyJobEmail(email("Follow up from Upstart", "Thank you for your interest in joining Upstart and applying to the DevOps Engineer II, Cloud Platform position. Regrettably, we have decided to move forward with others at this time.", "no-reply@recruiting.upstart.com"))).toBe("rejection");
   });
 
   it("recognizes callbacks and interview invitations", () => {
