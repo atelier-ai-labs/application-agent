@@ -188,6 +188,10 @@ Discovery is configured with two local files (copy the examples into `.local/car
 
 Go broad by enabling every source and using wide lanes, or narrow by turning feeds off and listing only the companies you want. Run `npm run career-agent:discover` for a dry run that lists the jobs it would add (with the reason for every skip), then `npm run career-agent:discover -- --apply` to add up to 15 new Researching rows to the Job Tracker for the queue. Only full-time roles in your lanes and locations with a direct Greenhouse, Lever, or Ashby link are added; remote roles must be open to a country in `locations` (add `"Canada"` to include Canada-only remote roles). Override the file locations with `ATELIER_CAREER_AGENT_SEARCH_INTENT_FILE` and `ATELIER_CAREER_AGENT_DISCOVERY_FILE`.
 
+### Keeping the tracker current from email
+
+`npm run career-agent:inbox` reads application emails (read-only, through the same opt-in Gmail access as security codes) and updates the Job Tracker: a rejection sets **Rejected**, a callback or interview request sets **Interviewing** with a Next Step and Follow-Up Date and pings Slack, and an "application received" email confirms **Applied**. Emails are matched to a row by the company named in the sender or subject (a body mention counts only for distinctive names); several matching rows or an unclear callback from a hiring system goes to Slack instead. Each email is handled once (`.local/career-agent/inbox-processed.json`). It is a dry run unless `--apply` is passed; `--days N` widens the look-back (default 14).
+
 ### Source discovery and ATS routing
 
 Discovery references are intentionally separate from full job extraction:

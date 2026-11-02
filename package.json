@@ -27,7 +27,8 @@
     "test:evals": "vite-node evals/run.ts",
     "test:evals:negatives": "vite-node evals/runNegatives.ts",
     "career-agent:resolve-links": "vite-node application-agent/automation/resolveTrackerLinksRun.ts",
-    "career-agent:discover": "vite-node application-agent/automation/discoverJobsRun.ts"
+    "career-agent:discover": "vite-node application-agent/automation/discoverJobsRun.ts",
+    "career-agent:inbox": "vite-node application-agent/automation/inboxRun.ts"
   },
   "dependencies": {
     "react": "^19.1.1",

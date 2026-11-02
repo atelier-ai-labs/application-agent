@@ -517,6 +517,16 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     await this.callApi("chat.postMessage", this.config.botToken, { channel: this.config.channelId, thread_ts: threadTs, text });
   }
 
+  /** Posts an informational message (inbox updates) that asks no question. */
+  async publishInfoNotice(text: string): Promise<void> {
+    await this.callApi("chat.postMessage", this.config.botToken, {
+      channel: this.config.channelId,
+      text: markdownText(text, 3_000),
+      unfurl_links: false,
+      unfurl_media: false,
+    });
+  }
+
   /** Posts a link-only notice for a queue row the agent will not open itself. */
   async publishQueueHandoffNotice(notice: QueueHandoffNotice): Promise<void> {
     let url: URL;
