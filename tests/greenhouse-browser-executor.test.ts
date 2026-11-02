@@ -693,6 +693,20 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect((await run("Woman")).state).toBe("requires_human");
   });
 
+  it("answers whether the candidate is based in the U.S. from the profile location", async () => {
+    const run = async (location: string) => {
+      const field = new FakeField({ id: "based", label: "This role is open to remote candidates based in the United States. Are you currently based in the U.S?", type: "select", required: true,
+        options: ["Yes", "No"].map((label) => ({ label, value: label })) });
+      const session = new FakeSession([field]);
+      const base = request(session);
+      const profile: CandidateProfile = { ...exampleCandidateProfile, identity: { ...exampleCandidateProfile.identity, location } };
+      const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...base, profile });
+      return { state: result.state, value: field.current };
+    };
+    expect(await run("McDonald, Pennsylvania, USA")).toEqual({ state: "ready_to_submit", value: "Yes" });
+    expect((await run("Toronto, Ontario, Canada")).state).toBe("requires_human");
+  });
+
   it("answers a location-preference checkbox group with Remote only", async () => {
     const descriptor = { promptText: "Location Preference", sectionTitle: "Application questions", sourceStrategy: "question_container", confidence: "high" } as const;
     const options = ["Burlingame, CA", "Austin, TX", "Remote"].map((label, index) =>

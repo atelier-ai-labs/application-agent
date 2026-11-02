@@ -409,6 +409,22 @@ function approvedJobSourceValueForField(
  * "Have you been employed by <company> before?" is No when that employer is
  * not in the candidate's work history; a match stays a question for the user.
  */
+/**
+ * "Are you currently based in the U.S.?" is Yes when the profile's own
+ * location is in the United States; any other location stays a question.
+ */
+function basedInUsValueForField(
+  field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[] },
+  profile: CandidateProfile,
+): string | undefined {
+  const text = inspectedPromptText(field);
+  if (!/\b(?:are you|currently)\b.{0,40}\b(?:based|located|living|residing|reside)\b.{0,20}\b(?:in )?(?:the )?(?:u\.?\s?s\.?a?|united states)\b/.test(text)) return undefined;
+  const location = normalized(profile.identity.location ?? profile.location ?? "");
+  if (!/\b(?:usa|united states|u s a?)$/.test(location)) return undefined;
+  const yes = field.options?.find((option) => normalized(option.label) === "yes" || /^yes\b/.test(normalized(option.label)));
+  return field.options?.length ? yes?.label : "Yes";
+}
+
 function previousEmployerValueForField(
   field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[] },
   request: ApplicationExecutionRequest,
@@ -1270,6 +1286,8 @@ function explicitValueForField(
     }
     const approvedSource = approvedJobSourceValueForField(field, request.profile);
     if (approvedSource) return { value: approvedSource, explicit: true };
+    const basedInUs = basedInUsValueForField(field, request.profile);
+    if (basedInUs) return { value: basedInUs, explicit: true };
     const previousEmployer = previousEmployerValueForField(field, request);
     if (previousEmployer) return { value: previousEmployer, explicit: true };
   }
