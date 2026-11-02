@@ -56,6 +56,8 @@ async function errorMessage(response: Response): Promise<string> {
   return `The execution host returned HTTP ${response.status}.`;
 }
 
+const SUBMIT_REQUEST_TIMEOUT_MS = 5 * 60_000;
+
 export class HttpExecutionHostClient {
   private readonly baseUrl: string;
   private readonly fetcher: Fetcher;
@@ -95,10 +97,13 @@ export class HttpExecutionHostClient {
   }
 
   submitManually(executionId: string, target: { campaignId: string; careerJobId: string; applicationId: string }): Promise<ExecutionHostSnapshot> {
+    // The host answers only after the click and the provider's confirmation
+    // (an emailed security code can add minutes), so wait well past the
+    // default request timeout instead of reporting a running host as down.
     return this.call(`/career-agent/executions/${encodeURIComponent(executionId)}/submit`, {
       method: "POST",
       body: JSON.stringify({ approval: "SUBMIT_APPLICATION", ...target }),
-    });
+    }, SUBMIT_REQUEST_TIMEOUT_MS);
   }
 
   issueHandoffForApplication(applicationId: string): Promise<{ url: string; expiresAt: number }> {
@@ -114,9 +119,10 @@ export class HttpExecutionHostClient {
   private async call(
     path: string,
     init: RequestInit,
+    timeoutMs = this.timeoutMs,
   ): Promise<ExecutionHostSnapshot> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), Math.max(timeoutMs, this.timeoutMs));
     try {
       let response: Response;
       try {

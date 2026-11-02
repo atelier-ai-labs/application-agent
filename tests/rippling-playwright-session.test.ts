@@ -52,6 +52,11 @@ class DomLocator {
     (this.elements[0] as HTMLElement | undefined)?.click();
   }
 
+  async fill(value: string): Promise<void> {
+    const input = this.elements[0] as HTMLInputElement | undefined;
+    if (input) input.value = value;
+  }
+
   async press(key: string): Promise<void> {
     (this.elements[0] as HTMLElement | undefined)?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
   }
@@ -117,6 +122,10 @@ class DomPage {
     return callback(arg);
   }
 
+  frames(): unknown[] {
+    return [];
+  }
+
   keyboard = { press: async (): Promise<void> => {} };
   mouse = { move: async (): Promise<void> => {}, down: async (): Promise<void> => {}, up: async (): Promise<void> => {} };
 
@@ -134,13 +143,14 @@ class DomPage {
   }
 }
 
-function sessionForDocument(currentPageUrl?: string): PlaywrightLeverBrowserSession {
+function sessionForDocument(currentPageUrl?: string, securityCodeProvider?: (since: number) => Promise<string | undefined>): PlaywrightLeverBrowserSession {
   return new PlaywrightLeverBrowserSession(
     new DomPage(currentPageUrl) as unknown as Page,
     {} as BrowserContext,
     {} as Browser,
     5_000,
     {},
+    securityCodeProvider,
   );
 }
 
@@ -224,6 +234,39 @@ describe("Rippling Playwright DOM integration", () => {
     const result = await sessionForDocument().submit();
     expect(result.clicked).toBe(false);
     expect(clicks).toBe(0);
+  });
+
+  it("enters an emailed security code once and confirms the submission", async () => {
+    const entered: string[] = [];
+    document.body.innerHTML = `<form><button type="submit">Submit application</button></form>`;
+    document.querySelector("button")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      document.body.innerHTML = `<form><p>Enter the 8-character security code we sent to your email.</p>${
+        Array.from({ length: 8 }, (_, index) => `<input id="security-input-${index}" maxlength="1">`).join("")
+      }<button type="submit">Submit application</button></form>`;
+      document.querySelector("button")?.addEventListener("click", (second) => {
+        second.preventDefault();
+        entered.push(Array.from(document.querySelectorAll<HTMLInputElement>("input")).map((input) => input.value).join(""));
+        document.body.innerHTML = "<h1>Thank you for applying.</h1>";
+      });
+    });
+    const result = await sessionForDocument(undefined, async () => "AbC123xY").submit();
+
+    expect(entered).toEqual(["AbC123xY"]);
+    expect(result).toMatchObject({ clicked: true, confirmed: true });
+    expect(result.evidence).toContain("security-code:entered");
+  });
+
+  it("stops without typing when no security code arrives", async () => {
+    document.body.innerHTML = `<form><button type="submit">Submit application</button></form>`;
+    document.querySelector("button")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      document.body.innerHTML = `<form><p>Enter the security code we emailed you.</p><input id="security-input-0"><button type="submit">Submit application</button></form>`;
+    });
+    const result = await sessionForDocument(undefined, async () => undefined).submit();
+
+    expect(result.confirmed).toBe(false);
+    expect(result.evidence).toContain("security-code:not-received");
   });
 
   it("allows a valid form to click and confirms the resulting page", async () => {

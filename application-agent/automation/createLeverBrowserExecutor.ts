@@ -35,9 +35,10 @@ export function createPlaywrightLeverBrowserExecutor(
     now,
     allowedFieldClassifications,
     allowAutomaticSubmission,
+    securityCodeProvider,
   } = options;
   return new LeverBrowserExecutor({
-    sessionFactory: new PlaywrightLeverBrowserSessionFactory({ headless, slowMo, timeoutMs }),
+    sessionFactory: new PlaywrightLeverBrowserSessionFactory({ headless, slowMo, timeoutMs, ...(securityCodeProvider ? { securityCodeProvider } : {}) }),
     ...(provider ? { provider } : {}),
     ...(resumePaths ? { resumePaths } : {}),
     resumeFileExists: fileExists,

@@ -43,6 +43,11 @@ export interface PlaywrightLeverBrowserOptions {
   headless?: boolean;
   slowMo?: number;
   timeoutMs?: number;
+  /**
+   * Returns the security code an ATS emails after Submit (Greenhouse), or
+   * undefined when none arrives. `since` is the Submit click time (ms epoch).
+   */
+  securityCodeProvider?: (since: number) => Promise<string | undefined>;
 }
 
 interface InspectedRawField {
@@ -1631,6 +1636,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
     private readonly browser: Browser,
     private readonly timeoutMs: number,
     boundaries: BrowserExecutionBoundaryState,
+    private readonly securityCodeProvider?: PlaywrightLeverBrowserOptions["securityCodeProvider"],
   ) {
     this.page.setDefaultTimeout(timeoutMs);
     this.boundaryState = { ...boundaries };
@@ -3229,6 +3235,34 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
     return evidence;
   }
 
+  /** Visible inputs for an emailed security code (one box, or one box per character). */
+  private async securityCodeInputs(): Promise<Locator[]> {
+    // Code-specific names only ("security clearance" questions also say
+    // "security"), and only when the page is asking for a code.
+    const body = await this.page.locator("body").innerText({ timeout: 2_000 }).catch(() => "");
+    if (!/\b(?:security|verification) code\b/i.test(body)) return [];
+    const candidates = this.page.locator(
+      'input[id^="security-input" i], input[id*="security_code" i], input[id*="security-code" i], ' +
+      'input[name*="security_code" i], input[name*="security-code" i], input[aria-label*="security code" i], ' +
+      'input[aria-label*="verification code" i], input[autocomplete="one-time-code"]',
+    );
+    const visible: Locator[] = [];
+    for (let index = 0; index < Math.min(await candidates.count().catch(() => 0), 12); index += 1) {
+      const candidate = candidates.nth(index);
+      if (await candidate.isVisible().catch(() => false)) visible.push(candidate);
+    }
+    return visible;
+  }
+
+  private async enterSecurityCode(inputs: readonly Locator[], code: string): Promise<void> {
+    const perCharacter = inputs.length > 1 && inputs.length >= code.length;
+    if (!perCharacter) {
+      await inputs[0]!.fill(code);
+      return;
+    }
+    for (let index = 0; index < code.length; index += 1) await inputs[index]!.fill(code[index]!);
+  }
+
   async submit(): Promise<BrowserSubmissionResult> {
     if (isVerifiedVaiaApplicationUrl(this.page.url())) return this.submitVaiaReview();
     const control = await this.submitControl();
@@ -3265,8 +3299,28 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
     let afterUrl = this.page.url();
     let confirmed = false;
     let confirmationUrl = false;
-    const deadline = Date.now() + (clicked ? 20_000 : 0);
+    let securityCode: "entered" | "not-received" | undefined;
+    const clickedAt = Date.now();
+    let deadline = clickedAt + (clicked ? 20_000 : 0);
     do {
+      // Greenhouse can answer Submit with "enter the security code we
+      // emailed you". Part of the same approved submission: enter the code
+      // once and submit again; never loop on it.
+      if (clicked && !securityCode && this.securityCodeProvider) {
+        const codeInputs = await this.securityCodeInputs();
+        if (codeInputs.length > 0) {
+          const code = await this.securityCodeProvider(clickedAt).catch(() => undefined);
+          if (!code) {
+            securityCode = "not-received";
+            break;
+          }
+          await this.enterSecurityCode(codeInputs, code);
+          const again = await this.submitControl();
+          if (again) await again.click().catch(() => undefined);
+          securityCode = "entered";
+          deadline = Date.now() + 20_000;
+        }
+      }
       await this.page.waitForTimeout(Math.min(750, this.timeoutMs));
       afterUrl = this.page.url();
       const bodyText = await this.page.locator("body").innerText({ timeout: this.timeoutMs }).catch(() => "");
@@ -3322,7 +3376,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
         confirmed: false,
         outcome: "ambiguous",
         reasonCode: "confirmation-missing",
-        evidence: clicked ? "submit:clicked; confirmation:not-detected" : "submit:not-clicked; confirmation:not-detected",
+        evidence: `${clicked ? "submit:clicked; confirmation:not-detected" : "submit:not-clicked; confirmation:not-detected"}${securityCode ? `; security-code:${securityCode}` : ""}`,
       };
     }
 
@@ -3334,7 +3388,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       externalApplicationId: `confirmation:${parsed.hostname}${parsed.pathname}`,
       confirmationOrigin: parsed.origin,
       confirmationUrl: parsed.toString(),
-      evidence: confirmationUrl ? "submit:clicked; confirmation:url" : "submit:clicked; confirmation:text",
+      evidence: `${confirmationUrl ? "submit:clicked; confirmation:url" : "submit:clicked; confirmation:text"}${securityCode ? `; security-code:${securityCode}` : ""}`,
     };
   }
 
@@ -3348,7 +3402,8 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
 }
 
 export class PlaywrightLeverBrowserSessionFactory implements LeverBrowserSessionFactory {
-  private readonly options: Required<PlaywrightLeverBrowserOptions>;
+  private readonly options: Required<Omit<PlaywrightLeverBrowserOptions, "securityCodeProvider">>;
+  private readonly securityCodeProvider: PlaywrightLeverBrowserOptions["securityCodeProvider"];
 
   constructor(options: PlaywrightLeverBrowserOptions = {}) {
     this.options = {
@@ -3356,6 +3411,7 @@ export class PlaywrightLeverBrowserSessionFactory implements LeverBrowserSession
       slowMo: options.slowMo ?? 0,
       timeoutMs: options.timeoutMs ?? 15_000,
     };
+    this.securityCodeProvider = options.securityCodeProvider;
   }
 
   async open(_applicationId: string): Promise<LeverBrowserSession> {
@@ -3413,6 +3469,6 @@ export class PlaywrightLeverBrowserSessionFactory implements LeverBrowserSession
       browserLaunched: true,
       contextCreated: true,
       pageCreated: true,
-    });
+    }, this.securityCodeProvider);
   }
 }

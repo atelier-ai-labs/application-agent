@@ -23,6 +23,8 @@ import {
   type ManualSubmissionApproval,
 } from "./sessionRegistry";
 import { createConfiguredGoogleSheetsJobTracker } from "../googleSheetsJobTracker";
+import { GmailSecurityCodeReader } from "../gmailSecurityCode";
+import { createGoogleOAuthAccessTokenProvider, gmailSecurityCodesEnabled, resolveGoogleAuthMode } from "../googleOAuth";
 import { HandoffBoundary, type HandoffGrant } from "./handoffBoundary";
 import { createHandoffViewerServer, type HandoffViewerServer } from "./handoffViewer";
 import {
@@ -390,6 +392,13 @@ export function createConfiguredExecutionHostServer(
   options: ConfiguredExecutionHostOptions = {},
 ): ExecutionHostServer {
   const config = resolveExecutionHostConfig(options.env ?? process.env);
+  const env = options.env ?? process.env;
+  // Opt-in (ATELIER_GMAIL_SECURITY_CODES=true plus re-running google-auth):
+  // read Greenhouse's emailed security code so Submit can finish unattended.
+  const tokens = gmailSecurityCodesEnabled(env) && resolveGoogleAuthMode(env).mode === "oauth"
+    ? createGoogleOAuthAccessTokenProvider(env, 10_000)
+    : undefined;
+  const securityCodes = tokens ? new GmailSecurityCodeReader({ accessToken: () => tokens.getAccessToken() }) : undefined;
   const executor = createPlaywrightLeverBrowserExecutor({
     provider: "auto",
     headless: config.headless,
@@ -398,6 +407,7 @@ export function createConfiguredExecutionHostServer(
     ...(Object.keys(config.resumePaths).length > 0 ? { resumePaths: config.resumePaths } : {}),
     allowAutomaticSubmission: config.submissionAuthority === "automatic" && !config.preparationOnly,
     ...(options.now ? { now: options.now } : {}),
+    ...(securityCodes ? { securityCodeProvider: (since: number) => securityCodes.waitForCode(since) } : {}),
   });
   return createExecutionHostServer({
     executor,
