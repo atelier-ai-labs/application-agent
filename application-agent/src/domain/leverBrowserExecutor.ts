@@ -334,6 +334,21 @@ function approvedDemographicValueForField(
  * controls with an unambiguous demographic option label; unrelated optional
  * checkboxes remain untouched.
  */
+/** The shared name of a multi-choice checkbox group ("question_1[]_42" → "question_1[]"). */
+function checkboxGroupKey(field: Pick<LeverBrowserField, "id" | "type">): string | undefined {
+  if (field.type !== "checkbox") return undefined;
+  return /^(.+\[\])_[^_]+$/.exec(field.id)?.[1];
+}
+
+function remotePreferenceCheckboxValue(
+  field: Pick<LeverBrowserField, "id" | "label" | "section" | "type">,
+): boolean | undefined {
+  if (field.type !== "checkbox") return undefined;
+  const prompt = inspectedPromptText(field);
+  if (!/\blocation preferences?\b|\bpreferred (?:work )?locations?\b|\bwhere (?:would you like|do you prefer|do you want) to work\b|\b(?:desired|preferred) work (?:location|arrangement)\b/.test(prompt)) return undefined;
+  return /\bremote\b/.test(normalized(field.label ?? ""));
+}
+
 function approvedDemographicCheckboxValueForField(
   field: Pick<LeverBrowserField, "id" | "label" | "section">,
   profile: CandidateProfile,
@@ -1214,6 +1229,8 @@ function explicitValueForField(
     return { value: "Yes", explicit: true };
   }
   if (request.profile) {
+    const remotePreference = remotePreferenceCheckboxValue(field);
+    if (remotePreference !== undefined) return { value: remotePreference, explicit: true };
     const ageBracket = approvedAgeBracketValueForField(field, request.profile);
     if (ageBracket) return { value: ageBracket, explicit: true };
     if (field.classification === "demographic" && field.type === "checkbox") {
@@ -2616,8 +2633,17 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       };
     }
 
+    // Greenhouse marks every box of a multi-choice group ("question_1[]_…")
+    // required; the group is answered once any one of its boxes is checked.
+    const checkedGroups = new Set<string>();
+    for (const field of observed.fields) {
+      const group = checkboxGroupKey(field);
+      if (group && field.readValue && await field.readValue().catch(() => null) === true) checkedGroups.add(group);
+    }
     for (const field of observed.fields) {
       if (!field.required || !field.readValue) continue;
+      const group = checkboxGroupKey(field);
+      if (group && checkedGroups.has(group)) continue;
       let value: string | boolean | null = null;
       try {
         value = await field.readValue();

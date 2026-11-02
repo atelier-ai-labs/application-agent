@@ -572,6 +572,17 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(session.submitChecks).toBe(0);
   });
 
+  it("answers a location-preference checkbox group with Remote only", async () => {
+    const descriptor = { promptText: "Location Preference", sectionTitle: "Application questions", sourceStrategy: "question_container", confidence: "high" } as const;
+    const options = ["Burlingame, CA", "Austin, TX", "Remote"].map((label, index) =>
+      new FakeField({ id: `question_67832267[]_${index}`, label, type: "checkbox", required: true, questionDescriptor: descriptor }));
+    const session = new FakeSession(options);
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute(request(session));
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(options.map((field) => field.current === true)).toEqual([false, false, true]);
+  });
+
   it("opens the same posting's embed form when the hosted page redirects to the employer's site", async () => {
     const firstName = new FakeField({ id: "first_name", label: "First Name", type: "text", required: true });
     const session = new FakeSession([firstName]);
