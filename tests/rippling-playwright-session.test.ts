@@ -57,6 +57,13 @@ class DomLocator {
     if (input) input.value = value;
   }
 
+  async pressSequentially(value: string): Promise<void> {
+    const input = this.elements[0] as HTMLInputElement | undefined;
+    if (!input) return;
+    input.value += value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
   async press(key: string): Promise<void> {
     (this.elements[0] as HTMLElement | undefined)?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
   }
@@ -267,6 +274,27 @@ describe("Rippling Playwright DOM integration", () => {
 
     expect(result.confirmed).toBe(false);
     expect(result.evidence).toContain("security-code:not-received");
+  });
+
+  it("picks Lever's matching location suggestion so selectedLocation is recorded", async () => {
+    document.body.innerHTML = `<form><div class="application-field"><label for="location-input">Current location</label>
+      <input class="location-input" id="location-input" type="text" name="location" required>
+      <input id="selected-location" type="hidden" name="selectedLocation">
+      <div class="dropdown-results"></div></div></form>`;
+    const input = document.querySelector<HTMLInputElement>("#location-input")!;
+    input.addEventListener("input", () => {
+      const results = document.querySelector(".dropdown-results")!;
+      results.innerHTML = ["McDonald, PA, USA", "McDonald, TN, USA"].map((name) => `<div>${name}</div>`).join("");
+      results.querySelectorAll("div").forEach((option) => option.addEventListener("click", () => {
+        input.value = option.textContent ?? "";
+        document.querySelector<HTMLInputElement>("#selected-location")!.value = JSON.stringify({ name: option.textContent });
+      }));
+    });
+    const [field] = await sessionForDocument("https://jobs.lever.co/acme/posting-1/apply").inspectFields();
+    await field!.fill("McDonald, Pennsylvania, USA");
+
+    expect(input.value).toBe("McDonald, PA, USA");
+    expect(document.querySelector<HTMLInputElement>("#selected-location")!.value).toContain("McDonald, PA, USA");
   });
 
   it("allows a valid form to click and confirms the resulting page", async () => {

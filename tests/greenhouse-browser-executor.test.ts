@@ -707,6 +707,25 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect((await run("Toronto, Ontario, Canada")).state).toBe("requires_human");
   });
 
+  it("answers immigration-law work authorization, highest education, and current-employee questions from the profile", async () => {
+    const select = (id: string, label: string, options: readonly string[]) =>
+      new FakeField({ id, label, type: "select", required: true, options: options.map((option) => ({ label: option, value: option })) });
+    const authorized = select("auth", "Are you presently authorized under U.S. immigration laws to work in the United States?*", ["Yes", "No"]);
+    const education = select("edu", "Please select your highest completed level of education.*", ["High School or equivalent", "Some College", "Associate's Degree", "Bachelor's Degree", "Master's Degree", "Doctorate"]);
+    const current = select("current", "Are you a current Kapitus employee? If yes, please apply via our Internal Job Board.*", ["Yes", "No"]);
+    const session = new FakeSession([authorized, education, current]);
+    const base = request(session);
+    const profile: CandidateProfile = {
+      ...exampleCandidateProfile,
+      workAuthorization: { status: "authorized", countries: ["United States"], sponsorshipRequired: false },
+      education: [{ id: "ptc", institution: "Pittsburgh Technical College", degree: "Associate of Science", field: "Information Technology", completionDate: "2013", provenance: "test" }],
+    };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...base, profile });
+
+    expect(result.state).toBe("ready_to_submit");
+    expect([authorized.current, education.current, current.current]).toEqual(["Yes", "Associate's Degree", "No"]);
+  });
+
   it("answers a location-preference checkbox group with Remote only", async () => {
     const descriptor = { promptText: "Location Preference", sectionTitle: "Application questions", sourceStrategy: "question_container", confidence: "high" } as const;
     const options = ["Burlingame, CA", "Austin, TX", "Remote"].map((label, index) =>

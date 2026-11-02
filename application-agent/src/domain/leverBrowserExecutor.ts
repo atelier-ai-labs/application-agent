@@ -425,12 +425,42 @@ function basedInUsValueForField(
   return field.options?.length ? yes?.label : "Yes";
 }
 
+/** Degree levels, lowest to highest, with the words a form or profile uses for each. */
+const EDUCATION_LEVELS: readonly (readonly [number, RegExp])[] = [
+  [1, /\bhigh school\b|\bged\b|\bsecondary\b/],
+  [2, /\bassociate'?s?\b|\ba\.?\s?[as]\.?\b|\btwo[- ]year\b/],
+  [3, /\bbachelor'?s?\b|\bb\.?\s?[as]\.?\b|\bundergraduate\b/],
+  [4, /\bmaster'?s?\b|\bm\.?\s?[as]\.?\b|\bmba\b|\bgraduate degree\b/],
+  [5, /\bdoctor(?:ate|al)?\b|\bph\.?\s?d\b/],
+];
+
+function educationLevel(text: string): number | undefined {
+  return EDUCATION_LEVELS.find(([, pattern]) => pattern.test(text))?.[0];
+}
+
+/**
+ * "Highest completed level of education" picks the option at the level of the
+ * highest completed degree in the profile (an associate degree matches
+ * "Associate's Degree"); no profile degree or no single matching option asks.
+ */
+function highestEducationValueForField(
+  field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[] },
+  profile: CandidateProfile,
+): string | undefined {
+  if (!/\bhighest\b.{0,30}\b(?:education|degree)\b|\blevel of education\b/.test(inspectedPromptText(field))) return undefined;
+  const levels = profile.education.filter((record) => record.completionDate).map((record) => educationLevel(normalized(record.degree))).filter((level): level is number => level !== undefined);
+  if (levels.length === 0 || !field.options?.length) return undefined;
+  const highest = Math.max(...levels);
+  const matches = field.options.filter((option) => educationLevel(normalized(option.label)) === highest && !/\bsome\b|\bin progress\b|\bpursuing\b/.test(normalized(option.label)));
+  return matches.length === 1 ? matches[0]!.label : undefined;
+}
+
 function previousEmployerValueForField(
   field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[] },
   request: ApplicationExecutionRequest,
 ): string | undefined {
   const text = inspectedPromptText(field);
-  if (!/\b(?:have|had) you\b.{0,30}\b(?:employed|worked)\b.{0,60}\bbefore\b|\b(?:previously|ever) (?:been )?(?:employed|worked) (?:by|at|for|with)\b|\bformer employee\b/.test(text)) {
+  if (!/\b(?:have|had) you\b.{0,30}\b(?:employed|worked)\b.{0,60}\bbefore\b|\b(?:previously|ever) (?:been )?(?:employed|worked) (?:by|at|for|with)\b|\bformer employee\b|\bare you (?:a )?current\b.{0,30}\bemployee\b/.test(text)) {
     return undefined;
   }
   const company = normalized(request.careerJob.job.company ?? "");
@@ -642,7 +672,7 @@ export function classifyLeverApplicationField(
   // name" in a referral prompt must never cause the candidate's own name to
   // be copied into that field.
   if (isReferralField(field)) return "unknown";
-  if (hasPhrase(text, /work authorization|authorized to work|legally authorized|right to work|eligible to work/)) return "work_authorization";
+  if (hasPhrase(text, /work authorization|authorized to work|legally authorized|right to work|eligible to work|\bauthorized\b.{0,50}\bto work\b/)) return "work_authorization";
   if (isExactAcknowledgmentPrompt(text) || isPrivacyAcknowledgmentPrompt(text)) return "legal_attestation";
   // The visa disclaimer contains sponsorship language but is a legal
   // acknowledgment, not the candidate's sponsorship-required answer.
@@ -1286,6 +1316,8 @@ function explicitValueForField(
     }
     const approvedSource = approvedJobSourceValueForField(field, request.profile);
     if (approvedSource) return { value: approvedSource, explicit: true };
+    const highestEducation = highestEducationValueForField(field, request.profile);
+    if (highestEducation) return { value: highestEducation, explicit: true };
     const basedInUs = basedInUsValueForField(field, request.profile);
     if (basedInUs) return { value: basedInUs, explicit: true };
     const previousEmployer = previousEmployerValueForField(field, request);

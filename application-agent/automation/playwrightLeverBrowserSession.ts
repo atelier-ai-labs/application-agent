@@ -855,7 +855,52 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
       }
       throw new Error(`The control ${this.id} is not fillable.`);
     }
+    if (await this.isLeverLocationTypeahead(locator)) {
+      await this.fillLeverLocation(locator, value);
+      return;
+    }
     await locator.fill(value);
+  }
+
+  /** Lever's "Current location" box with its hidden selectedLocation companion. */
+  private async isLeverLocationTypeahead(locator: Locator): Promise<boolean> {
+    if (!/(?:^|\.)lever\.co$/i.test(hostnameOf(this.page.url()) ?? "")) return false;
+    return locator.evaluate((element) =>
+      element.classList.contains("location-input") &&
+      Boolean(element.closest(".application-field")?.querySelector('input[type="hidden"][name="selectedLocation"]')),
+    ).catch(() => false);
+  }
+
+  /**
+   * Typing alone leaves Lever's hidden selectedLocation empty, so the form
+   * treats the field as unanswered. Search by city and state, click the one
+   * suggestion that matches the full grounded location, and confirm the
+   * hidden value was set.
+   */
+  private async fillLeverLocation(locator: Locator, value: string): Promise<void> {
+    const query = value.split(",").slice(0, 2).map((part) => part.trim()).filter(Boolean).join(", ");
+    await locator.fill("");
+    await locator.pressSequentially(query, { delay: 30 });
+    // A Lever application has one location typeahead; its suggestions and
+    // hidden value are page-level siblings of the input.
+    const results = this.page.locator(".application-field .dropdown-results > div");
+    let matches: Locator[] = [];
+    for (let attempt = 0; attempt < 40 && matches.length === 0; attempt += 1) {
+      await this.page.waitForTimeout(150);
+      matches = [];
+      for (let index = 0; index < Math.min(await results.count(), 12); index += 1) {
+        const option = results.nth(index);
+        if (greenhouseLocationOptionMatches((await option.innerText().catch(() => "")).trim(), value, value)) matches.push(option);
+      }
+    }
+    if (matches.length !== 1) throw new Error(`The Lever location ${query} did not produce exactly one matching suggestion.`);
+    await matches[0]!.click();
+    const hidden = this.page.locator('.application-field input[type="hidden"][name="selectedLocation"]');
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if ((await hidden.inputValue().catch(() => "")).trim()) return;
+      await this.page.waitForTimeout(100);
+    }
+    throw new Error("Lever did not record the selected location.");
   }
 
   /** Resolve options for this combobox, preferring its explicit ARIA-owned
