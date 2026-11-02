@@ -642,6 +642,39 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(isTrustedAutomaticConfirmation(confirmation("https://job-boards.greenhouse.io/embed/job_app/confirmation?for=other&token=8030908"), target)).toBe(false);
   });
 
+  it("answers how-did-you-hear from the ranked list and previous employment with No", async () => {
+    const yesNo = ["Yes", "No"].map((label) => ({ label, value: label }));
+    const source = new FakeField({ id: "question_67832270", label: "Before applying, how did you hear about Kapitus?*", type: "select", required: true,
+      options: ["LinkedIn job post", "Indeed", "Another job site", "Other"].map((label) => ({ label, value: label })) });
+    const employed = new FakeField({ id: "question_67832271", label: "Have you been employed by Kapitus before?*", type: "select", required: true, options: yesNo });
+    const session = new FakeSession([source, employed]);
+    const base = request(session);
+    const profile: CandidateProfile = {
+      ...exampleCandidateProfile,
+      approvedReusableAnswers: { ...exampleCandidateProfile.approvedReusableAnswers, job_source: "Another job site|Job board|Internet" },
+    };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...base, profile });
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(source.current).toBe("Another job site");
+    expect(employed.current).toBe("No");
+  });
+
+  it("asks instead of answering No when the company is in the work history", async () => {
+    const employed = new FakeField({ id: "question_1", label: "Have you been employed by Kapitus before?*", type: "select", required: true,
+      options: ["Yes", "No"].map((label) => ({ label, value: label })) });
+    const session = new FakeSession([employed]);
+    const base = request(session);
+    const profile: CandidateProfile = {
+      ...exampleCandidateProfile,
+      employmentHistory: [...exampleCandidateProfile.employmentHistory, { ...exampleCandidateProfile.employmentHistory[0]!, id: "kapitus", employer: "Kapitus" }],
+    };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...base, profile });
+
+    expect(result.state).toBe("requires_human");
+    expect(employed.current).toBeNull();
+  });
+
   it("answers a location-preference checkbox group with Remote only", async () => {
     const descriptor = { promptText: "Location Preference", sectionTitle: "Application questions", sourceStrategy: "question_container", confidence: "high" } as const;
     const options = ["Burlingame, CA", "Austin, TX", "Remote"].map((label, index) =>

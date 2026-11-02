@@ -386,7 +386,7 @@ function approvedDemographicCheckboxValueForField(
  * answered with the generic source value.
  */
 function approvedJobSourceValueForField(
-  field: Pick<LeverBrowserField, "id" | "label" | "section">,
+  field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[] },
   profile: CandidateProfile,
 ): string | undefined {
   const text = inspectedPromptText(field);
@@ -394,7 +394,35 @@ function approvedJobSourceValueForField(
   if (!/\bhow did you (?:hear|learn)\b|\bwhere did you hear\b|\bhow did you discover\b|\b(?:job|role|opportunity) source\b|\bsource of (?:this )?(?:job|role|opportunity)\b/.test(text)) {
     return undefined;
   }
-  return profile.approvedReusableAnswers.job_source?.trim();
+  // job_source may rank several wordings ("Another job site|Job board|Internet");
+  // a dropdown takes the first one it offers, free text takes the first.
+  const preferences = (profile.approvedReusableAnswers.job_source ?? "").split("|").map((value) => value.trim()).filter(Boolean);
+  if (!field.options?.length) return preferences[0];
+  for (const preference of preferences) {
+    const option = field.options.find((candidate) => normalized(candidate.label) === normalized(preference));
+    if (option) return option.label;
+  }
+  return undefined;
+}
+
+/**
+ * "Have you been employed by <company> before?" is No when that employer is
+ * not in the candidate's work history; a match stays a question for the user.
+ */
+function previousEmployerValueForField(
+  field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[] },
+  request: ApplicationExecutionRequest,
+): string | undefined {
+  const text = inspectedPromptText(field);
+  if (!/\b(?:have|had) you\b.{0,30}\b(?:employed|worked)\b.{0,60}\bbefore\b|\b(?:previously|ever) (?:been )?(?:employed|worked) (?:by|at|for|with)\b|\bformer employee\b/.test(text)) {
+    return undefined;
+  }
+  const company = normalized(request.careerJob.job.company ?? "");
+  if (!company || !text.includes(company) && !/\b(?:us|this company|our company)\b/.test(text)) return undefined;
+  const employers = request.profile?.employmentHistory.map((record) => normalized(record.employer ?? "")) ?? [];
+  if (employers.some((employer) => employer && (employer.includes(company) || company.includes(employer)))) return undefined;
+  const no = field.options?.find((option) => normalized(option.label) === "no");
+  return field.options?.length ? no?.label : "No";
 }
 
 /**
@@ -1242,6 +1270,8 @@ function explicitValueForField(
     }
     const approvedSource = approvedJobSourceValueForField(field, request.profile);
     if (approvedSource) return { value: approvedSource, explicit: true };
+    const previousEmployer = previousEmployerValueForField(field, request);
+    if (previousEmployer) return { value: previousEmployer, explicit: true };
   }
   if (field.classification === "legal_attestation" && request.profile) {
     const acknowledgment = approvedAcknowledgmentValueForField(field, request.profile);
