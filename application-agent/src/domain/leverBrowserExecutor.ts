@@ -464,7 +464,9 @@ function previousEmployerValueForField(
     return undefined;
   }
   const company = normalized(request.careerJob.job.company ?? "");
-  if (!company || !text.includes(company) && !/\b(?:us|this company|our company)\b/.test(text)) return undefined;
+  // Forms often shorten the name ("a current Stack employee" for Stack AV).
+  const firstWord = company.split(" ")[0] ?? "";
+  if (!company || !text.includes(company) && !(firstWord.length >= 4 && text.includes(firstWord)) && !/\b(?:us|this company|our company)\b/.test(text)) return undefined;
   const employers = request.profile?.employmentHistory.map((record) => normalized(record.employer ?? "")) ?? [];
   if (employers.some((employer) => employer && (employer.includes(company) || company.includes(employer)))) return undefined;
   const no = field.options?.find((option) => normalized(option.label) === "no");
@@ -1785,6 +1787,16 @@ function groundedLocationValueMatches(
   return matchingOptions.length === 1;
 }
 
+const US_STATE_CODES: Readonly<Record<string, string>> = {
+  alabama: "al", alaska: "ak", arizona: "az", arkansas: "ar", california: "ca", colorado: "co", connecticut: "ct", delaware: "de",
+  florida: "fl", georgia: "ga", hawaii: "hi", idaho: "id", illinois: "il", indiana: "in", iowa: "ia", kansas: "ks", kentucky: "ky",
+  louisiana: "la", maine: "me", maryland: "md", massachusetts: "ma", michigan: "mi", minnesota: "mn", mississippi: "ms", missouri: "mo",
+  montana: "mt", nebraska: "ne", nevada: "nv", "new hampshire": "nh", "new jersey": "nj", "new mexico": "nm", "new york": "ny",
+  "north carolina": "nc", "north dakota": "nd", ohio: "oh", oklahoma: "ok", oregon: "or", pennsylvania: "pa", "rhode island": "ri",
+  "south carolina": "sc", "south dakota": "sd", tennessee: "tn", texas: "tx", utah: "ut", vermont: "vt", virginia: "va",
+  washington: "wa", "west virginia": "wv", wisconsin: "wi", wyoming: "wy", "district of columbia": "dc",
+};
+
 function groundedLocationStringsMatch(current: string, groundedLocation: string): boolean {
   const normalize = (value: string) => value.replace(/\s+/g, " ").trim().toLowerCase();
   const aliases: Readonly<Record<string, readonly string[]>> = {
@@ -1802,7 +1814,10 @@ function groundedLocationStringsMatch(current: string, groundedLocation: string)
   return grounded.slice(1).every((part, index) => {
     const candidate = currentParts[index + 1];
     if (!candidate) return false;
-    return normalize(part) === candidate || (aliases[normalize(part)] ?? [normalize(part)]).includes(candidate);
+    const wanted = normalize(part);
+    // "Pennsylvania" and "PA" name the same state (Lever shows "McDonald, PA, USA").
+    return wanted === candidate || (aliases[wanted] ?? [wanted]).includes(candidate) ||
+      US_STATE_CODES[wanted] === candidate || US_STATE_CODES[candidate] === wanted;
   });
 }
 
@@ -2626,7 +2641,9 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
             const committed = field.readValue ? await field.readValue() : undefined;
             const committedMatches = isSalary && typeof committed === "string"
               ? salaryValuesEqual(fillValue ?? value, committed)
-              : committed === value;
+              : committed === value ||
+                // A location typeahead commits its own spelling of the same place.
+                (fieldDescriptor.classification === "location" && typeof committed === "string" && groundedLocationStringsMatch(committed, value));
             if (typeof committed === "string" && !committedMatches) {
               throw new Error(`The value for ${fieldDescriptor.label} was not committed by the form.`);
             }

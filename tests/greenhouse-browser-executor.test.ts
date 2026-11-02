@@ -726,6 +726,28 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect([authorized.current, education.current, current.current]).toEqual(["Yes", "Associate's Degree", "No"]);
   });
 
+  it("accepts a location typeahead's own spelling and a shortened company name", async () => {
+    // The typeahead commits "McDonald, PA, USA" for "McDonald, Pennsylvania, USA".
+    class TypeaheadField extends FakeField {
+      override async fill(_value: string): Promise<void> { this.fillCalls += 1; this.current = "McDonald, PA, USA"; }
+    }
+    const location = new TypeaheadField({ id: "location-input", label: "Current location", type: "text", required: true });
+    const current = new FakeField({ id: "current", label: "Are you a current Kapi employee? If yes, please apply internally.*", type: "select", required: true,
+      options: ["Yes", "No"].map((label) => ({ label, value: label })) });
+    const session = new FakeSession([location, current]);
+    const base = request(session);
+    const profile: CandidateProfile = { ...exampleCandidateProfile, identity: { ...exampleCandidateProfile.identity, location: "McDonald, Pennsylvania, USA" } };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({
+      ...base,
+      profile,
+      careerJob: { ...base.careerJob, job: { ...base.careerJob.job, company: "Kapi Capital" } },
+    });
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(location.current).toBe("McDonald, PA, USA");
+    expect(current.current).toBe("No");
+  });
+
   it("answers a location-preference checkbox group with Remote only", async () => {
     const descriptor = { promptText: "Location Preference", sectionTitle: "Application questions", sourceStrategy: "question_container", confidence: "high" } as const;
     const options = ["Burlingame, CA", "Austin, TX", "Remote"].map((label, index) =>
