@@ -680,6 +680,12 @@ export function greenhouseLocationOptionMatches(optionLabel: string, desiredCity
     tennessee: ["tennessee", "tn"], tn: ["tennessee", "tn"],
     "united states": ["united states", "us", "usa"], us: ["united states", "us", "usa"], usa: ["united states", "us", "usa"],
   };
+  // A country-level question ("United States" among country options) matches
+  // when that country is the grounded location's country.
+  if (optionParts.length === 1 && !desiredCity.includes(",")) {
+    const groundedCountry = normalize(groundedLocation.split(",").at(-1) ?? "");
+    return (aliases[groundedCountry] ?? [groundedCountry]).includes(normalizedCity);
+  }
   return groundedLocation.split(",").map(normalize).filter(Boolean).slice(1).every((part) =>
     optionParts.slice(1).some((candidate) => (aliases[part] ?? [part]).includes(candidate)),
   );
