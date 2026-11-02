@@ -44,7 +44,9 @@ import {
   leverSourceId,
 } from "./leverJobSource";
 import {
+  greenhouseEmbedApplicationUrl,
   isVerifiedGreenhouseApplicationUrl,
+  isVerifiedGreenhouseEmbedUrl,
   isVerifiedGreenhouseHostedUrl,
 } from "./greenhouseJobSource";
 import {
@@ -1773,7 +1775,8 @@ function sameApplicationPage(value: string, target: TrustedTarget): boolean {
       return url.protocol === "https:" && url.toString() === new URL(target.applicationUrl).toString();
     }
     if (target.provider === "greenhouse") {
-      return url.protocol === "https:" && isVerifiedGreenhouseApplicationUrl(url.toString(), target.site, target.postingId ?? "");
+      return url.protocol === "https:" && (isVerifiedGreenhouseApplicationUrl(url.toString(), target.site, target.postingId ?? "") ||
+        isVerifiedGreenhouseEmbedUrl(url.toString(), target.site, target.postingId ?? ""));
     }
     if (target.provider === "rippling") {
       return url.protocol === "https:" && isVerifiedRipplingApplicationUrl(url.toString()) &&
@@ -2833,6 +2836,12 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
     }
     if (!state.navigated) {
       await state.session.navigate(target.applicationUrl);
+      // Some boards redirect the hosted page to the employer's careers site;
+      // the embed route is the same verified posting's form on greenhouse.io.
+      if (target.provider === "greenhouse" && target.postingId &&
+        !sameApplicationPage(await state.session.currentUrl(), target)) {
+        await state.session.navigate(greenhouseEmbedApplicationUrl(target.site, target.postingId));
+      }
       state.navigated = true;
       if (target.provider === "vaia") await this.prepareVaiaWizard(request, state.session);
     }

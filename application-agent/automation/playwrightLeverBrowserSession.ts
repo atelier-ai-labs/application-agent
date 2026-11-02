@@ -1263,6 +1263,23 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
     if (committed !== value) throw new Error(`The checkbox value for ${this.id} was not committed.`);
   }
 
+  /**
+   * Greenhouse removes its file input once it accepts a file and renders the
+   * filename (with a Remove button) in the field's labelled upload group.
+   * Only that provider-owned receipt, showing the exact filename, counts.
+   */
+  private async greenhouseUploadReceiptShows(inputId: string, path: string): Promise<boolean> {
+    if (!/(?:^|\.)greenhouse\.io$/i.test(hostnameOf(this.page.url()) ?? "")) return false;
+    const expected = (path.split(/[\\/]/).pop() ?? path).trim().toLowerCase();
+    const receipt = this.page.locator(`[aria-labelledby="upload-label-${inputId.replace(/"/g, "")}"] .file-upload__filename`);
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const texts = await receipt.allTextContents().catch(() => [] as string[]);
+      if (texts.some((text) => text.replace(/\s+/g, " ").trim().toLowerCase().includes(expected))) return true;
+      await this.page.waitForTimeout(250);
+    }
+    return false;
+  }
+
   async uploadFile(path: string): Promise<void> {
     const locator = this.locator();
     const isRipplingResume = isVerifiedRipplingApplicationUrl(this.page.url()) && (
@@ -1278,21 +1295,25 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
           return (owner?.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase();
         }).catch(() => "")
       : "";
+    const inputId = await locator.getAttribute("id", { timeout: 2_000 }).catch(() => null);
     await locator.setInputFiles(path);
-    const committed = await locator.evaluate((element, expectedPath) => ({
+    // A provider can remove the input after accepting the file (Greenhouse);
+    // do not wait out the action timeout for an element that is gone.
+    const committed = await locator.count() === 0 ? { fileCount: 0, uploadMarker: false } : await locator.evaluate((element, expectedPath) => ({
       fileCount: element instanceof HTMLInputElement && element.type.toLowerCase() === "file"
         ? (element.files?.length ?? 0)
         : 0,
       // The deterministic DOM harness and a few provider wrappers expose a
       // bounded upload marker instead of a FileList.
       uploadMarker: element.getAttribute("data-uploaded-path") === expectedPath,
-    }), path).catch(() => ({ fileCount: 0, uploadMarker: false }));
+    }), path, { timeout: 5_000 }).catch(() => ({ fileCount: 0, uploadMarker: false }));
     // Rippling replaces its hidden input after accepting a file. In that
     // window Playwright can observe an empty FileList even though the
     // provider has committed the upload and rendered its receipt. Treat that
     // provider-owned receipt as the source of truth, but only for the
     // canonical Rippling resume control (never for arbitrary file fields).
-    if (committed.fileCount !== 1 && !committed.uploadMarker && !isRipplingResume) {
+    if (committed.fileCount !== 1 && !committed.uploadMarker && !isRipplingResume &&
+      !(inputId && await this.greenhouseUploadReceiptShows(inputId, path))) {
       throw new Error(`The uploaded resume was not committed by the form.`);
     }
     if (isRipplingResume && committed.fileCount !== 1 && !committed.uploadMarker) {

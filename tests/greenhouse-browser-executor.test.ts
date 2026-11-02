@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { greenhouseEmbedApplicationUrl, isVerifiedGreenhouseEmbedUrl } from "../application-agent/src/domain/greenhouseJobSource";
 import {
   greenhouseLocationOptionMatches,
   greenhouseOptionMatches,
@@ -569,6 +570,24 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(result.blocker.questionProvenance).toBe("POLICY");
     expect(firstName.fillCalls).toBe(0);
     expect(session.submitChecks).toBe(0);
+  });
+
+  it("opens the same posting's embed form when the hosted page redirects to the employer's site", async () => {
+    const firstName = new FakeField({ id: "first_name", label: "First Name", type: "text", required: true });
+    const session = new FakeSession([firstName]);
+    const visited: string[] = [];
+    const navigate = session.navigate.bind(session);
+    session.navigate = async (url: string) => {
+      visited.push(url);
+      // careers.example.com plays the employer site that the hosted page redirects to.
+      await navigate(url.includes("/embed/job_app") ? url : "https://careers.example.com/jobs?gh_jid=1");
+    };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute(request(session));
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(visited).toEqual([applicationUrl, greenhouseEmbedApplicationUrl("kapitus", new URL(applicationUrl).pathname.split("/").pop()!)]);
+    expect(isVerifiedGreenhouseEmbedUrl(session.currentUrl(), "kapitus", new URL(applicationUrl).pathname.split("/").pop()!)).toBe(true);
+    expect(isVerifiedGreenhouseEmbedUrl("https://job-boards.greenhouse.io/embed/job_app?for=other&token=1", "kapitus", "1")).toBe(false);
   });
 
   it("rejects a Greenhouse-looking URL without independent destination verification", () => {
