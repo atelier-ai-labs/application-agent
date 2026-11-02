@@ -8,6 +8,7 @@ import type {
   SearchCriteria,
   SubmissionPolicy,
 } from "./campaignTypes";
+import { locationAllowed } from "./discoveryFilter";
 import type { FitAssessment, JobPosting, ResumeFamilyId } from "./types";
 
 export interface HardFilterResult {
@@ -175,7 +176,10 @@ export function applyHardFilters(job: JobPosting, criteria: SearchCriteria): Har
         evidence: ["location:missing"],
       };
     }
-    if (!matchingLocation(job.location, criteria.locations)) {
+    // Same rule as discovery: a listed city (on-site/hybrid) or a remote role
+    // open to a listed country passes even without the literal word "US".
+    if (!matchingLocation(job.location, criteria.locations) &&
+      !locationAllowed(job, { locations: criteria.locations, remotePreference: criteria.remoteOnly ? "remote_only" : "remote_preferred" })) {
       return {
         decision: "reject",
         reason: "Posting location does not match the campaign location preference.",

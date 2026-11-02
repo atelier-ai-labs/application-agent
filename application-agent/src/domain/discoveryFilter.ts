@@ -64,7 +64,7 @@ function roleMatches(title: string, intent: JobSearchIntent): boolean {
   return laneKeywordSets(intent).some((set) => set.every((token) => hasPhrase(text, token) || hasPhrase(text.replace(/[- ]/g, ""), token.replace(/[- ]/g, ""))));
 }
 
-function allowedPlaces(intent: JobSearchIntent): { countries: string[]; cities: string[] } {
+function allowedPlaces(intent: Pick<JobSearchIntent, "locations">): { countries: string[]; cities: string[] } {
   const countries: string[] = [];
   const cities: string[] = [];
   for (const location of intent.locations) {
@@ -82,7 +82,7 @@ function allowedPlaces(intent: JobSearchIntent): { countries: string[]; cities: 
  * A posting that names only other countries or provinces is dropped unless
  * the user listed that country in `locations`.
  */
-export function locationAllowed(job: Pick<JobPosting, "location" | "remoteStatus">, intent: JobSearchIntent): boolean {
+export function locationAllowed(job: Pick<JobPosting, "location" | "remoteStatus">, intent: Pick<JobSearchIntent, "locations" | "remotePreference">): boolean {
   const location = words(job.location ?? "");
   const { countries, cities } = allowedPlaces(intent);
   if (cities.some((city) => city && hasPhrase(location, city))) return true;

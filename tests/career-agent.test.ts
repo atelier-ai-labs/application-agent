@@ -307,6 +307,15 @@ describe("Autonomous Career Agent domain seams", () => {
     expect(result.failures[0].reason).toContain("timed out");
   });
 
+  it("accepts a listed city or a US-open remote posting under the campaign location preference", () => {
+    const criteria = { roleLanes: [], locations: ["United States", "Pittsburgh, PA"], remoteOnly: false, employmentTypes: [], excludedSeniorities: [], excludedCompanies: [] };
+    const at = (location: string, remoteStatus = "remote") => applyHardFilters({ ...posting("Stack AV", "Full-Stack Software Engineer", ["React"], `loc-${location}`), location, remoteStatus }, criteria).decision;
+    expect(at("Pittsburgh, PA or Remote")).not.toBe("reject");
+    expect(at("Remote (San Francisco)")).not.toBe("reject");
+    expect(at("Remote, Ontario")).toBe("reject");
+    expect(at("Seattle, WA", "on-site")).toBe("reject");
+  });
+
   it("applies deterministic hard filters and configurable qualitative pursuit policy", () => {
     const remoteJob = posting("Example Cloud Systems", "Cloud Platform Engineer", ["AWS"], "filter-1");
     const rejected = applyHardFilters(remoteJob, {
