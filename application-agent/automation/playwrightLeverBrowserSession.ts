@@ -1517,7 +1517,12 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
       const roots: Element[] = [];
       let currentRoot: Element | null = element;
       for (let depth = 0; currentRoot && depth < 8; depth += 1, currentRoot = currentRoot.parentElement) roots.push(currentRoot);
-      const selectedValue = roots.map((root) => root.querySelector(".select__single-value")?.textContent).find(Boolean);
+      const selectedValue = roots.map((root) => root.querySelector(".select__single-value")?.textContent).find(Boolean) ??
+        // Multi-selects ("select all that apply") show each pick as a chip.
+        // One chip is the value; several are joined, so a single expected
+        // option never matches a mixed selection.
+        roots.map((root) => Array.from(root.querySelectorAll(".select__multi-value__label"))
+          .map((chip) => chip.textContent?.trim() ?? "").filter(Boolean).join(", ")).find(Boolean);
       const selectedOption = roots.map((root) => root.querySelector('[role="option"][aria-selected="true"]')?.textContent).find(Boolean);
       const selectedDataValue = roots.map((root) => root.querySelector('[aria-selected="true"][data-value], [aria-selected="true"][value]')?.getAttribute("data-value") ?? root.querySelector('[aria-selected="true"][value]')?.getAttribute("value")).find(Boolean);
       const hiddenValue = roots.map((root) => root.querySelector('input[type="hidden"][value]')?.getAttribute("value")).find(Boolean);
