@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { loadEnv } from "vite";
 import { classifyJobEmail, type JobEmailKind } from "../src/domain/jobEmailClassifier";
@@ -208,6 +208,7 @@ export function gmailInbox(accessToken: () => Promise<string>, fetcher: typeof f
 }
 
 const PROCESSED_FILE = ".local/career-agent/inbox-processed.json";
+export const INBOX_LOG_FILE = ".local/career-agent/inbox-log.jsonl";
 
 /** Entry point for `npm run career-agent:inbox` (dry run unless `--apply`). */
 export async function runInboxCommand(argv: readonly string[] = process.argv): Promise<void> {
@@ -238,6 +239,10 @@ export async function runInboxCommand(argv: readonly string[] = process.argv): P
   if (apply) {
     mkdirSync(dirname(processedPath), { recursive: true });
     writeFileSync(processedPath, JSON.stringify([...processed].slice(-5_000)) + "\n");
+    // Outcome log for the application history report.
+    const at = new Date().toISOString();
+    const outcomes = decisions.filter((decision) => decision.action !== "skipped");
+    if (outcomes.length > 0) appendFileSync(resolve(INBOX_LOG_FILE), outcomes.map((decision) => JSON.stringify({ at, ...decision })).join("\n") + "\n");
   }
   for (const decision of decisions) {
     console.log(decision.action === "updated"

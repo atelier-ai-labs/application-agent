@@ -1,0 +1,19 @@
+[Unit]
+Description=Atelier HQ Career Agent execution host (local Chromium browser sessions)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/atelier-hq
+# Headful Chromium needs the desktop session; these match WSLg defaults.
+Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-0
+ExecStart=/usr/bin/env npm run career-agent:executor
+# A restart closes every open application window, so only restart on a crash.
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=default.target

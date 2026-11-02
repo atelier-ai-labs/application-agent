@@ -213,7 +213,8 @@ export function createExecutionHostServer(options: ExecutionHostServerOptions): 
       }
 
       if (request.method === "GET" && parts.length === 1 && parts[0] === "health") {
-        sendJson(response, 200, { ok: true, mode: "real_local" }, origin, allowedOrigins);
+        const { active, max } = registry.capacity();
+        sendJson(response, 200, { ok: true, mode: "real_local", activeSessions: active, maxConcurrent: max }, origin, allowedOrigins);
         return;
       }
 

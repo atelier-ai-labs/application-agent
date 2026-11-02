@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the Atelier HQ Career Agent daily run every evening
+
+[Timer]
+# Evening, so questions, CAPTCHAs and Submit taps land when you are home.
+OnCalendar=*-*-* 17:30
+# Catch up after the PC was off or asleep at the scheduled time.
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

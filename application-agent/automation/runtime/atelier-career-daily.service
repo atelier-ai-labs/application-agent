@@ -1,0 +1,10 @@
+[Unit]
+Description=Atelier HQ Career Agent daily run (find jobs, check inbox, start applications)
+After=network-online.target atelier-execution-host.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/projects/atelier-hq
+ExecStart=/usr/bin/env npm run -s career-agent:daily
+TimeoutStartSec=90min

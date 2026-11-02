@@ -192,6 +192,22 @@ Go broad by enabling every source and using wide lanes, or narrow by turning fee
 
 `npm run career-agent:inbox` reads application emails (read-only, through the same opt-in Gmail access as security codes) and updates the Job Tracker: a rejection sets **Rejected**, a callback or interview request sets **Interviewing** with a Next Step and Follow-Up Date and pings Slack, and an "application received" email confirms **Applied**. Emails are matched to a row by the company named in the sender or subject (a body mention counts only for distinctive names); several matching rows or an unclear callback from a hiring system goes to Slack instead. Each email is handled once (`.local/career-agent/inbox-processed.json`). It is a dry run unless `--apply` is passed; `--days N` widens the look-back (default 14).
 
+`npm run career-agent:daily` is one scheduled pass: find jobs (`career-agent:discover --apply`), import the tracker into the Application Queue, check the inbox, then start the best-fit Ready jobs whose links are supported forms (Greenhouse, Lever, Ashby, Rippling), skipping part-time and contract roles. Applications only *start* here: each stops at its first question or at Submit and waits in Slack, so the run starts at most as many as the execution host has free browser windows (`ATELIER_EXECUTION_MAX_CONCURRENT`). A failing phase is reported and the next phase still runs. The run posts a Slack summary, appends to `.local/career-agent/daily-runs.jsonl`, and refreshes the history report. `--phases discover,inbox` runs a subset; `--max-starts N` (or `ATELIER_DAILY_MAX_STARTS`) caps new applications.
+
+To run it every evening, install the user units next to `atelier-career-agent.service`:
+
+```bash
+for unit in atelier-execution-host.service atelier-career-daily.service atelier-career-daily.timer; do
+  ln -sf "$PWD/application-agent/automation/runtime/$unit" ~/.config/systemd/user/$unit
+done
+systemctl --user daemon-reload
+systemctl --user enable --now atelier-execution-host.service atelier-career-daily.timer
+```
+
+The timer fires at 17:30 (edit `OnCalendar` in the timer) and catches up after the PC was off. Logs: `journalctl --user -u atelier-career-daily`.
+
+`npm run career-agent:history` writes `.local/career-agent/history.html` from the agent's own event log: how many started applications reached Submit, the share of form fields the agent filled itself, questions sent to Slack per application, submits proven by the page versus confirmed by you, CAPTCHAs, failure reasons, inbox outcomes, and a collapsed step-by-step timeline per application. It lists questions, never answer values.
+
 ### Source discovery and ATS routing
 
 Discovery references are intentionally separate from full job extraction:

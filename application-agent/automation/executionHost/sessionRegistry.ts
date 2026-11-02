@@ -431,6 +431,11 @@ export class ExecutionSessionRegistry {
     return [...this.sessions.values()].filter((session) => !session.terminal && ACTIVE_STATUSES.has(session.snapshot.status)).length;
   }
 
+  /** Open browser sessions against the configured limit, for the daily run. */
+  capacity(): { active: number; max: number } {
+    return { active: this.activeCount(), max: this.maxConcurrent };
+  }
+
   /** Used by deterministic tests and graceful process shutdown. */
   async closeAll(): Promise<void> {
     await Promise.all([...this.sessions.values()].map(async (session) => {
