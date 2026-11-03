@@ -143,8 +143,8 @@ function eventMessage(
       : "The open browser needs a human verification step before the application can continue.";
     const instruction = postSubmit
       ? renderOptions.handoffUrl
-        ? "Open the browser below and look at the page. If it says your application was submitted, reply DONE. Otherwise, reply with what you see."
-        : "Look at the agent's browser window. If it says your application was submitted, reply DONE. Otherwise, reply with what you see."
+        ? "Check the agent's Chromium window on your computer (the link below only shows a picture of it). If the page says the application was submitted, reply DONE and I'll mark it Applied. Otherwise, reply with what you see."
+        : "Check the agent's Chromium window on your computer. If the page says the application was submitted, reply DONE and I'll mark it Applied. Otherwise, reply with what you see."
       : renderOptions.handoffUrl
         // The handoff page is a view-only picture plus a "verify you are human"
         // button; image CAPTCHAs need the real window on the user's computer.

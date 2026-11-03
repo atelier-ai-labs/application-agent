@@ -550,6 +550,9 @@ async function logicalOptionIdentity(locator: Locator): Promise<string | null> {
   }).catch(() => null);
 }
 
+/** How long to watch the page for a confirmation after the Submit click. */
+export const SUBMIT_CONFIRMATION_WAIT_MS = 60_000;
+
 /** Provider pages that say, in words, that the application went through. */
 export const SUBMISSION_CONFIRMATION_TEXT =
   /\b(?:your application (?:has been |was )?(?:successfully )?(?:submitted|received|sent)|application (?:has been |was )?(?:successfully )?(?:submitted|received|sent)|thank(?:s| you) for (?:applying|your application|submitting your application)|you(?:'ve| have) (?:successfully )?applied)\b/i;
@@ -3351,15 +3354,15 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
     }
 
     await this.page.waitForLoadState("domcontentloaded", { timeout: Math.min(this.timeoutMs, 5_000) }).catch(() => undefined);
-    // Providers can take several seconds to finish (Ashby runs an invisible
-    // reCAPTCHA before posting), so keep looking for the confirmation instead
-    // of reading the page once right after the click.
+    // Providers can take a while to finish (Ashby runs an invisible reCAPTCHA
+    // before posting; Thumbtack's success page arrived after 20s), so keep
+    // looking for the confirmation instead of reading the page once.
     let afterUrl = this.page.url();
     let confirmed = false;
     let confirmationUrl = false;
     let securityCode: "entered" | "not-received" | undefined;
     const clickedAt = Date.now();
-    let deadline = clickedAt + (clicked ? 20_000 : 0);
+    let deadline = clickedAt + (clicked ? SUBMIT_CONFIRMATION_WAIT_MS : 0);
     do {
       // Greenhouse can answer Submit with "enter the security code we
       // emailed you". Part of the same approved submission: enter the code
