@@ -338,6 +338,32 @@ export interface LeverBrowserSession {
   handoffScreenshot?(): Promise<Buffer>;
   handoffControls?(): Promise<readonly BrowserHandoffControl[]>;
   activateHandoffControl?(controlId: string, point?: { x: number; y: number }): Promise<void>;
+  /** Forwards one remote-viewer tap, keystroke, or scroll to the page. */
+  handoffInput?(input: BrowserHandoffInput): Promise<void>;
+}
+
+/** One remote-viewer input, in CSS pixels of the page viewport. */
+export type BrowserHandoffInput =
+  | { type: "tap"; x: number; y: number }
+  | { type: "type"; text: string }
+  | { type: "key"; key: HandoffKey }
+  | { type: "scroll"; dy: number };
+
+export const HANDOFF_KEYS = ["Enter", "Tab", "Shift+Tab", "Backspace", "Escape", "Space", "ArrowUp", "ArrowDown"] as const;
+export type HandoffKey = typeof HANDOFF_KEYS[number];
+export const HANDOFF_MAX_TEXT = 500;
+
+/** Rejects anything but a bounded tap, short text, an allowed key, or a scroll. */
+export function parseHandoffInput(value: unknown): BrowserHandoffInput | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const finite = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n);
+  if (input.type === "tap" && finite(input.x) && finite(input.y) && input.x >= 0 && input.y >= 0) return { type: "tap", x: input.x, y: input.y };
+  if (input.type === "type" && typeof input.text === "string" && input.text.length > 0 && input.text.length <= HANDOFF_MAX_TEXT &&
+    !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(input.text)) return { type: "type", text: input.text };
+  if (input.type === "key" && HANDOFF_KEYS.includes(input.key as HandoffKey)) return { type: "key", key: input.key as HandoffKey };
+  if (input.type === "scroll" && finite(input.dy) && Math.abs(input.dy) <= 3_000) return { type: "scroll", dy: input.dy };
+  return undefined;
 }
 
 export interface BrowserHandoffControl {
@@ -440,6 +466,7 @@ export interface ApplicationExecutor {
     screenshot(): Promise<Buffer>;
     controls(): Promise<readonly BrowserHandoffControl[]>;
     activate(controlId: string, point?: { x: number; y: number }): Promise<void>;
+    input?(input: BrowserHandoffInput): Promise<void>;
   } | undefined;
 }
 

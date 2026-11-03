@@ -20,10 +20,12 @@ describe("isolated handoff viewer HTTP boundary", () => {
   it("redeems once, serves screenshots without Origin on same-origin GET, and rejects cross-site control POSTs", async () => {
     const boundary = new HandoffBoundary({ now: () => 1_000 });
     let activated: string | undefined;
+    const inputs: unknown[] = [];
     const bridge: HandoffBridge = {
       screenshot: async () => Buffer.from("png"),
       controls: async () => [{ id: "verify-human", label: "Verify you are human" }],
       activate: async (controlId) => { activated = controlId; },
+      input: async (input) => { inputs.push(input); },
     };
     const port = 18_987;
     const viewer = createHandoffViewerServer({
@@ -69,6 +71,19 @@ describe("isolated handoff viewer HTTP boundary", () => {
         method: "POST", headers: { origin: `http://127.0.0.1:${port}`, cookie: cookie!.split(";")[0]!, "content-type": "application/json" }, body: JSON.stringify({ controlId: "submit" }),
       });
       expect(submitRejected.status).toBe(403);
+
+      const post = (body: unknown, headers: Record<string, string> = { origin: `http://127.0.0.1:${port}` }) => fetch(`http://127.0.0.1:${port}/handoff/api/execution-1/input`, {
+        method: "POST", headers: { ...headers, cookie: cookie!.split(";")[0]!, "content-type": "application/json" }, body: JSON.stringify(body),
+      });
+      expect((await post({ type: "tap", x: 12, y: 34 }, {})).status).toBe(403);
+      expect((await post({ type: "tap", x: 12, y: 34 })).status).toBe(204);
+      expect((await post({ type: "type", text: "Ada" })).status).toBe(204);
+      expect((await post({ type: "key", key: "Enter" })).status).toBe(204);
+      expect((await post({ type: "scroll", dy: 400 })).status).toBe(204);
+      expect((await post({ type: "key", key: "Control+A" })).status).toBe(400);
+      expect((await post({ type: "type", text: "x".repeat(501) })).status).toBe(400);
+      expect((await post({ type: "eval", script: "alert(1)" })).status).toBe(400);
+      expect(inputs).toEqual([{ type: "tap", x: 12, y: 34 }, { type: "type", text: "Ada" }, { type: "key", key: "Enter" }, { type: "scroll", dy: 400 }]);
     } finally {
       await viewer.close();
     }

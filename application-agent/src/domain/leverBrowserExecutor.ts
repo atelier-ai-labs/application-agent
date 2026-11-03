@@ -1,4 +1,5 @@
 import type {
+  BrowserHandoffInput,
   ApplicationExecutionRequest,
   ApplicationExecutor,
   ApplicationFieldClassification,
@@ -2494,6 +2495,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       screenshot: () => session.handoffScreenshot!(),
       controls: () => session.handoffControls!(),
       activate: (controlId: string, point?: { x: number; y: number }) => session.activateHandoffControl!(controlId, point),
+      ...(session.handoffInput ? { input: (input: BrowserHandoffInput) => session.handoffInput!(input) } : {}),
     };
   }
 

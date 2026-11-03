@@ -1771,6 +1771,26 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
     await this.page.mouse.click(point.x, point.y);
   }
 
+  /**
+   * Remote-viewer input from the user's phone. The viewer is only reachable
+   * while this session waits on the user, so this is the user operating the
+   * page (a Submit tap here is theirs, like a click in the Chromium window).
+   */
+  async handoffInput(input: import("../src/domain/executor").BrowserHandoffInput): Promise<void> {
+    if (this.closed) throw new Error("The browser session is closed.");
+    if (input.type === "tap") {
+      const viewport = this.page.viewportSize();
+      if (viewport && (input.x > viewport.width || input.y > viewport.height)) throw new Error("The tap is outside the page.");
+      await this.page.mouse.click(input.x, input.y);
+    } else if (input.type === "type") {
+      await this.page.keyboard.type(input.text, { delay: 15 });
+    } else if (input.type === "key") {
+      await this.page.keyboard.press(input.key === "Space" ? " " : input.key);
+    } else {
+      await this.page.mouse.wheel(0, input.dy);
+    }
+  }
+
   async navigate(url: string): Promise<void> {
     const targetHost = hostnameOf(url);
     this.boundaryState = { ...this.boundaryState, navigationStarted: true };

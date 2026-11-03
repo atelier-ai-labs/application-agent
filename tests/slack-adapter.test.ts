@@ -690,7 +690,7 @@ describe("Slack human-attention adapter", () => {
     expect(JSON.parse(requests[0]).text).toContain("reply DONE");
     // The handoff link is view-only; the message sends the user to the real window.
     expect(JSON.parse(requests[0]).text).toContain("agent's Chromium window");
-    expect(JSON.parse(requests[0]).text).toContain("only shows a picture");
+    expect(JSON.parse(requests[0]).text).toContain("works on your phone");
     expect(JSON.parse(requests[0]).text).toContain("Open the protected browser handoff");
     expect(JSON.parse(requests[0]).text).not.toContain("open local browser");
     expect(JSON.parse(requests[0]).text).not.toContain("No interactive browser link is provided");

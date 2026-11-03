@@ -1,11 +1,13 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { HandoffBoundary, HandoffBoundaryError, assertHandoffOrigin } from "./handoffBoundary";
-import type { BrowserHandoffControl } from "../../src/domain/executor";
+import { parseHandoffInput, type BrowserHandoffControl, type BrowserHandoffInput } from "../../src/domain/executor";
 
 export interface HandoffBridge {
   screenshot(): Promise<Buffer>;
   controls(): Promise<readonly BrowserHandoffControl[]>;
   activate(controlId: string, point?: { x: number; y: number }): Promise<void>;
+  /** General tap/type/key/scroll input; absent for sessions that cannot take it. */
+  input?(input: BrowserHandoffInput): Promise<void>;
 }
 
 export interface HandoffViewerServerOptions {
@@ -67,7 +69,72 @@ function errorStatus(error: unknown): number {
   return 500;
 }
 
-/** Isolated viewer: it has no execution-host routes and only semantic controls. */
+/**
+ * Phone-first remote view of the waiting browser window: tap the picture to
+ * click there, type into the focused field, press keys, and scroll.
+ */
+const VIEW_PAGE = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Browser handoff</title>
+<style>
+:root{--bg:#f6f6f4;--panel:#fff;--text:#1c1c1a;--muted:#6b6b66;--line:#dddcd6;--accent:#2f5d8a;--on-accent:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#151514;--panel:#1f1f1d;--text:#ecebe6;--muted:#a3a29b;--line:#3a3935;--accent:#8fb3dc;--on-accent:#10161d}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.4 system-ui,sans-serif}
+main{max-width:900px;margin:0 auto;padding:12px}
+#wrap{position:relative;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#000;touch-action:manipulation}
+#screen{display:block;width:100%;cursor:pointer;user-select:none;-webkit-user-select:none}
+#dot{position:absolute;width:22px;height:22px;margin:-11px 0 0 -11px;border-radius:50%;border:3px solid #e33;pointer-events:none;display:none}
+#status{color:var(--muted);font-size:14px;margin:8px 0}
+.row{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+button{flex:1 1 auto;min-width:56px;padding:12px 10px;font:inherit;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text)}
+button:active{background:var(--line)}
+input{flex:1 1 180px;padding:12px;font:inherit;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text)}
+#send{flex:0 0 auto;background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
+#wrap.zoomed{overflow:auto;max-height:70vh}#wrap.zoomed #screen{width:250%;max-width:none}
+</style>
+<main>
+<p id="status">Loading…</p>
+<div id="wrap"><img id="screen" alt="Live browser page"><div id="dot"></div></div>
+<div class="row"><button data-scroll="-500">▲ Scroll up</button><button data-scroll="500">▼ Scroll down</button><button id="zoom">Zoom in</button></div>
+<div class="row"><input id="text" placeholder="Tap a field above, then type here" autocomplete="off" autocapitalize="off"><button id="send">Type</button></div>
+<div class="row"><button data-key="Enter">Enter</button><button data-key="Tab">Tab</button><button data-key="Backspace">⌫</button><button data-key="Space">Space</button><button data-key="Escape">Esc</button></div>
+<p id="hint" style="color:var(--muted);font-size:13px">Tap the picture to click that spot (CAPTCHA boxes, tiles, buttons). Use Zoom in for small CAPTCHA tiles. When the page says your application was submitted, reply DONE in Slack.</p>
+</main>
+<script>
+const id=location.pathname.split('/').pop();
+const screen=document.querySelector('#screen'),dot=document.querySelector('#dot'),status=document.querySelector('#status'),text=document.querySelector('#text');
+let imageUrl,timer,busy=false;
+const api=(path,opts)=>fetch('/handoff/api/'+id+'/'+path,{credentials:'same-origin',headers:{'Content-Type':'application/json'},...opts});
+async function refresh(){
+  clearTimeout(timer);
+  try{
+    const r=await api('screenshot');
+    if(r.status===410||r.status===403){status.textContent='This handoff has ended (the window closed or the link expired).';return}
+    if(!r.ok)throw new Error('screenshot failed');
+    const url=URL.createObjectURL(await r.blob());screen.src=url;if(imageUrl)URL.revokeObjectURL(imageUrl);imageUrl=url;
+    status.textContent='Live view · updates every second';
+  }catch(e){status.textContent='Reconnecting…'}
+  timer=setTimeout(refresh,1000);
+}
+async function send(input){
+  if(busy)return;busy=true;
+  try{const r=await api('input',{method:'POST',body:JSON.stringify(input)});if(!r.ok)status.textContent=(await r.json().catch(()=>({}))).error||'That action was not accepted.'}
+  catch(e){status.textContent='Could not reach the browser.'}
+  finally{busy=false;setTimeout(refresh,250)}
+}
+screen.addEventListener('click',(event)=>{
+  const rect=screen.getBoundingClientRect();
+  const x=(event.clientX-rect.left)*(screen.naturalWidth/rect.width),y=(event.clientY-rect.top)*(screen.naturalHeight/rect.height);
+  dot.style.left=(event.clientX-rect.left)+'px';dot.style.top=(event.clientY-rect.top)+'px';dot.style.display='block';setTimeout(()=>dot.style.display='none',600);
+  send({type:'tap',x,y});
+});
+document.querySelector('#send').addEventListener('click',()=>{if(text.value){send({type:'type',text:text.value});text.value=''}});
+text.addEventListener('keydown',(event)=>{if(event.key==='Enter'){event.preventDefault();document.querySelector('#send').click()}});
+document.querySelectorAll('[data-key]').forEach((b)=>b.addEventListener('click',()=>send({type:'key',key:b.dataset.key})));
+document.querySelector('#zoom').addEventListener('click',(event)=>{const wrap=document.querySelector('#wrap');wrap.classList.toggle('zoomed');event.target.textContent=wrap.classList.contains('zoomed')?'Zoom out':'Zoom in'});
+document.querySelectorAll('[data-scroll]').forEach((b)=>b.addEventListener('click',()=>send({type:'scroll',dy:Number(b.dataset.scroll)})));
+refresh();
+</script>`;
+
+/** Isolated viewer: it has no execution-host routes plus remote input for the waiting window. */
 export function createHandoffViewerServer(options: HandoffViewerServerOptions): HandoffViewerServer {
   const host = options.host ?? "127.0.0.1";
   if (!(host === "127.0.0.1" || host === "localhost" || host === "::1")) throw new Error("The handoff viewer must bind to loopback.");
@@ -105,10 +172,10 @@ export function createHandoffViewerServer(options: HandoffViewerServerOptions): 
         headers(response);
         response.statusCode = 200;
         response.setHeader("Content-Type", "text/html; charset=utf-8");
-        response.end(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Browser verification</title><style>body{font:16px sans-serif;max-width:900px;margin:2rem auto}img{max-width:100%;border:1px solid #ccc;touch-action:manipulation}button{padding:.7rem 1rem}</style><img id="screen" alt="Live browser"><p id="status">Loading…</p><button id="verify" hidden>Verify you are human</button><script>const id=location.pathname.split('/').pop();let control;let timer;let imageUrl;const screen=document.querySelector('#screen');const verify=document.querySelector('#verify');const status=document.querySelector('#status');const api=async(path,opts)=>{const r=await fetch('/handoff/api/'+id+'/'+path,{credentials:'same-origin',headers:{'Content-Type':'application/json',...(opts?.headers||{})},...opts});if(!r.ok)throw new Error('handoff request failed');return r};async function refresh(){const image=await api('screenshot');if(imageUrl)URL.revokeObjectURL(imageUrl);imageUrl=URL.createObjectURL(await image.blob());screen.src=imageUrl;const data=await (await api('controls')).json();control=data.controls.length===1?data.controls[0]:undefined;verify.hidden=!control||control.id==='captcha-frame';verify.textContent='Verify you are human';screen.style.cursor=control?.id==='captcha-frame'?'crosshair':'default';status.textContent=control?(control.id==='captcha-frame'?'Tap a CAPTCHA tile in the image.':'Click Verify you are human to continue.'):'Waiting for browser state; checking again…';if(timer)clearTimeout(timer);if(!control)timer=setTimeout(()=>refresh().catch(e=>status.textContent=e.message),1000)}screen.onclick=async(event)=>{if(control?.id!=='captcha-frame')return;const rect=screen.getBoundingClientRect();const x=(event.clientX-rect.left)*(screen.naturalWidth/rect.width);const y=(event.clientY-rect.top)*(screen.naturalHeight/rect.height);await api('control',{method:'POST',body:JSON.stringify({controlId:'captcha-frame',x,y})});await refresh()};verify.onclick=async()=>{if(control?.id!=='verify-human')return;verify.disabled=true;try{await api('control',{method:'POST',body:JSON.stringify({controlId:'verify-human'})});await refresh()}finally{verify.disabled=false}};refresh().catch(e=>status.textContent=e.message);</script>`);
+        response.end(VIEW_PAGE);
         return;
       }
-      const match = url.pathname.match(/^\/handoff\/api\/([^/]+)\/(screenshot|controls|control)$/);
+      const match = url.pathname.match(/^\/handoff\/api\/([^/]+)\/(screenshot|controls|control|input)$/);
       if (!match) return json(response, 404, { error: "Route not found." });
       // Browsers normally omit Origin on same-origin GETs. SameSite=Strict
       // protects these read-only requests; state-changing control POSTs still
@@ -126,6 +193,13 @@ export function createHandoffViewerServer(options: HandoffViewerServerOptions): 
         headers(response); response.statusCode = 200; response.setHeader("Content-Type", "image/png"); response.end(await bridge.screenshot()); return;
       }
       if (match[2] === "controls" && request.method === "GET") { return json(response, 200, { controls: await bridge.controls() }); }
+      if (match[2] === "input" && request.method === "POST") {
+        const input = parseHandoffInput(await body(request));
+        if (!input) throw new HandoffBoundaryError("Only a tap, short text, an allowed key, or a scroll can be sent.", "invalid");
+        if (!bridge.input) return json(response, 409, { error: "This browser session does not accept remote input." });
+        await bridge.input(input);
+        return json(response, 204, {});
+      }
       if (match[2] === "control" && request.method === "POST") {
         const value = await body(request);
         if (!value || typeof value !== "object" || Array.isArray(value)) throw new HandoffBoundaryError("Only a discovered human-verification control may be activated.", "forbidden");

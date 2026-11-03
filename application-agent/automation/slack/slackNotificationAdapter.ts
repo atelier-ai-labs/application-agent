@@ -143,12 +143,12 @@ function eventMessage(
       : "The open browser needs a human verification step before the application can continue.";
     const instruction = postSubmit
       ? renderOptions.handoffUrl
-        ? "Check the agent's Chromium window on your computer (the link below only shows a picture of it). If the page says the application was submitted, reply DONE and I'll mark it Applied. Otherwise, reply with what you see."
+        ? "Open the link below (works on your phone: tap, type, and scroll the page) or check the agent's Chromium window. If the page says the application was submitted, reply DONE and I'll mark it Applied. Otherwise, reply with what you see."
         : "Check the agent's Chromium window on your computer. If the page says the application was submitted, reply DONE and I'll mark it Applied. Otherwise, reply with what you see."
       : renderOptions.handoffUrl
-        // The handoff page is a view-only picture plus a "verify you are human"
-        // button; image CAPTCHAs need the real window on the user's computer.
-        ? "Solve it in the agent's Chromium window on your computer (the link below only shows a picture of the page, plus a button for simple \"verify you're human\" checks), then reply DONE in this thread."
+        // The handoff page forwards taps, typing, and scrolling to the waiting
+        // window, so the CAPTCHA can be solved from a phone.
+        ? "Solve it from the link below (works on your phone: tap the page, use Zoom in for small tiles) or in the agent's Chromium window, then reply DONE in this thread."
         : "Solve it in the agent's Chromium window on your computer, then reply DONE in this thread. If the browser session has closed, reply DONE and I will report that the session expired without retrying submission.";
     const link = renderOptions.handoffUrl ? `\n\nOpen the protected browser handoff: ${markdownText(renderOptions.handoffUrl, 500)}` : "";
     const text = `${markdownText(event.title, 160)}\n${markdownText(event.context.company, 160)} — ${markdownText(event.context.role, 200)}\n\n${handoffText}\n\n${instruction}${link}`;
