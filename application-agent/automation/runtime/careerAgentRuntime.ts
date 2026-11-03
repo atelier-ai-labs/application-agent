@@ -489,6 +489,7 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
               resumeAttention: async (campaignId, jobId, options) => this.resumeHostExecution(campaignId, jobId, options),
             }
           : {}),
+        confirmPostSubmitDone: async (campaignId, jobId) => this.confirmManualApplication(campaignId, jobId),
       },
       serviceOptions,
     );

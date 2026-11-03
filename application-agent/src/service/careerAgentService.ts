@@ -138,6 +138,12 @@ export interface CareerAgentDependencies {
   officialDestinationCandidates?: readonly DestinationCandidate[];
   /** Optional server-only generator for reviewable answers to exact ATS free-text questions. */
   applicationAnswerDraftGenerator?: ApplicationAnswerDraftGenerator;
+  /**
+   * Records a user's DONE after an unconfirmed Submit as a manual Applied
+   * confirmation (through the durable submission fence). Without it, DONE
+   * falls back to re-checking the retained browser session.
+   */
+  confirmPostSubmitDone?: (campaignId: string, jobId: string) => Promise<CareerJob>;
 }
 
 export interface LegacyAttentionRepairResult {
@@ -740,6 +746,7 @@ export class CareerAgentService {
   private readonly destinationResolver?: ApplicationDestinationResolver;
   private readonly officialDestinationCandidates: readonly DestinationCandidate[];
   private readonly applicationAnswerDraftGenerator?: ApplicationAnswerDraftGenerator;
+  private readonly confirmPostSubmitDone?: (campaignId: string, jobId: string) => Promise<CareerJob>;
   private readonly attentionResponseInFlight = new Map<
     string,
     {
@@ -766,6 +773,7 @@ export class CareerAgentService {
     this.destinationResolver = dependencies.destinationResolver;
     this.officialDestinationCandidates = dependencies.officialDestinationCandidates ?? [];
     this.applicationAnswerDraftGenerator = dependencies.applicationAnswerDraftGenerator;
+    this.confirmPostSubmitDone = dependencies.confirmPostSubmitDone;
   }
 
   listCampaigns(): readonly Campaign[] {
@@ -2518,6 +2526,20 @@ export class CareerAgentService {
     // The adapter keeps historical message timestamps/thread correlations, but
     // must not carry the previous question's root into the next publication.
     this.notificationAdapter?.startFreshApplicationReview?.(record.applicationId);
+    // The Slack prompt says "reply DONE and I'll mark it Applied": the user has
+    // seen the provider's success page, so record that confirmation directly.
+    // Re-inspecting the page instead finds no form (it is the success page)
+    // and turns the confirmation into a new, confusing question.
+    if (this.confirmPostSubmitDone && blocker.kind === "external_verification" && blocker.unit === "submission" &&
+      blocker.field === "submission-confirmation" && blocker.resumeAfterHuman === false &&
+      blocker.evidence.some((item) => item === "submit:clicked" || item.includes("submit:clicked;")) &&
+      response.selectedOption.trim().toUpperCase() === "DONE") {
+      const applied = await this.confirmPostSubmitDone(campaign.id, job.id);
+      await this.recordAttentionResolution(campaign, job, blocker, response.selectedOption, response);
+      this.markAttentionEventsForJob(campaign.id, job.id, "cancelled");
+      const confirmedRecord = this.getCampaign(campaign.id).attentionEvents?.find((candidate) => candidate.id === record.id) ?? record;
+      return { status: "resolved", event: publicAttentionEvent(confirmedRecord), careerJob: applied };
+    }
     const resolved = await this.resolveCareerBlocker(campaign.id, job.id, blocker.id, blockerValue, { attentionResponse: response });
     // Preparation-only background executors re-inspect through the existing
     // service resume path. A real execution host owns its live session and

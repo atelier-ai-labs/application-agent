@@ -514,6 +514,51 @@ describe("background Career Agent runtime", () => {
     }
   });
 
+  it("marks the job Applied when the user replies DONE to an unconfirmed Submit, without reopening the browser", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "atelier-career-post-submit-done-"));
+    try {
+      const authority = new DurableSubmissionAuthority("runtime-worker", { stateFile: join(directory, "submission.json") });
+      const tracker = new InMemoryJobTracker();
+      let hostCalls = 0;
+      const runtime = new BackgroundCareerAgentRuntimeImpl({
+        ...runtimeOptions(join(directory, "state.json"), new ReadyExecutor(), new InMemoryNotificationAdapter()),
+        tracker,
+        submissionAuthority: authority,
+        executionHost: {
+          start: async () => { hostCalls += 1; throw new Error("host must not start"); },
+          get: async () => { hostCalls += 1; throw new Error("host must not be read"); },
+          resume: async () => { hostCalls += 1; throw new Error("host must not resume after a post-submit DONE"); },
+        },
+      });
+      const campaign = runtime.createCampaign({ ...campaignInput(), submissionPolicy: { authority: "automatic", requireExplicitApproval: false } });
+      runtime.service.activateCampaign(campaign.id);
+      const input = { ...listing().input, isExample: false, sourceUrl: "https://jobs.lever.co/acme/post-1", applicationUrl: "https://jobs.lever.co/acme/post-1/apply", rawText: "Acme\nData Platform Engineer\nRemote United States\n" };
+      await runtime.service.processCuratedJob(campaign.id, input);
+      const original = runtime.service.listJobs(campaign.id)[0]!;
+      const blocker = { id: "submission-confirmation", kind: "external_verification" as const, unit: "submission" as const, field: "submission-confirmation", questionProvenance: "POLICY" as const, question: "Verify whether the application was submitted", context: { jobId: original.id, applicationId: original.applicationId, company: original.job.company, role: original.job.title }, reason: "Unknown result", evidence: ["submit:clicked; confirmation:not-detected"], status: "open" as const, createdAt: capturedAt, resumeAfterHuman: false };
+      runtime.careerRepository.saveJob({ ...original, status: "needs_input", blockers: [blocker] });
+      const fence = authority.claim(original.applicationId!, original.id, capturedAt);
+      authority.beforeClick(fence, capturedAt);
+      authority.markUnknown(fence, capturedAt);
+      let counter = 0;
+      const created = attentionEventForCareerBlocker({ campaignId: campaign.id, jobId: original.id, blocker, createdAt: capturedAt, createId: (prefix) => `${prefix}-${(counter += 1)}` })!;
+      const stored = runtime.service.getCampaign(campaign.id);
+      runtime.careerRepository.saveCampaign({ ...stored, attentionEvents: [...(stored.attentionEvents ?? []), created.record] });
+
+      const result = await runtime.service.resolveAttentionResponse({ eventId: created.record.id, selectedOption: "done", actorIdentity: { provider: "test", userId: "human-1" }, respondedAt: "2026-09-01T12:30:00.000Z" });
+
+      expect(result.status).toBe("resolved");
+      expect(runtime.service.getJob(original.id).status).toBe("applied");
+      expect(runtime.service.getApplication(original.applicationId!).status).toBe("applied");
+      expect(authority.reconcile(original.applicationId!, original.id)).toMatchObject({ state: "submitted" });
+      expect(tracker.listUpdates()).toHaveLength(1);
+      expect(runtime.service.listAttentionEvents(campaign.id).map((event) => event.status)).toEqual(["resolved"]);
+      expect(hostCalls).toBe(0);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("accepts the persisted Mastra queue identity with mixed-case Ashby URLs before host execution", async () => {
     const directory = mkdtempSync(join(tmpdir(), "atelier-career-ashby-queue-"));
     try {
