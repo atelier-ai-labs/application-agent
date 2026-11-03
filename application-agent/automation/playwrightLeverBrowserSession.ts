@@ -54,6 +54,8 @@ interface InspectedRawField {
   index: number;
   id: string;
   label: string;
+  /** Untruncated question title, kept in-process for answer rules only. */
+  fullPrompt?: string;
   type: ApplicationFieldType;
   role?: string;
   required: boolean;
@@ -769,6 +771,7 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
   public readonly section?: string;
   public readonly sourceSelector: string;
   public readonly questionDescriptor?: ApplicationFieldQuestionDescriptor;
+  public readonly fullPrompt?: string;
 
   constructor(
     private readonly page: Page,
@@ -790,6 +793,7 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
     this.questionDescriptor = raw.questionEvidence
       ? questionDescriptorFromEvidence(raw.questionEvidence)
       : undefined;
+    this.fullPrompt = raw.fullPrompt;
   }
 
   private locator(): Locator {
@@ -2779,6 +2783,9 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
           stableSelectorSource = "dom-structure";
         }
       }
+      // Long questions ("we hire in these states: ...") lose their key words
+      // at the 240-character descriptor bound; keep the whole title for rules.
+      const fullPrompt = descriptorText(fieldEntryTitle?.textContent ?? fieldset?.querySelector("legend")?.textContent ?? associated?.textContent, 2_000);
       const isFirstRadioInGroup = type !== "radio" ||
         (control instanceof HTMLInputElement && !control.name) ||
         (control instanceof HTMLInputElement
@@ -2807,6 +2814,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
         ...(uploadEntryLabel || uploadContainerLabel ? { explicitFileLabel: true } : {}),
         ...(Object.keys(questionEvidence).length > 0 ? { questionEvidence } : {}),
         ...(ancestorPromptCandidates.length > 0 ? { ripplingPromptCandidates: ancestorPromptCandidates } : {}),
+        ...(fullPrompt && fullPrompt.length > 240 ? { fullPrompt } : {}),
       }];
     }));
 

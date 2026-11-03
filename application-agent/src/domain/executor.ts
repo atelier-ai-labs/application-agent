@@ -84,6 +84,8 @@ export interface ApplicationFieldQuestionDescriptor {
 
 /** Serializable description of a form field. It intentionally contains no field value. */
 export interface ApplicationFieldDescriptor {
+  /** Untruncated question title when the bounded label cut it off; read by answer rules. */
+  fullPrompt?: string;
   id: string;
   label: string;
   type: ApplicationFieldType;

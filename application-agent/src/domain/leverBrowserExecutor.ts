@@ -202,6 +202,7 @@ function inspectedPromptText(field: Pick<LeverBrowserField, "id" | "label" | "se
     field.id,
     field.label,
     field.section,
+    (field as { fullPrompt?: string }).fullPrompt,
     contextualField.questionDescriptor?.promptText,
     contextualField.questionDescriptor?.accessibleName,
     contextualField.questionDescriptor?.nearbyInstructionText,
@@ -796,6 +797,7 @@ function descriptor(field: LeverBrowserField): ApplicationFieldDescriptor {
       ? { options: field.options.filter((option) => option.label.trim() && option.value.trim()).map((option) => ({ ...option })) }
       : {}),
     ...(field.section ? { section: field.section } : {}),
+    ...(field.fullPrompt ? { fullPrompt: field.fullPrompt } : {}),
     ...(field.sourceSelector ? { sourceSelector: field.sourceSelector } : {}),
     ...(field.questionDescriptor ? {
       questionDescriptor: { ...field.questionDescriptor },
