@@ -410,7 +410,9 @@ function approvedJobSourceValueForField(
     const option = field.options.find((candidate) => normalized(candidate.label) === normalized(preference));
     if (option) return option.label;
   }
-  return undefined;
+  // None of the ranked wordings is offered: a plain "Other" is a safe answer
+  // to a marketing question and never claims a specific source.
+  return field.options.find((candidate) => /^other\b/.test(normalized(candidate.label)))?.label;
 }
 
 /**
@@ -501,6 +503,23 @@ function residesInListedStatesValueForField(
   if (listed.size < 2 || !state || !listed.has(state)) return undefined;
   const yes = field.options?.find((option) => normalized(option.label) === "yes" || /^yes\b/.test(normalized(option.label)));
   return field.options?.length ? yes?.label : undefined;
+}
+
+/**
+ * "Which of these locations will you be working from? North America / South
+ * America / Europe" picks North America when the profile lives in the US.
+ */
+function workRegionValueForField(
+  field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[] },
+  profile: CandidateProfile,
+): string | undefined {
+  const option = field.options?.find((candidate) => normalized(candidate.label) === "north america");
+  if (!option) return undefined;
+  const text = inspectedPromptText(field);
+  if (!/\b(?:work(?:ing)?|located|based|live|living|reside|residing)\b.{0,20}\b(?:from|in)\b|\b(?:region|continent)\b/.test(text)) return undefined;
+  const location = normalized(profile.identity.location ?? profile.location ?? "");
+  if (!/\b(?:usa|united states|u s a?)$/.test(location) && !profileUsState(profile)) return undefined;
+  return option.label;
 }
 
 /** Degree levels, lowest to highest, with the words a form or profile uses for each. */
@@ -1405,6 +1424,8 @@ function explicitValueForField(
     if (workLocationState) return { value: workLocationState, explicit: true };
     const residesInListedStates = residesInListedStatesValueForField(field, request.profile);
     if (residesInListedStates) return { value: residesInListedStates, explicit: true };
+    const workRegion = workRegionValueForField(field, request.profile);
+    if (workRegion) return { value: workRegion, explicit: true };
     const previousEmployer = previousEmployerValueForField(field, request);
     if (previousEmployer) return { value: previousEmployer, explicit: true };
   }
@@ -1506,6 +1527,12 @@ function profileValueForField(
     const location = profile.identity.location ?? profile.location;
     if (isPhoneCountrySelector(field)) {
       return groundedPhoneCountryFromProfile(profile) ?? groundedCountryFromLocation(location);
+    }
+    // "Anticipated Work Location (City, Country)" asks for both parts.
+    if (hasPhrase(inspectedPromptText(field), /\bcity\b\s*(?:,|\/|&|and|or)?\s*\bcountry\b/) && !(field.options && field.options.length > 0)) {
+      const city = groundedCityFromLocation(location);
+      const country = groundedCountryFromLocation(location);
+      if (city && country) return `${city}, ${country}`;
     }
     if (hasPhrase(inspectedPromptText(field), /\bcountry\b|phone country|dialing code|country code/) || hasPhrase(text, /\bcountry\b/)) {
       return groundedCountryFromLocation(location);

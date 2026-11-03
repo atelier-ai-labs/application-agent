@@ -760,6 +760,23 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect({ state: result.state, value: listed.current }).toEqual({ state: "ready_to_submit", value: "Yes" });
   });
 
+  it("answers Phantom's work region, city-and-country location, and an unmatched how-did-you-hear with Other", async () => {
+    const region = new FakeField({ id: "bdb788f2", label: "We currently support remote work from North America, South America, and Europe. Which of these three locations will you be working from?", type: "radio", required: true,
+      options: ["North America", "South America", "Europe", "Other"].map((label) => ({ label, value: label })) });
+    const cityCountry = new FakeField({ id: "work-location", label: "Anticipated Work Location (City, Country)", type: "text", required: true });
+    const heard = new FakeField({ id: "993e2ba3", label: "How did you hear about Phantom?", type: "select", required: true,
+      options: ["Phantom User", "Phantom Employee", "Cryptocurrency Jobs", "Other", "LinkedIn - Employee Post", "Twitter - Phantom Tweet"].map((label) => ({ label, value: label })) });
+    const session = new FakeSession([region, cityCountry, heard]);
+    const profile: CandidateProfile = {
+      ...exampleCandidateProfile,
+      identity: { ...exampleCandidateProfile.identity, location: "McDonald, Pennsylvania, USA" },
+      approvedReusableAnswers: { ...exampleCandidateProfile.approvedReusableAnswers, job_source: "Another job site|Job board" },
+    };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...request(session), profile });
+    expect([region.current, cityCountry.current, heard.current]).toEqual(["North America", "McDonald, United States", "Other"]);
+    expect(result.state).toBe("ready_to_submit");
+  });
+
   it("answers immigration-law work authorization, highest education, and current-employee questions from the profile", async () => {
     const select = (id: string, label: string, options: readonly string[]) =>
       new FakeField({ id, label, type: "select", required: true, options: options.map((option) => ({ label: option, value: option })) });
