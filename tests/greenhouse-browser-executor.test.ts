@@ -735,6 +735,22 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect((await run("Pittsburgh, Pennsylvania, USA", "California, Colorado and Ohio")).state).toBe("requires_human");
   });
 
+  it("answers Ashby's Race question despite its Hispanic or Latino definitions, and city-and-state location", async () => {
+    const race = new FakeField({ id: "_systemfield_eeoc_race", label: "Race", type: "radio",
+      questionDescriptor: { promptText: "Race", nearbyInstructionText: "Hispanic or Latino - A person of Cuban, Mexican, Puerto Rican, South or Central American, or other Spanish culture or origin regardless of race.White (Not Hispa", sourceStrategy: "question_container", confidence: "high" },
+      options: ["Hispanic or Latino", "White (Not Hispanic or Latino)", "Black or African American (Not Hispanic or Latino)", "Asian (Not Hispanic or Latino)", "Decline to self-identify"].map((label) => ({ label, value: "on" })) });
+    const cityState = new FakeField({ id: "827d49ed-f528-40d9-a303-d638cc7fc974", label: "Current location (city, state)", type: "text", required: true });
+    const session = new FakeSession([race, cityState]);
+    const profile: CandidateProfile = {
+      ...exampleCandidateProfile,
+      identity: { ...exampleCandidateProfile.identity, location: "McDonald, Pennsylvania, USA" },
+      approvedReusableAnswers: { ...exampleCandidateProfile.approvedReusableAnswers, race_ethnicity: "White" },
+    };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...request(session), profile });
+    expect([race.current, cityState.current]).toEqual(["White (Not Hispanic or Latino)", "McDonald, PA"]);
+    expect(result.state).toBe("ready_to_submit");
+  });
+
   it("reads a long hiring-state question past the 240-character label bound", async () => {
     const full = "We are currently hiring remote candidates in the following states: California, Colorado, Connecticut, District of Columbia (DC), Florida, Georgia, Illinois, Indiana, Maryland, Massachusetts, Michigan, New Hampshire, New Jersey, New York, North Carolina, Ohio, Pennsylvania, Rhode Island, South Carolina, Tennessee, Texas, Utah, Virginia, Washington and Wisconsin. Please confirm whether or not you live in one of these states";
     const listed = new FakeField({ id: "listed", label: full.slice(0, 240), fullPrompt: full, type: "radio", required: true, options: ["Yes", "No"].map((label) => ({ label, value: label })) });

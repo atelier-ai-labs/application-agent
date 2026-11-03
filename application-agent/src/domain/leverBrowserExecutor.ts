@@ -320,6 +320,11 @@ function approvedDemographicValueForField(
   // Hispanic/Latino is an ethnicity subtype, not the general race/ethnicity
   // answer. Check it before the broader race matcher so the White answer can
   // never be consumed by this control.
+  // Ashby's "Race" question carries the "Hispanic or Latino - A person of ..."
+  // definitions as nearby text, so decide by the question's own title first.
+  const title = normalized([field.id, field.label, (field as { questionDescriptor?: { promptText?: string } }).questionDescriptor?.promptText]
+    .filter(Boolean).join(" ")).replace(/[_-]+/g, " ");
+  if (/\brace\b/.test(title) && !/\bhispanic\b|\blatin[oax]\b/.test(title)) return approved.race_ethnicity?.trim();
   if (/\bhispanic\b|\blatino\b|\blatina\b|\blatinx\b/.test(text)) return approved.hispanic_latino?.trim();
   if (/\brace\b|\bethnic(?:ity| origin)?\b/.test(text)) return approved.race_ethnicity?.trim();
   if (/\bdemographic\b.{0,32}\b(?:consent|data)\b|\b(?:consent|data)\b.{0,32}\bdemographic\b/.test(text)) {
@@ -1506,6 +1511,13 @@ function profileValueForField(
     }
     if (hasPhrase(text, /listed states we hire in/)) {
       return groundedStateEligibilityFromLocation(text, location);
+    }
+    // "Current location (city, state)" asks for both parts, not the state alone.
+    if (hasPhrase(text, /\bcity\b\s*(?:,|\/|&|and|or)?\s*\bstate\b/)) {
+      const city = groundedCityFromLocation(location);
+      const state = groundedStateFromLocation(location);
+      const code = state ? US_STATE_ABBREVIATIONS[normalized(state)] ?? (/^[a-z]{2}$/i.test(state) ? state : undefined) : undefined;
+      if (city && code && !(field.options && field.options.length > 0)) return `${city}, ${code.toUpperCase()}`;
     }
     if (hasPhrase(text, /\bstates?\b/)) {
       const state = groundedStateFromLocation(location);
