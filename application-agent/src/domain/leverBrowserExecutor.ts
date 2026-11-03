@@ -426,6 +426,76 @@ function basedInUsValueForField(
   return field.options?.length ? yes?.label : "Yes";
 }
 
+/** US state names, longest first, so "west virginia" wins over "virginia". */
+function usStateNamesLongestFirst(): readonly string[] {
+  return Object.keys(US_STATE_CODES).sort((a, b) => b.length - a.length);
+}
+
+/** Every US state a text names, by full name or a parenthesized "(PA)" code. */
+function usStatesNamedIn(text: string): Set<string> {
+  let rest = normalized(text);
+  const found = new Set<string>();
+  for (const name of usStateNamesLongestFirst()) {
+    const pattern = new RegExp(`\\b${name}\\b`, "g");
+    if (pattern.test(rest)) {
+      found.add(name);
+      rest = rest.replace(pattern, " ");
+    }
+  }
+  for (const [name, code] of Object.entries(US_STATE_CODES)) {
+    if (new RegExp(`\\(${code}\\)`).test(rest)) found.add(name);
+  }
+  return found;
+}
+
+/** The candidate's US state from the profile location ("Pittsburgh, Pennsylvania, USA" or "Pittsburgh, PA"). */
+function profileUsState(profile: CandidateProfile): string | undefined {
+  const location = normalized(profile.identity.location ?? profile.location ?? "");
+  if (!location) return undefined;
+  const named = [...usStatesNamedIn(location)];
+  if (named.length === 1) return named[0];
+  if (named.length > 1) return undefined;
+  const code = /,\s*([a-z]{2})(?:\s*,|\s*$|\s+\d{5})/.exec(location)?.[1];
+  return code ? Object.entries(US_STATE_CODES).find(([, value]) => value === code)?.[0] : undefined;
+}
+
+/**
+ * "Select the location you intend to work from" picks the one option naming
+ * the profile's state; zero or several matching options stay a question.
+ */
+function workLocationStateValueForField(
+  field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[] },
+  profile: CandidateProfile,
+): string | undefined {
+  if (!field.options?.length) return undefined;
+  const text = inspectedPromptText(field);
+  if (!/\b(?:intend|plan|will|going|expect)\b.{0,30}\bwork (?:from|in)\b|\bwork(?:ing)? from\b.{0,60}\b(?:location|state)\b|\b(?:which|what) (?:state|location)\b.{0,60}\b(?:work|live|reside|located|based)\b|\bstate of residence\b/.test(text)) return undefined;
+  const state = profileUsState(profile);
+  if (!state) return undefined;
+  const matches = field.options.filter((option) => {
+    const named = usStatesNamedIn(option.label);
+    return named.size === 1 && named.has(state);
+  });
+  return matches.length === 1 ? matches[0]!.label : undefined;
+}
+
+/**
+ * "We are hiring in these states: ... Do you live in one of these?" is Yes when
+ * the list names the profile's state. A list without it stays a question.
+ */
+function residesInListedStatesValueForField(
+  field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[] },
+  profile: CandidateProfile,
+): string | undefined {
+  const text = inspectedPromptText(field);
+  if (!/\b(?:live|reside|residing|located|based)\b.{0,30}\b(?:in )?(?:one of )?(?:these|the following|the listed|those|any of (?:these|the))\b.{0,10}\bstates?\b|\bfollowing states\b.{0,400}\b(?:live|reside|located|based)\b/.test(text)) return undefined;
+  const listed = usStatesNamedIn(text);
+  const state = profileUsState(profile);
+  if (listed.size < 2 || !state || !listed.has(state)) return undefined;
+  const yes = field.options?.find((option) => normalized(option.label) === "yes" || /^yes\b/.test(normalized(option.label)));
+  return field.options?.length ? yes?.label : undefined;
+}
+
 /** Degree levels, lowest to highest, with the words a form or profile uses for each. */
 const EDUCATION_LEVELS: readonly (readonly [number, RegExp])[] = [
   [1, /\bhigh school\b|\bged\b|\bsecondary\b/],
@@ -1323,6 +1393,10 @@ function explicitValueForField(
     if (highestEducation) return { value: highestEducation, explicit: true };
     const basedInUs = basedInUsValueForField(field, request.profile);
     if (basedInUs) return { value: basedInUs, explicit: true };
+    const workLocationState = workLocationStateValueForField(field, request.profile);
+    if (workLocationState) return { value: workLocationState, explicit: true };
+    const residesInListedStates = residesInListedStatesValueForField(field, request.profile);
+    if (residesInListedStates) return { value: residesInListedStates, explicit: true };
     const previousEmployer = previousEmployerValueForField(field, request);
     if (previousEmployer) return { value: previousEmployer, explicit: true };
   }

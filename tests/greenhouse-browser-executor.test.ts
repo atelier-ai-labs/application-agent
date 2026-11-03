@@ -708,6 +708,25 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect((await run("Toronto, Ontario, Canada")).state).toBe("requires_human");
   });
 
+  it("picks the work-from state and confirms a listed hiring state from the profile location", async () => {
+    const stateOptions = ["Ontario, Canada", "Philippines", "Arizona (AZ)", "Pennsylvania (PA)", "Virginia (VA)", "West Virginia (WV)", "Washington D.C. (DC)", "Location not listed"];
+    const run = async (location: string, hiringStates: string) => {
+      const workFrom = new FakeField({ id: "work-from", label: "Thumbtack currently supports remote work in a number of locations across the United States, Ontario and the Philippines. Using the drop down list below, please select the location you intend to work from. If you are not currently located in or able to work from a location listed below, please select \"Location not listed.\"", type: "select", required: true,
+        options: stateOptions.map((label) => ({ label, value: label })) });
+      const listed = new FakeField({ id: "listed", label: `We are currently hiring remote candidates in the following states: ${hiringStates}. Please confirm whether or not you live in one of these states`, type: "radio", required: true,
+        options: ["Yes", "No"].map((label) => ({ label, value: label })) });
+      const session = new FakeSession([workFrom, listed]);
+      const base = request(session);
+      const profile: CandidateProfile = { ...exampleCandidateProfile, identity: { ...exampleCandidateProfile.identity, location } };
+      const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...base, profile });
+      return { state: result.state, values: [workFrom.current, listed.current] };
+    };
+    expect(await run("Pittsburgh, Pennsylvania, USA", "California, Colorado, District of Columbia (DC), Ohio, Pennsylvania, Texas and Wisconsin"))
+      .toEqual({ state: "ready_to_submit", values: ["Pennsylvania (PA)", "Yes"] });
+    expect((await run("Morgantown, WV", "California, Virginia and Ohio")).values).toEqual(["West Virginia (WV)", null]);
+    expect((await run("Pittsburgh, Pennsylvania, USA", "California, Colorado and Ohio")).state).toBe("requires_human");
+  });
+
   it("answers immigration-law work authorization, highest education, and current-employee questions from the profile", async () => {
     const select = (id: string, label: string, options: readonly string[]) =>
       new FakeField({ id, label, type: "select", required: true, options: options.map((option) => ({ label: option, value: option })) });
