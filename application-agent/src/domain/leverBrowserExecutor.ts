@@ -2725,7 +2725,10 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
           } else if (fieldDescriptor.type === "select" || fieldDescriptor.type === "radio") {
             const selected = optionValue(fieldDescriptor, decision.value);
             if (!selected) throw new Error("Selected option was empty.");
-            await field.select(selected, fieldDescriptor.classification === "location" && request.profile
+            // A work-from state option ("Pennsylvania (PA)") is an exact listed
+            // choice, not the full grounded place, so it skips location matching.
+            await field.select(selected, fieldDescriptor.classification === "location" && request.profile &&
+              workLocationStateValueForField(fieldDescriptor, request.profile) !== selected
               ? { groundedLocation: request.profile.identity.location ?? request.profile.location ?? undefined }
               : undefined);
           } else {

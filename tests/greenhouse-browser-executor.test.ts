@@ -64,8 +64,11 @@ class FakeField implements LeverBrowserField {
     this.current = value;
   }
 
-  async select(value: string): Promise<void> {
+  selectContexts: unknown[] = [];
+
+  async select(value: string, context?: unknown): Promise<void> {
     this.selectCalls += 1;
+    this.selectContexts.push(context);
     this.current = value;
   }
 
@@ -719,6 +722,8 @@ describe("Greenhouse destination execution through the existing browser policy",
       const base = request(session);
       const profile: CandidateProfile = { ...exampleCandidateProfile, identity: { ...exampleCandidateProfile.identity, location } };
       const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...base, profile });
+      // The state option is an exact listed choice, never matched as the full home address.
+      expect(workFrom.selectContexts.every((context) => context === undefined)).toBe(true);
       return { state: result.state, values: [workFrom.current, listed.current] };
     };
     expect(await run("Pittsburgh, Pennsylvania, USA", "California, Colorado, District of Columbia (DC), Ohio, Pennsylvania, Texas and Wisconsin"))
