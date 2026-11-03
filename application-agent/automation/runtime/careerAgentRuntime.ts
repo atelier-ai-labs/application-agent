@@ -489,7 +489,11 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
               resumeAttention: async (campaignId, jobId, options) => this.resumeHostExecution(campaignId, jobId, options),
             }
           : {}),
-        confirmPostSubmitDone: async (campaignId, jobId) => this.confirmManualApplication(campaignId, jobId),
+        confirmPostSubmitDone: async (campaignId, jobId) => {
+          const applied = await this.confirmManualApplication(campaignId, jobId);
+          await this.confirmQueueRowForAppliedJob(jobId).catch(() => undefined);
+          return applied;
+        },
       },
       serviceOptions,
     );
@@ -1069,7 +1073,8 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
         }, createConfiguredGoogleSheetsTransport(env as GoogleSheetsEnvironment));
         const key = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
         const matches = (await queue.list()).filter((row) =>
-          (row.status === "Ready to Submit" || row.status === "Submitted") &&
+          // After an unconfirmed Submit the row waits in Needs Input until DONE.
+          (row.status === "Ready to Submit" || row.status === "Submitted" || row.status === "Needs Input") &&
           key(row.company) === key(job.job.company) && key(row.role) === key(job.job.title));
         if (matches.length !== 1) return matches.length === 0 ? undefined : "more than one matching row; confirm it in the Sheet";
         const proof = job.submissionProof;

@@ -514,7 +514,10 @@ describe("background Career Agent runtime", () => {
     }
   });
 
-  it("marks the job Applied when the user replies DONE to an unconfirmed Submit, without reopening the browser", async () => {
+  it.each([
+    ["an unconfirmed Submit", { id: "submission-confirmation", kind: "external_verification" as const, unit: "submission" as const, field: "submission-confirmation", question: "Verify whether the application was submitted", evidence: ["submit:clicked; confirmation:not-detected"] }],
+    ["a CAPTCHA raised on Submit", { id: "post-submit-captcha", kind: "captcha" as const, unit: "external" as const, field: undefined, question: "Complete the CAPTCHA in the browser", evidence: ["executor:ashby-browser", "submit:clicked", "captcha:visible"] }],
+  ])("marks the job Applied when the user replies DONE to %s, without reopening the browser", async (_name, shape) => {
     const directory = mkdtempSync(join(tmpdir(), "atelier-career-post-submit-done-"));
     try {
       const authority = new DurableSubmissionAuthority("runtime-worker", { stateFile: join(directory, "submission.json") });
@@ -535,13 +538,13 @@ describe("background Career Agent runtime", () => {
       const input = { ...listing().input, isExample: false, sourceUrl: "https://jobs.lever.co/acme/post-1", applicationUrl: "https://jobs.lever.co/acme/post-1/apply", rawText: "Acme\nData Platform Engineer\nRemote United States\n" };
       await runtime.service.processCuratedJob(campaign.id, input);
       const original = runtime.service.listJobs(campaign.id)[0]!;
-      const blocker = { id: "submission-confirmation", kind: "external_verification" as const, unit: "submission" as const, field: "submission-confirmation", questionProvenance: "POLICY" as const, question: "Verify whether the application was submitted", context: { jobId: original.id, applicationId: original.applicationId, company: original.job.company, role: original.job.title }, reason: "Unknown result", evidence: ["submit:clicked; confirmation:not-detected"], status: "open" as const, createdAt: capturedAt, resumeAfterHuman: false };
-      runtime.careerRepository.saveJob({ ...original, status: "needs_input", blockers: [blocker] });
+      const blocker = { ...shape, ...(shape.field ? {} : { field: undefined }), questionProvenance: "POLICY" as const, context: { jobId: original.id, applicationId: original.applicationId, company: original.job.company, role: original.job.title }, reason: "Unknown result", status: "open" as const, createdAt: capturedAt, resumeAfterHuman: false };
+      runtime.careerRepository.saveJob({ ...original, status: "needs_input", blockers: [blocker as never] });
       const fence = authority.claim(original.applicationId!, original.id, capturedAt);
       authority.beforeClick(fence, capturedAt);
       authority.markUnknown(fence, capturedAt);
       let counter = 0;
-      const created = attentionEventForCareerBlocker({ campaignId: campaign.id, jobId: original.id, blocker, createdAt: capturedAt, createId: (prefix) => `${prefix}-${(counter += 1)}` })!;
+      const created = attentionEventForCareerBlocker({ campaignId: campaign.id, jobId: original.id, blocker: blocker as never, createdAt: capturedAt, createId: (prefix) => `${prefix}-${(counter += 1)}` })!;
       const stored = runtime.service.getCampaign(campaign.id);
       runtime.careerRepository.saveCampaign({ ...stored, attentionEvents: [...(stored.attentionEvents ?? []), created.record] });
 

@@ -732,6 +732,18 @@ export interface DailyHuntProcessingResult {
   skipped: number;
 }
 
+/**
+ * A question asked after Submit was already clicked and not confirmed: either
+ * "did it go through?" or a CAPTCHA the provider raised on Submit. Its Slack
+ * prompt says DONE means the page showed the application as submitted.
+ */
+function isPostSubmitHumanCheck(blocker: CareerBlocker): boolean {
+  if (blocker.resumeAfterHuman !== false) return false;
+  if (!blocker.evidence.some((item) => item === "submit:clicked" || item.includes("submit:clicked;"))) return false;
+  return (blocker.kind === "external_verification" && blocker.unit === "submission" && blocker.field === "submission-confirmation") ||
+    blocker.kind === "captcha";
+}
+
 export class CareerAgentService {
   private readonly now: () => string;
   private readonly createId: (prefix: string) => string;
@@ -2530,10 +2542,7 @@ export class CareerAgentService {
     // seen the provider's success page, so record that confirmation directly.
     // Re-inspecting the page instead finds no form (it is the success page)
     // and turns the confirmation into a new, confusing question.
-    if (this.confirmPostSubmitDone && blocker.kind === "external_verification" && blocker.unit === "submission" &&
-      blocker.field === "submission-confirmation" && blocker.resumeAfterHuman === false &&
-      blocker.evidence.some((item) => item === "submit:clicked" || item.includes("submit:clicked;")) &&
-      response.selectedOption.trim().toUpperCase() === "DONE") {
+    if (this.confirmPostSubmitDone && isPostSubmitHumanCheck(blocker) && response.selectedOption.trim().toUpperCase() === "DONE") {
       const applied = await this.confirmPostSubmitDone(campaign.id, job.id);
       await this.recordAttentionResolution(campaign, job, blocker, response.selectedOption, response);
       this.markAttentionEventsForJob(campaign.id, job.id, "cancelled");
@@ -3051,7 +3060,7 @@ export class CareerAgentService {
     const job = this.getJob(jobId);
     if (job.campaignId !== campaignId) throw new Error("That job does not belong to the selected campaign.");
     if (job.status === "applied") return job;
-    const ambiguousBlocker = job.blockers.find((candidate) => candidate.status === "open" && candidate.kind === "external_verification" && candidate.unit === "submission" && candidate.field === "submission-confirmation" && candidate.resumeAfterHuman === false);
+    const ambiguousBlocker = job.blockers.find((candidate) => candidate.status === "open" && isPostSubmitHumanCheck(candidate));
     const unknownRecovery = job.status === "needs_input" && Boolean(ambiguousBlocker);
     if (job.status !== "ready_to_submit" && !unknownRecovery) throw new Error("Only a prepared or explicitly unknown application stopped at the manual Submit boundary can be marked Applied.");
     if (!job.applicationId) throw new Error("The career job has no application packet to mark Applied.");

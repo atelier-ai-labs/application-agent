@@ -3389,6 +3389,9 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       confirmationUrl = /\/(?:confirmation|success|thank[-_]?you)(?:\/|$)/i.test(new URL(afterUrl).pathname);
       const ashbySuccess = await this.page.locator(".ashby-application-form-success-container").count().catch(() => 0) > 0;
       confirmed = clicked && (confirmationText || confirmationUrl || ashbySuccess);
+      // A CAPTCHA raised on Submit expires in about two minutes; stop waiting
+      // and hand it to the user now rather than at the end of the wait.
+      if (!confirmed && clicked && await this.detectHumanBoundary().catch(() => null)) break;
     } while (!confirmed && Date.now() < deadline);
     if (!confirmed) {
       const postClickBoundary = clicked ? await this.detectHumanBoundary() : null;
