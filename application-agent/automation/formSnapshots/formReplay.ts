@@ -9,7 +9,7 @@ import type {
 import { LeverBrowserExecutor } from "../../src/domain/leverBrowserExecutor";
 import { normalizeJobPosting } from "../../src/domain/job";
 import { classifyJobUrl } from "../../src/domain/jobUrlClassifier";
-import { findAnswerBankMatch, questionFromBlocker, type AnswerBankEntry, type AnswerBankSemanticMatcher } from "../../src/domain/answerBank";
+import { findAnswerBankMatch, questionFromBlocker, type AnswerBankEntry, type AnswerBankSemanticMatcher, type StandingRecordsLookup } from "../../src/domain/answerBank";
 import type { FormSnapshot } from "./formSnapshot";
 
 /**
@@ -134,7 +134,7 @@ export function snapshotKey(snapshot: FormSnapshot): string {
 
 export async function replayForm(
   snapshot: FormSnapshot,
-  options: { profile: CandidateProfile; answerBank?: readonly AnswerBankEntry[]; matcher?: AnswerBankSemanticMatcher; now?: string; showValues?: boolean },
+  options: { profile: CandidateProfile; answerBank?: readonly AnswerBankEntry[]; matcher?: AnswerBankSemanticMatcher; records?: StandingRecordsLookup; now?: string; showValues?: boolean },
 ): Promise<FormReplay> {
   const now = options.now ?? new Date().toISOString();
   const session = new ReplaySession(snapshot);
@@ -163,7 +163,7 @@ export async function replayForm(
     if (outcome === "asked" && blocker && options.answerBank) {
       const match = await findAnswerBankMatch(options.answerBank, questionFromBlocker({
         ...blocker, context: { company: base.company, role: base.role } as never, status: "open",
-      } as never), options.matcher);
+      } as never), options.matcher, options.records);
       if (match) outcome = "bank";
     }
     const prompt = (field.questionDescriptor?.promptText ?? field.fullPrompt ?? "").replace(/\s+/g, " ").trim().slice(0, 160);

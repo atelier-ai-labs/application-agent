@@ -8,6 +8,7 @@ import { FileAnswerBankStore } from "../answerBank/fileAnswerBankStore";
 import { createOllamaAnswerBankMatcher } from "../answerBank/ollamaAnswerBankMatcher";
 import { DEFAULT_FORM_SNAPSHOT_DIR, FormSnapshotStore, type FormSnapshot } from "./formSnapshot";
 import { compareReplays, replayForm, replayTotals, type FormReplay } from "./formReplay";
+import { standingRecordsFromJobs } from "../../src/domain/answerBank";
 
 export const DEFAULT_REPLAY_BASELINE = ".local/career-agent/replay-baseline.json";
 
@@ -31,6 +32,8 @@ export async function runReplayCli(argv: readonly string[] = process.argv.slice(
   for (const [name, value] of Object.entries(loaded)) if (process.env[name] === undefined) process.env[name] = value;
   const env = process.env as Record<string, string | undefined>;
   const profile = loadBackgroundCandidateProfile(env);
+  let jobs: ReturnType<LocalStorageCareerRepository["listJobs"]> = [];
+  try { jobs = new LocalStorageCareerRepository(new FileKeyValueStorage()).listJobs(); } catch { /* no state yet */ }
   const snapshots = withIdentity(new FormSnapshotStore(env.ATELIER_FORM_SNAPSHOT_DIR?.trim() || DEFAULT_FORM_SNAPSHOT_DIR).list());
   if (snapshots.length === 0) {
     console.log("No form snapshots yet. They are saved as the agent opens real forms, or run career-agent:capture.");
@@ -46,7 +49,9 @@ export async function runReplayCli(argv: readonly string[] = process.argv.slice(
   if (showValues && argv.includes("--save-baseline")) throw new Error("--show-values cannot be combined with --save-baseline (the baseline never stores answers).");
   for (const snapshot of snapshots) {
     if (only && !`${snapshot.company ?? ""} ${snapshot.url}`.toLowerCase().includes(only)) continue;
-    replays.push(await replayForm(snapshot, { profile, answerBank: bank, ...(matcher ? { matcher } : {}), showValues }));
+    // "Applied here before?" as it would have been answered on that application: other jobs only.
+    const records = standingRecordsFromJobs(jobs, jobs.find((job) => job.applicationId === snapshot.applicationId)?.id);
+    replays.push(await replayForm(snapshot, { profile, answerBank: bank, ...(matcher ? { matcher } : {}), records, showValues }));
   }
 
   console.log("Form                                              fields  filled  bank  ask  blank");

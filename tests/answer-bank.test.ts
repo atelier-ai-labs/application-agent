@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   answerBankKey, answerRiskTier, findAnswerBankMatch, isBankableQuestion, isOpaqueQuestion, questionFromBlocker,
-  valueForOptions, withRecordedAnswer, type AnswerBankEntry,
+  standingRecordsFromJobs, standingTopicFor, valueForOptions, withRecordedAnswer, withStandingAnswer, type AnswerBankEntry, type StandingTopicId,
 } from "../application-agent/src/domain/answerBank";
 
 const entry = (question: string, value: string, company?: string, extra: Partial<AnswerBankEntry> = {}): AnswerBankEntry => ({
@@ -97,5 +97,49 @@ describe("answer bank", () => {
       evidence: ["field-type:select", "options:Phantom User|Other", "question-prompt:How did you hear about Phantom?"],
     });
     expect(question).toEqual({ question: "How did you hear about Phantom?", company: "Phantom", fieldType: "select", options: ["Phantom User", "Other"], kind: "unknown_form_field" });
+  });
+});
+
+describe("standing answers", () => {
+  const standing = (topic: StandingTopicId, value: string) => withStandingAnswer([], topic, value, "2026-11-04T00:00:00.000Z")[0]!;
+
+  it("matches each topic only for questions asked about the candidate", () => {
+    expect(standingTopicFor("Have you been convicted of, or pled guilty or nolo contendere (“no contest”) in a domestic, foreign, or military court to any felony?")).toBe("criminal_conviction");
+    expect(standingTopicFor("Have you ever been fired or asked to resign to avoid being fired from a job?")).toBe("terminated");
+    expect(standingTopicFor("Do you have an unsatisfied judgements or liens against you?")).toBe("financial_judgments");
+    expect(standingTopicFor("Has a bonding company ever denied, paid out on, or revoked a bond for you?")).toBe("financial_judgments");
+    expect(standingTopicFor("Have you ever been licensed in the insurance or securities industry?")).toBe("financial_license");
+    expect(standingTopicFor("If you answered “Yes” to either licensing question above, have you ever been disciplined by a regulatory body?")).toBe("regulatory_discipline");
+    expect(standingTopicFor("Have you signed any confidentiality, noncompetition, or non-solicitation agreements with your current employer?")).toBe("restrictive_agreements");
+    expect(standingTopicFor("Are you willing to undergo a background check, in accordance with local law?")).toBe("background_check");
+    expect(standingTopicFor("Are you able to perform the essential functions of the position with or without reasonable accommodation?")).toBe("essential_functions");
+    expect(standingTopicFor("Have you previously applied for employment with D.A. Davidson Companies?", "D.A. Davidson Companies")).toBe("previously_applied");
+    expect(standingTopicFor("Have you previously interviewed for a role at Teamworks?", "Teamworks")).toBe("previously_interviewed");
+    // Statements and consents are not questions about the candidate's history.
+    expect(standingTopicFor("I understand my employment is at-will and may be terminated at any time.")).toBeUndefined();
+    expect(standingTopicFor("Do you understand that employment may be terminated at any time?")).toBeUndefined();
+    expect(standingTopicFor("Do you consent to a criminal history check?")).toBeUndefined();
+    expect(standingTopicFor("Do you agree to sign a confidentiality agreement if hired?")).toBeUndefined();
+  });
+
+  it("answers a standing topic from the set value, mapped to the form's options", async () => {
+    const bank = [standing("criminal_conviction", "No"), standing("regulatory_discipline", "No"), standing("essential_functions", "Yes")];
+    expect((await findAnswerBankMatch(bank, { question: "Have you been convicted of a felony?", options: ["Yes", "No"] }))).toMatchObject({ value: "No", kind: "standing" });
+    expect((await findAnswerBankMatch(bank, { question: "If you answered Yes above, have you ever been disciplined by a regulatory body?", options: ["Yes", "No", "N/A"] }))?.value).toBe("No");
+    expect((await findAnswerBankMatch(bank, { question: "Can you perform the essential functions of this job with or without reasonable accommodation?", options: ["Yes, I can", "No, I cannot"] }))?.value).toBe("Yes, I can");
+    // A topic with no standing answer still asks.
+    expect(await findAnswerBankMatch(bank, { question: "Have you ever been fired or asked to resign?", options: ["Yes", "No"] })).toBeUndefined();
+  });
+
+  it("answers applied-before from the agent's records", async () => {
+    const bank = [standing("previously_applied", "@records"), standing("previously_interviewed", "@records")];
+    const jobs = [{ id: "old", status: "applied", job: { company: "Sparksoft Corporation" } }, { id: "now", status: "needs_input", job: { company: "Sparksoft Corporation" } }];
+    const records = standingRecordsFromJobs(jobs, "now");
+    const ask = (question: string, company: string, recordsLookup = records) => findAnswerBankMatch(bank, { question, company, options: ["Yes", "No"] }, undefined, recordsLookup);
+    expect((await ask("Have you previously applied for a role at Sparksoft?", "Sparksoft Corporation"))?.value).toBe("Yes");
+    expect((await ask("Have you previously applied for a role at Phantom?", "Phantom"))?.value).toBe("No");
+    // Interviewed before: unknowable after a past application, so it asks.
+    expect(await ask("Have you previously interviewed for a role at Sparksoft?", "Sparksoft Corporation")).toBeUndefined();
+    expect((await ask("Have you previously interviewed for a role at Phantom?", "Phantom"))?.value).toBe("No");
   });
 });

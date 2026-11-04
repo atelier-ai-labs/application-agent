@@ -230,6 +230,8 @@ Every answer you give in Slack to an employer's form question is saved to `.loca
 
 The employer's name is replaced with `{company}`, so "How did you hear about Phantom?" also answers the same question from Sparksoft. A saved answer is used only when it is one of the form's options. An answer that names the employer is never saved.
 
+**Standing answers** cover high-risk facts that do not change between applications (convictions, being fired, liens or bankruptcy, insurance/securities licenses, regulatory discipline, non-competes, background-check willingness, essential functions, applied or interviewed here before). They are never learned from Slack; set each one once with `npm run career-agent:answers -- --set-standing criminal_conviction=No background_check=Yes previously_applied=@records`. Each topic matches only questions asked about you ("Have you been convicted…"), not statements or consents ("employment may be terminated", "do you consent to a criminal history check"), and a question touching two topics is still asked. `@records` answers "applied here before?" from the agent's own applications; "interviewed here before?" is No only when the agent never applied there.
+
 `npm run career-agent:answers` lists the bank. `-- --backfill` seeds it from answers on past applications (add `--dry-run` to preview). The file is plain JSON: change a `value`, or set `"disabled": true` to stop an answer from being reused. Edits apply on the next lookup. Set `ATELIER_CAREER_AGENT_ANSWER_BANK=disabled` to turn the bank off.
 
 ### Source discovery and ATS routing

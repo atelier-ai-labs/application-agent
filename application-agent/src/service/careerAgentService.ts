@@ -113,7 +113,7 @@ import {
 } from "../domain/jobUrlClassifier";
 import { isVerifiedAshbyApplicationUrl, isVerifiedAshbyHostedUrl } from "../domain/jobUrlClassifier";
 import { isPostSubmitHumanCheck } from "../domain/applicationReceipt";
-import { answerBankKey, answerRiskTier, findAnswerBankMatch, isBankableQuestion, questionFromBlocker, withRecordedAnswer, type AnswerBankSemanticMatcher, type AnswerBankStore } from "../domain/answerBank";
+import { answerBankKey, answerRiskTier, findAnswerBankMatch, isBankableQuestion, questionFromBlocker, standingRecordsFromJobs, withRecordedAnswer, type AnswerBankSemanticMatcher, type AnswerBankStore } from "../domain/answerBank";
 import { isVerifiedLeverApplicationUrl, isVerifiedLeverHostedUrl } from "../domain/leverJobSource";
 
 let fallbackId = 0;
@@ -3331,7 +3331,8 @@ export class CareerAgentService {
       if (!blocker) continue;
       let entries;
       try { entries = this.answerBank.entries(); } catch { return current; }
-      const match = await findAnswerBankMatch(entries, questionFromBlocker(blocker), this.answerBankMatcher);
+      const match = await findAnswerBankMatch(entries, questionFromBlocker(blocker), this.answerBankMatcher,
+        standingRecordsFromJobs(this.careerRepository.listJobs(), current.id));
       if (!match) continue;
       current = await this.resolveCareerBlocker(campaign.id, current.id, blocker.id, match.value, {
         deferResume: true,

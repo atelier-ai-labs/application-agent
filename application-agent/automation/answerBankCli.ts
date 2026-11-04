@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { LocalStorageCareerRepository } from "../src/persistence/careerRepository";
 import { questionProvenanceForBlocker } from "../src/domain/attention";
 import {
-  answerBankKey, answerRiskTier, isBankableQuestion, questionFromBlocker, withRecordedAnswer,
-  type AnswerBankEntry, type AnswerRiskTier,
+  STANDING_TOPICS, answerBankKey, answerRiskTier, isBankableQuestion, questionFromBlocker, withRecordedAnswer, withStandingAnswer,
+  type AnswerBankEntry, type AnswerRiskTier, type StandingTopicId,
 } from "../src/domain/answerBank";
 import { FileKeyValueStorage } from "./runtime/fileKeyValueStorage";
 import { FileAnswerBankStore } from "./answerBank/fileAnswerBankStore";
@@ -42,9 +42,16 @@ export function backfillFromHistory(entries: readonly AnswerBankEntry[], jobs: R
   return { entries: current, added };
 }
 
-function printBank(entries: readonly AnswerBankEntry[], path: string): void {
+function printBank(all: readonly AnswerBankEntry[], path: string): void {
+  let entries = all;
   const order: AnswerRiskTier[] = ["low", "medium"];
+  entries = entries.filter((entry) => !entry.topic);
   console.log(`${entries.length} saved answer${entries.length === 1 ? "" : "s"} in ${path}`);
+  console.log("\nStanding answers (set by you; never learned from Slack):");
+  for (const topic of STANDING_TOPICS) {
+    const entry = all.find((candidate) => candidate.topic === topic.id);
+    console.log(`  ${topic.id.padEnd(24)} ${entry ? (entry.disabled ? "[off] " : "") + String(entry.value) : "(not set: asks you)"}  — ${topic.label}`);
+  }
   for (const tier of order) {
     const rows = entries.filter((entry) => entry.tier === tier);
     if (rows.length === 0) continue;
@@ -58,6 +65,18 @@ function printBank(entries: readonly AnswerBankEntry[], path: string): void {
 
 export function runAnswerBankCli(argv = process.argv.slice(2), env = process.env): void {
   const store = new FileAnswerBankStore(env.ATELIER_CAREER_AGENT_ANSWER_BANK_FILE?.trim() || undefined);
+  // --set-standing criminal_conviction=No background_check=Yes previously_applied=@records
+  const setIndex = argv.indexOf("--set-standing");
+  if (setIndex >= 0) {
+    let entries = [...store.entries()];
+    for (const pair of argv.slice(setIndex + 1).filter((arg) => !arg.startsWith("--"))) {
+      const [topic, ...rest] = pair.split("=");
+      const value = rest.join("=").trim();
+      if (!topic || !value) throw new Error(`Expected topic=value, got "${pair}".`);
+      entries = withStandingAnswer(entries, topic as StandingTopicId, value, new Date().toISOString());
+    }
+    store.save(entries);
+  }
   if (argv.includes("--backfill")) {
     const repository = new LocalStorageCareerRepository(new FileKeyValueStorage());
     const { entries, added } = backfillFromHistory(store.entries(), repository.listJobs());

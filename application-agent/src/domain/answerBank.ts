@@ -17,7 +17,7 @@ import { OPTIONAL_ANSWER_SKIPPED } from "./executor";
  */
 export type AnswerRiskTier = "low" | "medium" | "high";
 export type AnswerBankSource = "slack" | "history" | "manual";
-export type AnswerBankMatchKind = "exact" | "similar" | "model";
+export type AnswerBankMatchKind = "exact" | "similar" | "model" | "standing";
 
 export interface AnswerBankEntry {
   id: string;
@@ -37,6 +37,8 @@ export interface AnswerBankEntry {
   lastUsedAt?: string;
   /** Set by hand in the bank file to stop an entry from being reused. */
   disabled?: boolean;
+  /** A standing answer the candidate set for one fixed topic (see STANDING_TOPICS). */
+  topic?: StandingTopicId;
 }
 
 export interface AnswerBankQuestion {
@@ -45,6 +47,69 @@ export interface AnswerBankQuestion {
   fieldType?: string;
   options?: readonly string[];
   kind?: string;
+}
+
+/**
+ * Standing answers: facts about the candidate that do not change between
+ * applications (no convictions, no securities license). They are high risk,
+ * so they are never learned from Slack; the candidate sets each one once.
+ * Each topic matches only questions asked about the candidate, worded
+ * narrowly; a question touching two topics is still asked.
+ */
+export type StandingTopicId =
+  | "criminal_conviction" | "terminated" | "financial_judgments" | "financial_license" | "regulatory_discipline"
+  | "restrictive_agreements" | "background_check" | "essential_functions" | "previously_applied" | "previously_interviewed";
+
+/** A standing value that is looked up from the agent's own records instead of fixed. */
+export const STANDING_FROM_RECORDS = "@records";
+
+export const STANDING_TOPICS: readonly { id: StandingTopicId; label: string; pattern: RegExp }[] = [
+  { id: "criminal_conviction", label: "Convicted of, or pled guilty / no contest to, a crime", pattern: /\bconvicted\b|\bple(?:d|aded) guilty\b|\bnolo contendere\b|\bno contest\b/ },
+  { id: "terminated", label: "Fired, or asked to resign", pattern: /\b(?:been|were you|ever been) (?:fired|terminated|discharged|dismissed)\b|\basked to resign\b/ },
+  { id: "financial_judgments", label: "Unsatisfied liens or judgments, bankruptcy, or a bond denied or revoked", pattern: /\b(?:unsatisfied|outstanding) (?:judge?ments?|liens?)\b|\bliens?\b.{0,30}\bagainst you\b|\bbankruptcy\b|\bbond(?:ing)? company\b|\bbond\b.{0,40}\b(?:denied|revoked|paid out)\b/ },
+  { id: "financial_license", label: "Holds or has held an insurance or securities license", pattern: /\blicen[cs](?:e|ed|es|ing)\b.{0,30}\b(?:insurance|securities|finra)\b|\b(?:insurance|securities)\b.{0,20}\blicen[cs]e|\bseries (?:6|7|24|63|65|66)\b|\bfinra\b/ },
+  { id: "regulatory_discipline", label: "Disciplined by a regulator", pattern: /\bdisciplin\w*\b.{0,60}\b(?:regulat\w*|finra|self regulatory|agency|body)\b/ },
+  { id: "restrictive_agreements", label: "Signed a non-compete, non-solicitation, or confidentiality agreement", pattern: /\b(?:signed|bound by|subject to|party to|entered into)\b.{0,60}\b(?:non ?compet\w*|non ?solicit\w*|confidentiality|restrictive covenants?)\b/ },
+  { id: "background_check", label: "Willing to undergo a background check or drug screen", pattern: /\b(?:willing|able|agree) to (?:undergo|complete|pass|submit to|take)\b.{0,30}\b(?:background|drug)\b/ },
+  { id: "essential_functions", label: "Can perform the essential functions with or without reasonable accommodation", pattern: /\bessential functions\b/ },
+  { id: "previously_applied", label: "Previously applied to this company", pattern: /\b(?:previously|ever|before)\b.{0,20}\bappl(?:ied|y)\b.{0,40}\{company\}|\bappl(?:ied)\b.{0,30}\{company\}.{0,20}\b(?:before|previously)\b/ },
+  { id: "previously_interviewed", label: "Previously interviewed at this company", pattern: /\b(?:previously|ever|before)\b.{0,20}\binterview(?:ed)?\b.{0,40}\{company\}/ },
+];
+
+/** The one standing topic a question is about, or undefined for none or several. */
+export function standingTopicFor(question: string, company?: string): StandingTopicId | undefined {
+  const key = answerBankKey(question, company);
+  // Only questions about the candidate: statements to acknowledge are not answers.
+  if (!/\b(?:have you|are you|do you|were you|has a|has any|did you|can you|would you|will you|is there)\b/.test(key)) return undefined;
+  const topics = STANDING_TOPICS.filter((topic) => topic.pattern.test(key));
+  return topics.length === 1 ? topics[0]!.id : undefined;
+}
+
+export function standingEntryKey(topic: StandingTopicId): string {
+  return `standing:${topic}`;
+}
+
+/** Answers a records-backed standing topic ("Yes" if the agent applied there before). */
+export type StandingRecordsLookup = (topic: StandingTopicId, company: string | undefined) => string | undefined;
+
+/**
+ * "Applied before?" from the agent's own records: Yes when another job at
+ * this company reached Applied. "Interviewed before?" is No only when the
+ * agent never applied there; otherwise it cannot know and asks.
+ */
+export function standingRecordsFromJobs(
+  jobs: readonly { id: string; status: string; job: { company: string }; manualSubmissionConfirmation?: unknown; submissionProof?: unknown }[],
+  excludeJobId?: string,
+): StandingRecordsLookup {
+  const companyKey = (value: string) => normalizedText(value).replace(/[^a-z0-9 ]+/g, " ").replace(/\b(?:inc|llc|corp|corporation|co|ltd|technologies|the|companies|company)\b/g, " ").replace(/\s+/g, " ").trim();
+  return (topic, company) => {
+    if (!company) return undefined;
+    const appliedBefore = jobs.some((job) => job.id !== excludeJobId && companyKey(job.job.company) === companyKey(company) &&
+      (job.status === "applied" || Boolean(job.manualSubmissionConfirmation) || Boolean(job.submissionProof)));
+    if (topic === "previously_applied") return appliedBefore ? "Yes" : "No";
+    if (topic === "previously_interviewed") return appliedBefore ? undefined : "No";
+    return undefined;
+  };
 }
 
 export interface AnswerBankMatch {
@@ -234,7 +299,7 @@ export function valueForOptions(value: AnswerValue, options: readonly string[] |
 function liveEntries(entries: readonly AnswerBankEntry[]): AnswerBankEntry[] {
   const byKey = new Map<string, AnswerBankEntry>();
   for (const entry of entries) {
-    if (entry.disabled || entry.tier === "high") continue;
+    if (entry.disabled || entry.tier === "high" || entry.topic) continue;
     const current = byKey.get(entry.key);
     if (!current || current.recordedAt < entry.recordedAt) byKey.set(entry.key, entry);
   }
@@ -257,8 +322,18 @@ export async function findAnswerBankMatch(
   entries: readonly AnswerBankEntry[],
   question: AnswerBankQuestion,
   semanticMatcher?: AnswerBankSemanticMatcher,
+  records?: StandingRecordsLookup,
 ): Promise<AnswerBankMatch | undefined> {
   if (isOpaqueQuestion(question.question)) return undefined;
+  const topic = standingTopicFor(question.question, question.company);
+  if (topic) {
+    const entry = entries.find((candidate) => candidate.topic === topic && !candidate.disabled);
+    if (!entry) return undefined;
+    const value = entry.value === STANDING_FROM_RECORDS ? records?.(topic, question.company) : entry.value;
+    if (value === undefined) return undefined;
+    const mapped = valueForOptions(value, question.options);
+    return mapped === undefined ? undefined : { entry, value: mapped, kind: "standing" };
+  }
   const tier = answerRiskTier(question);
   if (tier === "high") return undefined;
   const key = answerBankKey(question.question, question.company);
@@ -294,6 +369,14 @@ export async function findAnswerBankMatch(
 }
 
 /** Add or replace the entry for this question; the newest answer wins. */
+export function withStandingAnswer(entries: readonly AnswerBankEntry[], topic: StandingTopicId, value: string, now: string): AnswerBankEntry[] {
+  const definition = STANDING_TOPICS.find((candidate) => candidate.id === topic);
+  if (!definition) throw new Error(`Unknown standing topic: ${topic}`);
+  return withRecordedAnswer(entries, {
+    id: standingEntryKey(topic), key: standingEntryKey(topic), question: definition.label, value, tier: "high", topic, source: "manual", recordedAt: now,
+  });
+}
+
 export function withRecordedAnswer(entries: readonly AnswerBankEntry[], entry: AnswerBankEntry): AnswerBankEntry[] {
   return [...entries.filter((candidate) => candidate.key !== entry.key), entry];
 }
