@@ -41,7 +41,13 @@ export async function runReplayCli(argv: readonly string[] = process.argv.slice(
   const matcher = argv.includes("--with-model") && model ? createOllamaAnswerBankMatcher({ model }) : undefined;
 
   const replays: FormReplay[] = [];
-  for (const snapshot of snapshots) replays.push(await replayForm(snapshot, { profile, answerBank: bank, ...(matcher ? { matcher } : {}) }));
+  const only = argv.includes("--form") ? argv[argv.indexOf("--form") + 1]?.toLowerCase() : undefined;
+  const showValues = argv.includes("--show-values");
+  if (showValues && argv.includes("--save-baseline")) throw new Error("--show-values cannot be combined with --save-baseline (the baseline never stores answers).");
+  for (const snapshot of snapshots) {
+    if (only && !`${snapshot.company ?? ""} ${snapshot.url}`.toLowerCase().includes(only)) continue;
+    replays.push(await replayForm(snapshot, { profile, answerBank: bank, ...(matcher ? { matcher } : {}), showValues }));
+  }
 
   console.log("Form                                              fields  filled  bank  ask  blank");
   for (const form of replays) {
@@ -51,7 +57,8 @@ export async function runReplayCli(argv: readonly string[] = process.argv.slice(
     const stopped = t.filled === 0 && form.reason ? `  (stopped: ${form.reason.slice(0, 80)})` : "";
     console.log(`${name}  ${String(t.fields).padStart(6)}  ${String(t.filled).padStart(6)}  ${String(t.bank).padStart(4)}  ${String(t.asked).padStart(3)}  ${String(t.blank).padStart(5)}${stopped}`);
     if (argv.includes("--quiet")) continue;
-    for (const field of form.fields.filter((candidate) => candidate.outcome === "asked")) console.log(`      asks: ${field.label.replace(/\s+/g, " ").trim().slice(0, 100)}`);
+    for (const field of form.fields.filter((candidate) => candidate.outcome === "asked")) console.log(`      asks: ${(field.prompt ?? field.label).slice(0, 100)}`);
+    if (showValues) for (const field of form.fields.filter((candidate) => candidate.value !== undefined)) console.log(`      fills: ${(field.prompt ?? field.label).slice(0, 70)} = ${field.value}`);
   }
   const totals = replayTotals(replays);
   console.log(`\n${totals.forms} forms, ${totals.fields} fields: ${pct(totals.filled, totals.fields)} filled by the agent, ${pct(totals.bank, totals.fields)} from the answer bank, ${totals.asked} questions would go to Slack (${(totals.asked / Math.max(1, totals.forms - totals.errors)).toFixed(1)} per form).${totals.errors ? ` ${totals.errors} forms failed to replay.` : ""}`);

@@ -186,6 +186,12 @@ function normalizedTokens(value: string): readonly string[] {
     .filter((token) => token.length > 1);
 }
 
+/** The form section a control sits in ("Education", "References"), when the page names one. */
+function sectionTitleOf(field: Pick<LeverBrowserField, "id" | "label" | "section">): string {
+  const descriptor = (field as { questionDescriptor?: { sectionTitle?: string } }).questionDescriptor;
+  return normalized([descriptor?.sectionTitle, field.section].filter(Boolean).join(" "));
+}
+
 function fieldText(field: Pick<LeverBrowserField, "id" | "label" | "section">): string {
   return normalized([field.id, field.label, field.section].filter(Boolean).join(" "));
 }
@@ -245,6 +251,8 @@ function profileFactField(field: Pick<LeverBrowserField, "id" | "label" | "secti
     return "desired_work_location";
   }
   if (hasPhrase(text, /employ|employer|company|work history|job history|position held|job title|occupation/)) return undefined;
+  // School attendance dates ("Attendance Start Date") are not job availability.
+  if (hasPhrase(text, /\beducation\b|\battend[ae]nce\b|\benrolled\b|\binstitution\b|\bschool\b|\bdegree\b/)) return undefined;
   if (hasPhrase(text, /(?:available|availability|start|commence|join|begin).{0,24}(?:date|when)|(?:date|when).{0,24}(?:available|availability|start|commence|join|begin)/)) {
     return "start_availability";
   }
@@ -776,6 +784,8 @@ export function classifyLeverApplicationField(
   // The visa disclaimer contains sponsorship language but is a legal
   // acknowledgment, not the candidate's sponsorship-required answer.
   if (hasPhrase(text, /sponsor|visa|immigration status/)) return "sponsorship";
+  // "Degree or Certification Earned" names a credential, not a statement to certify.
+  if (/\beducation\b/.test(sectionTitleOf(field)) || hasPhrase(text, /\binstitution\b|\bdegree or certification\b|\b(?:degree|certification) earned\b/)) return "education";
   if (hasPhrase(text, /\blegal\b|attest|certif(?:y|ication)|agree to|authorize|terms|accurate and complete|sign your name for acknowledgement/)) return "legal_attestation";
   if (hasPhrase(text, /\bmost interesting problem\b|\byour take\b|\bwhy does it pull you in\b/)) return "free_text";
   if (hasPhrase(text, /\b(?:ai|ml|machine\s+learning|aws|terraform|cloudformation|startup|early[ -]stage|production)\b/)) return "free_text";
@@ -1205,6 +1215,20 @@ function groundedWorkAuthorizationValue(
   return status;
 }
 
+/**
+ * A date written the way the prompt asks: "(MM/YYYY)" needs a month, so a
+ * year-only record ("2024") cannot fill it and stays a question.
+ */
+function datePerPrompt(value: string | null | undefined, text: string): string | undefined {
+  const date = nonEmpty(value);
+  if (!date) return undefined;
+  if (/\bmm\s*\/\s*yyyy\b/.test(text)) {
+    const match = /^(\d{4})[-/](\d{1,2})\b/.exec(date);
+    return match ? `${match[2]!.padStart(2, "0")}/${match[1]}` : undefined;
+  }
+  return date;
+}
+
 function groundedDatePart(value: string | null | undefined, part: "month" | "year"): string | undefined {
   const match = value?.match(/\b(\d{4})[-/]\s*(\d{1,2})\b/);
   if (!match) return undefined;
@@ -1495,6 +1519,9 @@ function profileValueForField(
   profile: CandidateProfile | undefined,
 ): AnswerValue | undefined {
   if (!profile) return undefined;
+  // A References section asks about other people; the candidate's own name,
+  // email, and phone must never fill it.
+  if (/\breferences?\b/.test(sectionTitleOf(field))) return undefined;
   const text = fieldText(field);
   const factField = profileFactField(field);
   if (isPreferredNameField(field)) return profile.identity.preferredName ?? undefined;
@@ -1554,7 +1581,9 @@ function profileValueForField(
       if (!US_STATE_ABBREVIATIONS[normalizedState] && !/^[a-z]{2}$/i.test(state)) return undefined;
       return field.options && field.options.length > 0
         ? state
-        : US_STATE_ABBREVIATIONS[normalizedState] ?? state;
+        // A typed text box gets "PA"; a select whose options load later keeps the
+        // provider's lowercase option value ("pa").
+        : field.type === "text" ? (US_STATE_ABBREVIATIONS[normalizedState] ?? state).toUpperCase() : US_STATE_ABBREVIATIONS[normalizedState] ?? state;
     }
     // Hosts that label controls through aria-labelledby (Vaia: id "f-plz",
     // placeholder "10001", accessible name "ZIP code") expose the component
@@ -1581,6 +1610,8 @@ function profileValueForField(
     }
     const employment = employmentForField(field, profile);
     if (!employment) return undefined;
+    // "Employer Phone Number" is a contact detail the profile does not hold, never the employer's name.
+    if (hasPhrase(text, /\b(?:phone|telephone|fax|email|e-mail|supervisor|manager|reason for leaving|salary|pay|wage)\b/)) return undefined;
     if (hasPhrase(text, /\bmonth\b/)) {
       return groundedDatePart(hasPhrase(text, /end|to date/) ? employment.endDate : employment.startDate, "month");
     }
@@ -1589,18 +1620,24 @@ function profileValueForField(
     }
     if (hasPhrase(text, /employer|company/)) return employment.employer;
     if (hasPhrase(text, /job title|position|role|occupation/)) return employment.title;
-    if (hasPhrase(text, /start date|started|from/)) return employment.startDate;
-    if (hasPhrase(text, /end date|ended|to date/)) return employment.endDate ?? undefined;
+    if (hasPhrase(text, /start date|started|from/)) return datePerPrompt(employment.startDate, text);
+    if (hasPhrase(text, /end date|ended|to date/)) return datePerPrompt(employment.endDate, text);
     return undefined;
   }
   if (field.classification === "education") {
     const education = firstEducation(profile);
     if (!education) return undefined;
+    // The profile holds no school address or start date; those stay questions.
+    if (hasPhrase(text, /\b(?:location|city|state|country|address)\b/)) return undefined;
+    if (hasPhrase(text, /\b(?:start|began|begin|from)\b/) && hasPhrase(text, /\b(?:date|year|month|mm)\b/)) return undefined;
+    if (hasPhrase(text, /\bend date\b|\battend[ae]nce end\b/)) return datePerPrompt(education.completionDate, text);
     if (hasPhrase(text, /\bmonth\b/)) return groundedDatePart(education.completionDate, "month");
     if (hasPhrase(text, /\byear\b/)) return groundedDatePart(education.completionDate, "year");
     if (hasPhrase(text, /university|college|school|institution/)) return education.institution;
     if (hasPhrase(text, /degree/)) return education.degree;
-    if (hasPhrase(text, /major|field|study/)) return education.field ?? undefined;
+    // Bare "field" also matches generated ids such as `cards[…][field6]`.
+    if (hasPhrase(text, /\badditional\b|\bother training\b|\bcertifications\b/)) return undefined;
+    if (hasPhrase(text, /\bmajor\b|\bfield of study\b|\bstudy\b|\bconcentration\b/)) return education.field ?? undefined;
     if (hasPhrase(text, /completion|graduat/)) return education.completionDate ?? undefined;
     return undefined;
   }

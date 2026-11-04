@@ -1630,7 +1630,7 @@ describe("LeverBrowserExecutor", () => {
 
     expect(result.state).toBe("ready_to_submit");
     expect(city.current).toBe("Pittsburgh");
-    expect(state.current).toBe("pa");
+    expect(state.current).toBe("PA");
     expect(postal.current).toBeNull();
     expect(address.current).toBeNull();
     expect(city.current).not.toBe(profile.identity.fullName);
@@ -1665,7 +1665,7 @@ describe("LeverBrowserExecutor", () => {
     expect(result.state).toBe("ready_to_submit");
     expect(address.current).toBe(profile.identity.streetAddress);
     expect(city.current).toBe("Pittsburgh");
-    expect(state.current).toBe("pa");
+    expect(state.current).toBe("PA");
     expect(postal.current).toBe(profile.identity.postalCode);
   });
 

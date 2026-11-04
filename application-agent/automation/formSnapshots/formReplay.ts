@@ -27,6 +27,10 @@ export interface FieldReplay {
   outcome: FieldOutcome;
   /** Short hash of the filled value, to notice a changed answer without storing it. */
   valueHash?: string;
+  /** The question as the form words it (the label is often a placeholder). */
+  prompt?: string;
+  /** The filled value itself, only when explicitly requested for local debugging. */
+  value?: string;
 }
 
 export interface FormReplay {
@@ -130,7 +134,7 @@ export function snapshotKey(snapshot: FormSnapshot): string {
 
 export async function replayForm(
   snapshot: FormSnapshot,
-  options: { profile: CandidateProfile; answerBank?: readonly AnswerBankEntry[]; matcher?: AnswerBankSemanticMatcher; now?: string },
+  options: { profile: CandidateProfile; answerBank?: readonly AnswerBankEntry[]; matcher?: AnswerBankSemanticMatcher; now?: string; showValues?: boolean },
 ): Promise<FormReplay> {
   const now = options.now ?? new Date().toISOString();
   const session = new ReplaySession(snapshot);
@@ -162,7 +166,13 @@ export async function replayForm(
       } as never), options.matcher);
       if (match) outcome = "bank";
     }
-    fields.push({ id: field.id, label: field.label.replace(/\s+/g, " ").trim().slice(0, 120), required: field.required, outcome, ...(outcome === "filled" ? { valueHash: hash(field.value) } : {}) });
+    const prompt = (field.questionDescriptor?.promptText ?? field.fullPrompt ?? "").replace(/\s+/g, " ").trim().slice(0, 160);
+    fields.push({
+      id: field.id, label: field.label.replace(/\s+/g, " ").trim().slice(0, 120), required: field.required, outcome,
+      ...(prompt && prompt !== field.label.trim() ? { prompt } : {}),
+      ...(outcome === "filled" ? { valueHash: hash(field.value) } : {}),
+      ...(outcome === "filled" && options.showValues ? { value: String(field.value).slice(0, 120) } : {}),
+    });
   }
   return { ...base, state: result.state, ...("reason" in result && typeof result.reason === "string" ? { reason: result.reason.slice(0, 200) } : {}), fields };
 }
@@ -183,9 +193,9 @@ export function compareReplays(baseline: readonly FormReplay[], current: readonl
       const was = old.get(field.id);
       if (!was) continue;
       if (was.outcome !== field.outcome) {
-        changes.push({ form: `${form.company} — ${form.role}`, field: field.label, from: was.outcome, to: field.outcome, kind: RANK[field.outcome] > RANK[was.outcome] ? "better" : "worse" });
+        changes.push({ form: `${form.company} — ${form.role}`, field: field.prompt ?? field.label, from: was.outcome, to: field.outcome, kind: RANK[field.outcome] > RANK[was.outcome] ? "better" : "worse" });
       } else if (field.outcome === "filled" && was.valueHash !== field.valueHash) {
-        changes.push({ form: `${form.company} — ${form.role}`, field: field.label, from: "filled", to: "filled", kind: "changed" });
+        changes.push({ form: `${form.company} — ${form.role}`, field: field.prompt ?? field.label, from: "filled", to: "filled", kind: "changed" });
       }
     }
   }

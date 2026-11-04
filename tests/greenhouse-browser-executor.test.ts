@@ -777,6 +777,33 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(result.state).toBe("ready_to_submit");
   });
 
+  it("fills D.A. Davidson-style education and employment cards without misplacing values", async () => {
+    const card = (id: string, sectionTitle: string, promptText: string, type: "text" | "textarea" = "text") =>
+      new FakeField({ id: `cards[c][${id}]`, label: promptText, type, required: true, questionDescriptor: { sectionTitle, promptText, sourceStrategy: "question_container", confidence: "high" } });
+    const institution = card("field1", "Education", "Institution Name");
+    const schoolLocation = card("field2", "Education", "Location of Institution (City, State, Country)");
+    const degree = card("field3", "Education", "Degree or Certification Earned");
+    const attendStart = card("field4", "Education", "Attendance Start Date (MM/YYYY)");
+    const training = card("field6", "Education", "Additional Training or Certifications", "textarea");
+    const employerPhone = card("field2b", "Employment", "Employer Phone Number");
+    const employmentStart = card("field5b", "Employment", "Employment Start Date (MM/YYYY)");
+    const referenceEmail = card("field3r", "References", "Email Address");
+    const referencePhone = card("field4r", "References", "Phone Number");
+    const fields = [institution, schoolLocation, degree, attendStart, training, employerPhone, employmentStart, referenceEmail, referencePhone];
+    const session = new FakeSession(fields);
+    const profile: CandidateProfile = {
+      ...exampleCandidateProfile,
+      workPreferences: { ...exampleCandidateProfile.workPreferences, availabilityStartDate: "2026-10-01" },
+      education: [{ id: "ptc", institution: "Pittsburgh Technical College", degree: "Associate of Science", field: "Information Technology", completionDate: "2013", provenance: "test" }],
+      employmentHistory: [{ id: "ntt", employer: "NTT Security", title: "Security Analyst", location: null, startDate: "2014-03", endDate: "2018-12", provenance: "test" } as never],
+    };
+    await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...request(session), profile });
+    expect([institution.current, degree.current, employmentStart.current]).toEqual(["Pittsburgh Technical College", "Associate of Science", "03/2014"]);
+    // The profile holds none of these; the candidate's own location, availability date,
+    // field of study, employer name, email, and phone must not stand in for them.
+    expect([schoolLocation, attendStart, training, employerPhone, referenceEmail, referencePhone].map((field) => field.current)).toEqual([null, null, null, null, null, null]);
+  });
+
   it("answers immigration-law work authorization, highest education, and current-employee questions from the profile", async () => {
     const select = (id: string, label: string, options: readonly string[]) =>
       new FakeField({ id, label, type: "select", required: true, options: options.map((option) => ({ label: option, value: option })) });
