@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { greenhouseEmbedApplicationUrl, isVerifiedGreenhouseEmbedUrl } from "../application-agent/src/domain/greenhouseJobSource";
-import { isTrustedAutomaticConfirmation, isTruthfulnessCertification } from "../application-agent/src/domain/leverBrowserExecutor";
+import { isGreenhouseClosedPostingRedirect, isTrustedAutomaticConfirmation, isTruthfulnessCertification } from "../application-agent/src/domain/leverBrowserExecutor";
 import { OPTIONAL_ANSWER_SKIPPED } from "../application-agent/src/domain/executor";
 import {
   greenhouseLocationOptionMatches,
@@ -809,6 +809,19 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(isTruthfulnessCertification(certify)).toBe(true);
     expect(isTruthfulnessCertification(signature.label)).toBe(false);
     expect(isTruthfulnessCertification("I certify the information is accurate and I authorize a background check.")).toBe(false);
+  });
+
+  it("treats Greenhouse's redirect to the board with ?error=true as a closed posting", async () => {
+    class RedirectingSession extends FakeSession {
+      override async navigate(): Promise<void> { await super.navigate("https://job-boards.greenhouse.io/kapitus?error=true"); }
+    }
+    const session = new RedirectingSession([]);
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute(request(session));
+    expect(result.state).toBe("failed");
+    expect(result.inspection.evidence).toContain("posting:unavailable");
+    expect(isGreenhouseClosedPostingRedirect("https://job-boards.greenhouse.io/kapitus?error=true", "kapitus")).toBe(true);
+    expect(isGreenhouseClosedPostingRedirect("https://job-boards.greenhouse.io/kapitus/jobs/4390052009", "kapitus")).toBe(false);
+    expect(isGreenhouseClosedPostingRedirect("https://job-boards.greenhouse.io/other?error=true", "kapitus")).toBe(false);
   });
 
   it("fills D.A. Davidson-style education and employment cards without misplacing values", async () => {

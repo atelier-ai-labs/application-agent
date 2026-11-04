@@ -650,6 +650,18 @@ function truthfulnessCertificationValue(field: ApplicationFieldDescriptor): Answ
   return undefined;
 }
 
+/** Greenhouse's redirect for a closed posting: the board root with `error=true`. */
+export function isGreenhouseClosedPostingRedirect(url: string, site: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return /(?:^|\.)greenhouse\.io$/.test(parsed.hostname) &&
+      parsed.pathname.replace(/\/+$/, "").toLowerCase() === `/${site.toLowerCase()}` &&
+      parsed.searchParams.get("error") === "true";
+  } catch {
+    return false;
+  }
+}
+
 /** Ashby can expose a privacy-policy continuation as a radio control whose
  * prompt is the privacy notice itself rather than an explicit "I acknowledge"
  * text-entry instruction. It is still a legal attestation, never a generic
@@ -3218,6 +3230,14 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
     }
     if (!state.navigated) {
       await state.session.navigate(target.applicationUrl);
+      if (target.provider === "greenhouse" && isGreenhouseClosedPostingRedirect(await state.session.currentUrl(), target.site)) {
+        // Greenhouse sends a closed posting back to the company board with ?error=true.
+        throw new BrowserExecutionDiagnosticError({
+          stage: "navigation",
+          reasonCode: "posting_not_found",
+          message: "The posting is no longer open: Greenhouse redirected it to the company job board.",
+        });
+      }
       // Some boards redirect the hosted page to the employer's careers site;
       // the embed route is the same verified posting's form on greenhouse.io.
       if (target.provider === "greenhouse" && target.postingId &&
@@ -3470,7 +3490,8 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         session: { currentUrl: () => "", navigate: async () => undefined, inspectFields: async () => [], detectHumanBoundary: async () => null, hasSubmitControl: async () => false, submit: async () => ({ clicked: false, confirmed: false, evidence: "submit:unavailable" }), close: async () => undefined },
         fields: [],
         inspection: inspection("failed", [], startedAt, this.now(), {
-          evidence: [`executor:${executorEvidenceLabel(target.provider)}`, `error:${reason}`],
+          evidence: [`executor:${executorEvidenceLabel(target.provider)}`, `error:${reason}`,
+            ...(derivedDiagnostic.reasonCode === "posting_not_found" || derivedDiagnostic.reasonCode === "posting_closed" ? ["posting:unavailable"] : [])],
           boundaries,
           ...(navigation ? { navigation } : {}),
           diagnostic,
