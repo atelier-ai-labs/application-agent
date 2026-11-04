@@ -119,7 +119,7 @@ class DomPage {
 
   async waitForSelector(): Promise<void> {}
 
-  async waitForTimeout(): Promise<void> {}
+  async waitForTimeout(): Promise<void> { await new Promise((resolve) => setTimeout(resolve, 5)); }
 
   async waitForLoadState(): Promise<void> {}
 
@@ -263,6 +263,30 @@ describe("Rippling Playwright DOM integration", () => {
     expect(result).toMatchObject({ clicked: true, confirmed: true });
     expect(result.evidence).toContain("security-code:entered");
   });
+
+  it("waits for the code boxes when the 'verification code' page renders after Submit (Sparksoft)", async () => {
+    const entered: string[] = [];
+    document.body.innerHTML = `<form><button type="submit">Submit application</button></form>`;
+    document.querySelector("button")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      // The page text arrives first; the inputs render a moment later.
+      document.body.innerHTML = `<p>Please enter the verification code we emailed you to finish your application.</p>`;
+      setTimeout(() => {
+        document.body.innerHTML = `<form><p>Please enter the verification code we emailed you to finish your application.</p>${
+          Array.from({ length: 8 }, (_, index) => `<input id="security-input-${index}" maxlength="1">`).join("")
+        }<button type="submit">Submit application</button></form>`;
+        document.querySelector("button")?.addEventListener("click", (second) => {
+          second.preventDefault();
+          entered.push(Array.from(document.querySelectorAll<HTMLInputElement>("input")).map((input) => input.value).join(""));
+          document.body.innerHTML = "<h1>Thank you for applying.</h1>";
+        });
+      }, 1_500);
+    });
+    const result = await sessionForDocument(undefined, async () => "AbC123xY").submit();
+
+    expect(entered).toEqual(["AbC123xY"]);
+    expect(result).toMatchObject({ clicked: true, confirmed: true });
+  }, 15_000);
 
   it("stops without typing when no security code arrives", async () => {
     document.body.innerHTML = `<form><button type="submit">Submit application</button></form>`;

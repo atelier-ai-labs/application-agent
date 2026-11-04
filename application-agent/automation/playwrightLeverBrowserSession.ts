@@ -3316,6 +3316,13 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
     return evidence;
   }
 
+  /** The page is asking for a code it emailed (Greenhouse's post-Submit check). */
+  private async pageAsksForEmailedCode(): Promise<boolean> {
+    const body = await this.page.locator("body").innerText({ timeout: 2_000 }).catch(() => "");
+    return /\b(?:security|verification) code\b/i.test(body) && /\b(?:e-?mail(?:ed)?|sent)\b/i.test(body) &&
+      (await this.page.locator('input[type="password"]').count().catch(() => 0)) === 0;
+  }
+
   /** Visible inputs for an emailed security code (one box, or one box per character). */
   private async securityCodeInputs(): Promise<Locator[]> {
     // Code-specific names only ("security clearance" questions also say
@@ -3411,7 +3418,13 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       confirmed = clicked && (confirmationText || confirmationUrl || ashbySuccess);
       // A CAPTCHA raised on Submit expires in about two minutes; stop waiting
       // and hand it to the user now rather than at the end of the wait.
-      if (!confirmed && clicked && await this.detectHumanBoundary().catch(() => null)) break;
+      // Greenhouse's emailed-code page reads as a login wall ("verification
+      // code") and can render after the first code check; while the code
+      // reader is available and has not run, keep looking for its inputs.
+      if (!confirmed && clicked) {
+        const boundary = await this.detectHumanBoundary().catch(() => null);
+        if (boundary && !(boundary.kind === "external_login" && this.securityCodeProvider && !securityCode && await this.pageAsksForEmailedCode())) break;
+      }
     } while (!confirmed && Date.now() < deadline);
     if (!confirmed) {
       const postClickBoundary = clicked ? await this.detectHumanBoundary() : null;
