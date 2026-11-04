@@ -25,6 +25,11 @@ function inspection(): ExecutionInspection {
   return { status: "inspected", fields: [], fieldsFilled: [], unresolvedFields: [], blockers: [], evidence: ["submit:not-clicked", "submission:manual-only"], durationMs: 1, domInspectionCount: 1, startedAt: capturedAt, updatedAt: capturedAt };
 }
 
+class NoticeCapturingAdapter extends InMemoryNotificationAdapter {
+  readonly notices: string[] = [];
+  async publishInfoNotice(text: string): Promise<void> { this.notices.push(text); }
+}
+
 /** One form question per job, worded with the employer's name. */
 class QuestionExecutor implements ApplicationExecutor {
   readonly id = "answer-bank-executor";
@@ -51,13 +56,13 @@ class QuestionExecutor implements ApplicationExecutor {
   }
 }
 
-function setup(companies: string[], executor: QuestionExecutor, bank: InMemoryAnswerBankStore) {
+function setup(companies: string[], executor: ApplicationExecutor, bank: InMemoryAnswerBankStore, listings?: JobSourceListing[]) {
   const profile = JSON.parse(JSON.stringify(exampleCandidateProfile)) as CandidateProfile;
   profile.profileKind = "private";
   profile.answerPolicies = Object.fromEntries(Object.keys(DEFAULT_ANSWER_POLICIES).map((field) => [field, "auto"])) as CandidateProfile["answerPolicies"];
   profile.approvedReusableAnswers = Object.fromEntries(Object.keys(DEFAULT_ANSWER_POLICIES).map((field) => [field, `approved ${field} answer`]));
-  const notifications = new InMemoryNotificationAdapter();
-  const source = new StaticJobSource("bank-source", companies.map(listing));
+  const notifications = new NoticeCapturingAdapter();
+  const source = new StaticJobSource("bank-source", listings ?? companies.map(listing));
   let id = 0;
   const createId = (prefix: string) => `${prefix}-bank-${(id += 1)}`;
   const service = new CareerAgentService(profile, {
@@ -72,7 +77,7 @@ function setup(companies: string[], executor: QuestionExecutor, bank: InMemoryAn
     fitPolicy: { strong: "pursue", good: "pursue", stretch: "pursue", weak: "pursue" },
     applicationPolicy: { autoPrepare: true, allowGroundedDrafts: false, approvedResumeFamilies: [] },
     submissionPolicy: { authority: "simulated", requireExplicitApproval: false },
-    dailyApplicationLimit: companies.length,
+    dailyApplicationLimit: listings?.length ?? companies.length,
   });
   service.activateCampaign(campaign.id);
   return { service, campaign, notifications };
@@ -127,5 +132,61 @@ describe("answer bank in the career service", () => {
     await service.resolveAttentionResponse({ eventId: event.id, selectedOption: optionId(event, "No"), actorIdentity: { provider: "test", userId: "nate" }, respondedAt: capturedAt });
     expect(executor.received.Sparksoft?.toLowerCase()).toBe("no");
     expect(bank.entries()).toEqual([saved]);
+  });
+
+  describe("carrying one answer to other waiting applications", () => {
+    const role = (title: string): JobSourceListing => {
+      const slug = title.toLowerCase().replace(/[^a-z]+/g, "-");
+      return { sourceRecordId: `sparksoft-${slug}`, input: { isExample: true, companyHint: "Sparksoft", titleHint: title,
+        sourceUrl: `https://jobs.example.invalid/sparksoft/${slug}`, applicationUrl: `https://jobs.example.invalid/sparksoft/${slug}/apply`,
+        rawText: `Sparksoft\n${title}\nLocation: Remote - United States\n\nRequired qualifications\n- AWS` } };
+    };
+
+    /** Each form asks one text question; it records the answer it is resumed with. */
+    class TextQuestionExecutor implements ApplicationExecutor {
+      readonly id = "carry-over-executor";
+      readonly received: Record<string, string> = {};
+      constructor(private readonly label: string, private readonly kind: CareerBlockerDraft["kind"] = "unknown_form_field") {}
+      executionMode(): "preparation_only" { return "preparation_only"; }
+      async execute(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult> {
+        const answered = request.careerJob.blockers.find((blocker) => blocker.field === "question_1" && blocker.status === "resolved");
+        if (answered?.value !== undefined) {
+          this.received[request.careerJob.job.title] = String(answered.value);
+          return { state: "ready_to_submit", inspection: inspection() };
+        }
+        return { state: "requires_human", blocker: {
+          kind: this.kind, unit: "submission", questionProvenance: "ATS_FORM", field: "question_1", question: this.label,
+          reason: "The field could not be classified safely; no value was guessed.",
+          evidence: ["executor:test", "field-id:question_1", "field-type:text", "field-required:true", `field-label:${this.label}`, "question-source:unavailable"],
+          resumeAfterHuman: true,
+        } };
+      }
+    }
+
+    it("answers the same employer's identical question on the other waiting job and resumes it", async () => {
+      const executor = new TextQuestionExecutor("Do you currently hold an active security clearance? If yes, please provide details. *");
+      const { service, campaign, notifications } = setup([], executor, new InMemoryAnswerBankStore(), [role("Jr. Full Stack Developer"), role("Full Stack Developer - Mid-Level")]);
+      await service.runCampaign(campaign.id);
+      const events = service.listAttentionEvents(campaign.id).filter((event) => event.status === "open");
+      expect(events).toHaveLength(2);
+      await service.resolveAttentionResponse({ eventId: events[0]!.id, selectedOption: "No", actorIdentity: { provider: "test", userId: "nate" }, respondedAt: capturedAt });
+
+      expect(Object.values(executor.received)).toEqual(["No", "No"]);
+      const carried = service.listJobs(campaign.id).filter((job) => job.blockers.some((blocker) => blocker.evidence.includes("answer-provider:carry-over")));
+      expect(carried).toHaveLength(1);
+      expect(service.listJobs(campaign.id).map((job) => job.status)).toEqual(["ready_to_submit", "ready_to_submit"]);
+      expect(notifications.notices.join("\n")).toMatch(/other waiting applications[\s\S]*security clearance/);
+    });
+
+    it("never carries a salary answer to another role, even at the same employer", async () => {
+      const executor = new TextQuestionExecutor("What is your target salary range for this role? *", "salary");
+      const { service, campaign, notifications } = setup([], executor, new InMemoryAnswerBankStore(), [role("Jr. Full Stack Developer"), role("Full Stack Developer - Mid-Level")]);
+      await service.runCampaign(campaign.id);
+      const events = service.listAttentionEvents(campaign.id).filter((event) => event.status === "open");
+      await service.resolveAttentionResponse({ eventId: events[0]!.id, selectedOption: "75000", actorIdentity: { provider: "test", userId: "nate" }, respondedAt: capturedAt });
+      expect(Object.keys(executor.received)).toHaveLength(1);
+      expect(service.listJobs(campaign.id).filter((job) => job.status === "needs_input")).toHaveLength(1);
+      expect(notifications.notices).toEqual([]);
+    });
   });
 });

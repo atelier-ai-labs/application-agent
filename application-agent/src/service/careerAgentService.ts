@@ -273,6 +273,9 @@ const STALE_PRE_SUBMIT_EXECUTION_MS = 15 * 60 * 1000;
 
 export type StalePreSubmitHostUnavailable = "not_found" | "closed";
 
+/** Blocker kinds never carried to another application, even at the same employer. */
+const CARRY_OVER_EXCLUDED_KINDS: ReadonlySet<string> = new Set(["salary", "legal_attestation", "demographic_disclosure", "external_login", "external_verification", "captcha"]);
+
 export function trustedQueueFitAssessment(
   fit: FitAssessment,
   queueSelected: boolean,
@@ -2582,6 +2585,11 @@ export class CareerAgentService {
         }
       }
     }
+    if (blockerValue !== OPTIONAL_ANSWER_SKIPPED) {
+      // One answer, every waiting form that asks it: carrying it over must
+      // never fail the answer that was just accepted.
+      await this.carryAnswerToWaitingJobs(campaign.id, job.id, blocker, blockerValue).catch(() => undefined);
+    }
     const updatedCampaign = this.getCampaign(campaign.id);
     const updatedRecord = updatedCampaign.attentionEvents?.find((candidate) => candidate.id === record.id) ?? record;
     return {
@@ -3350,6 +3358,81 @@ export class CareerAgentService {
       } catch { /* usage counts are informational */ }
     }
     return current;
+  }
+
+  /**
+   * After the candidate answers a form question, answer the same open question
+   * on their other waiting applications. On the same employer an identical
+   * question reuses the answer directly, high-risk facts like a clearance
+   * included, but never salary, essays, legal statements or demographics. Any
+   * other employer goes through the answer bank's usual risk rules. A job left
+   * with nothing to ask resumes in the browser; otherwise its next question is
+   * sent.
+   */
+  private async carryAnswerToWaitingJobs(
+    campaignId: string,
+    sourceJobId: string,
+    sourceBlocker: CareerBlocker,
+    value: AnswerValue,
+  ): Promise<void> {
+    if (sourceBlocker.unit !== "submission" || questionProvenanceForBlocker(sourceBlocker) !== "ATS_FORM") return;
+    const source = questionFromBlocker(sourceBlocker);
+    const sourceKey = answerBankKey(source.question, source.company);
+    const sameEmployerCarries = !CARRY_OVER_EXCLUDED_KINDS.has(sourceBlocker.kind) && source.fieldType !== "textarea" &&
+      !/\b(?:salary|compensation|pay|wage|rate)\b/i.test(source.question);
+    const sameCompany = (left?: string, right?: string) => Boolean(left && right) && left!.trim().toLowerCase() === right!.trim().toLowerCase();
+    const sameOptions = (left?: readonly string[], right?: readonly string[]) =>
+      (left ?? []).map((option) => option.trim().toLowerCase()).sort().join("|") === (right ?? []).map((option) => option.trim().toLowerCase()).sort().join("|");
+    const notices: string[] = [];
+    const waiting = this.careerRepository.listJobs().filter((candidate) =>
+      candidate.id !== sourceJobId && candidate.campaignId === campaignId && candidate.status === "needs_input" && candidate.applicationId);
+    for (const waitingJob of waiting) {
+      let current = waitingJob;
+      const carried: string[] = [];
+      for (const blocker of waitingJob.blockers) {
+        if (blocker.status !== "open" || blocker.unit !== "submission" || questionProvenanceForBlocker(blocker) !== "ATS_FORM" || isPostSubmitHumanCheck(blocker)) continue;
+        const question = questionFromBlocker(blocker);
+        let answer: AnswerValue | undefined;
+        let evidence: string[] = [];
+        if (sameEmployerCarries && sameCompany(question.company, source.company) && blocker.kind === sourceBlocker.kind &&
+          answerBankKey(question.question, question.company) === sourceKey && question.fieldType === source.fieldType &&
+          sameOptions(question.options, source.options)) {
+          answer = value;
+          evidence = ["answer-provider:carry-over", `carried-from-job:${sourceJobId}`, "carry-over-match:same-employer-question"];
+        } else if (this.answerBank) {
+          let entries;
+          try { entries = this.answerBank.entries(); } catch { entries = undefined; }
+          const match = entries ? await findAnswerBankMatch(entries, question, this.answerBankMatcher,
+            standingRecordsFromJobs(this.careerRepository.listJobs(), current.id)) : undefined;
+          // Only the answer just given travels now; older bank entries already
+          // had their chance when this form was first read.
+          if (match && match.entry.jobId === sourceJobId) {
+            answer = match.value;
+            evidence = ["answer-provider:answer-bank", `answer-bank-entry:${match.entry.id}`, `answer-bank-match:${match.kind}`, `answer-bank-tier:${match.entry.tier}`, `carried-from-job:${sourceJobId}`];
+          }
+        }
+        if (answer === undefined) continue;
+        current = await this.resolveCareerBlocker(campaignId, current.id, blocker.id, answer, { deferResume: true, answerEvidence: evidence });
+        carried.push(blocker.question.replace(/\s*\*+\s*$/, "").slice(0, 80));
+      }
+      if (carried.length === 0) continue;
+      const campaign = this.getCampaign(campaignId);
+      const next = this.nextAttentionBlocker(campaign, current);
+      if (next) {
+        await this.publishAttentionForJob(campaign, current);
+      } else if (current.execution?.mode === "real_local") {
+        if (this.resumeAttention) {
+          try { await this.resumeAttention(campaignId, current.id, { verificationHandoff: false }); } catch { /* the job stays waiting; its next Slack answer resumes it */ }
+        }
+      } else if (campaign.status === "active") {
+        const resumed = await this.resumeBlockedJob(campaign, current);
+        if (resumed.careerJob.status === "needs_input") await this.publishAttentionForJob(this.getCampaign(campaignId), resumed.careerJob);
+      }
+      notices.push(`${current.job.company} — ${current.job.title}: ${carried.join("; ")}${next ? "" : " (nothing left to ask, so it's filling the form now)"}`);
+    }
+    if (notices.length > 0) {
+      await this.notificationAdapter?.publishInfoNotice?.(`I used that answer on your other waiting applications too:\n${notices.map((line) => `• ${line}`).join("\n")}`).catch(() => undefined);
+    }
   }
 
   private async draftAtsAnswerForBlocker(job: CareerJob, blocker: CareerBlocker) {
