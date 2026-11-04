@@ -824,6 +824,27 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(isGreenhouseClosedPostingRedirect("https://job-boards.greenhouse.io/other?error=true", "kapitus")).toBe(false);
   });
 
+  it("uses the candidate's answer for a question whose page exposes no prompt text (Sparksoft clearance loop)", async () => {
+    const label = "Do you currently hold an active security clearance? If yes, please provide details. *";
+    const answered = (fieldLabel: string) => ({
+      id: "career-blocker-clearance", kind: "unknown_form_field", unit: "submission", questionProvenance: "ATS_FORM",
+      field: "question_13063270007", question: label, reason: "The field could not be classified safely; no value was guessed.",
+      evidence: ["executor:greenhouse-browser", "field-id:question_13063270007", "field-type:text", `field-label:${fieldLabel}`, "field-required:true", "classification:unknown", "question-source:unavailable"],
+      resumeAfterHuman: true, status: "resolved", value: "No", createdAt: capturedAt, resolvedAt: capturedAt,
+    }) as unknown as CareerJob["blockers"][number];
+    const run = async (fieldLabel: string) => {
+      const clearance = new FakeField({ id: "question_13063270007", label, type: "text", required: true });
+      const session = new FakeSession([clearance]);
+      const base = request(session);
+      await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" })
+        .execute({ ...base, careerJob: { ...base.careerJob, blockers: [answered(fieldLabel)] } });
+      return clearance.current;
+    };
+    expect(await run(label)).toBe("No");
+    // A different question on the same control id is not the answered one.
+    expect(await run("Do you currently hold a professional license? *")).toBeNull();
+  });
+
   it("fills D.A. Davidson-style education and employment cards without misplacing values", async () => {
     const card = (id: string, sectionTitle: string, promptText: string, type: "text" | "textarea" = "text") =>
       new FakeField({ id: `cards[c][${id}]`, label: promptText, type, required: true, questionDescriptor: { sectionTitle, promptText, sourceStrategy: "question_container", confidence: "high" } });

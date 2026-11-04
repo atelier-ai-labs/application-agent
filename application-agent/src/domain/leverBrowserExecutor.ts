@@ -1367,7 +1367,19 @@ function careerBlockerMatchesField(blocker: CareerBlocker, field: ApplicationFie
   if (blocker.kind !== "unknown_form_field") return true;
   const expectedPrompt = blockerEvidenceValue(blocker, "question-prompt:");
   const actualPrompt = field.questionDescriptor?.promptText;
-  if (!expectedPrompt || !actualPrompt || normalized(expectedPrompt) !== normalized(actualPrompt)) return false;
+  if (!expectedPrompt && !actualPrompt) {
+    // Some controls never expose a prompt container (Greenhouse custom text
+    // questions report question-source:unavailable). Without this branch the
+    // candidate's answer could never match: the agent re-asked the Sparksoft
+    // clearance question after every reply. The same control id, exact label
+    // and type identify the same question.
+    const expectedLabel = blockerEvidenceValue(blocker, "field-label:");
+    const expectedType = blockerEvidenceValue(blocker, "field-type:");
+    if (blocker.field !== field.id || !expectedLabel || normalized(expectedLabel) !== normalized(field.label) ||
+      (expectedType !== undefined && expectedType !== field.type)) return false;
+  } else if (!expectedPrompt || !actualPrompt || normalized(expectedPrompt) !== normalized(actualPrompt)) {
+    return false;
+  }
 
   const expectedSection = blockerEvidenceValue(blocker, "question-section:");
   if (expectedSection) {
