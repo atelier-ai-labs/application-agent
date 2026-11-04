@@ -212,6 +212,14 @@ The timer fires at 17:30 (edit `OnCalendar` in the timer) and catches up after t
 
 While any application waits on your DONE (Submit was clicked but the page never confirmed) or waits at Submit, the agent service checks Gmail (read-only) every 3 minutes for a "thanks for applying" / "application received" email. An email that names the employer (in the sender or subject) and arrives after the application started marks that job Applied, exactly as DONE would: it records the submission, confirms the queue row, closes the open Slack question, and posts a one-line notice. When several waiting jobs are at the same company, the email must name the role; otherwise nothing changes and the agent tells you to reply DONE on the right one. Rejections and older emails are never counted. Set `ATELIER_CAREER_AGENT_RECEIPT_WATCH=disabled` to turn it off.
 
+### Form replay
+
+Every real form the agent opens is saved (labels, types, options, question text; never answers) to `.local/career-agent/form-snapshots/`. `npm run career-agent:replay` runs each saved form through the real executor with a pretend browser, using the current profile and answer bank, and prints per form how many fields the agent fills, how many the answer bank covers, and which questions would still go to Slack. Nothing is opened or submitted.
+
+`-- --save-baseline` records the result; later runs list fields that got worse (regressions; the command exits 1), better, or now filled with a different value. Run it before and after changing answer rules. `--with-model` also uses the local model for low-risk matches; `--quiet` hides the per-question lines.
+
+`npm run career-agent:capture -- --from-history` (or `-- --url <application url>`) saves snapshots by opening forms in a hidden browser and only reading them: nothing is typed, uploaded, or submitted. Closed postings are skipped. Rippling forms need an Apply click, so they are saved only during live runs. `ATELIER_FORM_SNAPSHOTS=disabled` stops saving snapshots during live runs.
+
 ### Answer bank
 
 Every answer you give in Slack to an employer's form question is saved to `.local/career-agent/answer-bank.json`. Before the agent asks you anything, it checks the bank:

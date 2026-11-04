@@ -1,3 +1,4 @@
+import { DEFAULT_FORM_SNAPSHOT_DIR } from "../formSnapshots/formSnapshot";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createPlaywrightLeverBrowserExecutor } from "../createLeverBrowserExecutor";
 import type { ApplicationExecutor } from "../../src/domain/executor";
@@ -409,6 +410,10 @@ export function createConfiguredExecutionHostServer(
     allowAutomaticSubmission: config.submissionAuthority === "automatic" && !config.preparationOnly,
     ...(options.now ? { now: options.now } : {}),
     ...(securityCodes ? { securityCodeProvider: (since: number) => securityCodes.waitForCode(since) } : {}),
+    // Each real form's first read is kept (labels and options, never answers) for career-agent:replay.
+    ...((env as Record<string, string | undefined>).ATELIER_FORM_SNAPSHOTS?.trim() === "disabled"
+      ? {}
+      : { formSnapshotDir: (env as Record<string, string | undefined>).ATELIER_FORM_SNAPSHOT_DIR?.trim() || DEFAULT_FORM_SNAPSHOT_DIR }),
   });
   return createExecutionHostServer({
     executor,

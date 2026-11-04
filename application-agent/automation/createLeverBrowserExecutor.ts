@@ -4,6 +4,7 @@ import {
 } from "../src/domain/leverBrowserExecutor";
 import { PlaywrightLeverBrowserSessionFactory, type PlaywrightLeverBrowserOptions } from "./playwrightLeverBrowserSession";
 import { isUsableResumeArtifact } from "./resume/resumeArtifact";
+import { FormSnapshotStore, recordingSessionFactory } from "./formSnapshots/formSnapshot";
 
 export interface CreatePlaywrightLeverExecutorOptions extends PlaywrightLeverBrowserOptions {
   /** The existing browser policy can target a supported ATS or infer a verified destination. */
@@ -13,6 +14,8 @@ export interface CreatePlaywrightLeverExecutorOptions extends PlaywrightLeverBro
   allowedFieldClassifications?: LeverBrowserExecutorOptions["allowedFieldClassifications"];
   /** Explicit server-side opt-in; campaign authority must also be automatic. */
   allowAutomaticSubmission?: boolean;
+  /** Folder where the first read of each real form is saved for replay; omit to save none. */
+  formSnapshotDir?: string;
 }
 
 async function fileExists(path: string): Promise<boolean> {
@@ -36,9 +39,11 @@ export function createPlaywrightLeverBrowserExecutor(
     allowedFieldClassifications,
     allowAutomaticSubmission,
     securityCodeProvider,
+    formSnapshotDir,
   } = options;
+  const sessions = new PlaywrightLeverBrowserSessionFactory({ headless, slowMo, timeoutMs, ...(securityCodeProvider ? { securityCodeProvider } : {}) });
   return new LeverBrowserExecutor({
-    sessionFactory: new PlaywrightLeverBrowserSessionFactory({ headless, slowMo, timeoutMs, ...(securityCodeProvider ? { securityCodeProvider } : {}) }),
+    sessionFactory: formSnapshotDir ? recordingSessionFactory(sessions, new FormSnapshotStore(formSnapshotDir)) : sessions,
     ...(provider ? { provider } : {}),
     ...(resumePaths ? { resumePaths } : {}),
     resumeFileExists: fileExists,
