@@ -657,7 +657,15 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
           return applied;
         };
         const storage = this.stateStorage as { withExclusiveLockAsync?: <R>(operation: () => Promise<R>) => Promise<R> } | undefined;
-        const applied = storage?.withExclusiveLockAsync ? await storage.withExclusiveLockAsync(confirm) : await confirm();
+        let applied: CareerJob | undefined;
+        try {
+          applied = storage?.withExclusiveLockAsync ? await storage.withExclusiveLockAsync(confirm) : await confirm();
+        } catch (error) {
+          // One job that cannot be confirmed this way (for example, one older
+          // than the submission fence) must not stop the remaining emails.
+          console.warn(`[career-agent-receipts] ${job.job.company}: ${error instanceof Error ? error.message.slice(0, 200) : "confirmation failed"}; reply DONE instead`);
+          continue;
+        }
         if (!applied) continue;
         const queueNote = await this.confirmQueueRowForAppliedJob(applied.id).catch(() => "the queue row could not be updated; confirm it in the Sheet");
         result.confirmed.push(`${applied.job.company} — ${applied.job.title}`);

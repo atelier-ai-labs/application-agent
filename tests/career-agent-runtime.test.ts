@@ -615,6 +615,32 @@ describe("background Career Agent runtime", () => {
     }
   });
 
+  it("keeps checking receipts when one waiting job cannot be confirmed from email", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "atelier-career-receipt-nofence-"));
+    try {
+      const authority = new DurableSubmissionAuthority("runtime-worker", { stateFile: join(directory, "submission.json") });
+      let company = "";
+      const runtime = new BackgroundCareerAgentRuntimeImpl({
+        ...runtimeOptions(join(directory, "state.json"), new ReadyExecutor(), new InMemoryNotificationAdapter()),
+        submissionAuthority: authority,
+        receiptInbox: { recentEmails: async () => [{ id: "r1", receivedAt: "2026-09-01T12:05:00.000Z", from: "no-reply@ashbyhq.com", subject: `Thanks for applying to ${company}`, text: "" }] },
+      });
+      const campaign = runtime.createCampaign({ ...campaignInput(), submissionPolicy: { authority: "automatic", requireExplicitApproval: false } });
+      runtime.service.activateCampaign(campaign.id);
+      await runtime.service.processCuratedJob(campaign.id, { ...listing().input, isExample: false, sourceUrl: "https://jobs.lever.co/acme/post-2", applicationUrl: "https://jobs.lever.co/acme/post-2/apply", rawText: "Acme\nData Platform Engineer\nRemote United States\n" });
+      const original = runtime.service.listJobs(campaign.id)[0]!;
+      company = original.job.company;
+      // Waiting on DONE, but no submission fence exists (an application older than the fence).
+      const blocker = { id: "submission-confirmation", kind: "external_verification", unit: "submission", field: "submission-confirmation", question: "Verify whether the application was submitted", evidence: ["submit:clicked; confirmation:not-detected"], questionProvenance: "POLICY", context: { jobId: original.id, applicationId: original.applicationId, company: original.job.company, role: original.job.title }, reason: "Unknown result", status: "open", createdAt: capturedAt, resumeAfterHuman: false };
+      runtime.careerRepository.saveJob({ ...original, status: "needs_input", applicationStartedAt: "2026-09-01T12:00:00.000Z", blockers: [blocker as never] });
+
+      await expect(runtime.checkApplicationReceipts()).resolves.toEqual({ confirmed: [], ambiguous: [] });
+      expect(runtime.service.getJob(original.id).status).toBe("needs_input");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("accepts the persisted Mastra queue identity with mixed-case Ashby URLs before host execution", async () => {
     const directory = mkdtempSync(join(tmpdir(), "atelier-career-ashby-queue-"));
     try {
