@@ -316,6 +316,15 @@ describe("Autonomous Career Agent domain seams", () => {
     expect(at("Seattle, WA", "on-site")).toBe("reject");
   });
 
+  it("matches a Developer title, or a hyphenated one, to an Engineer role lane", () => {
+    const criteria = { roleLanes: ["Full Stack Engineer", "Frontend Engineer"], locations: [], remoteOnly: false, employmentTypes: [], excludedSeniorities: [], excludedCompanies: [] };
+    const at = (title: string) => applyHardFilters(posting("Sparksoft Corporation", title, ["React"], `lane-${title}`), criteria).decision;
+    expect(at("Jr. Full Stack Developer")).not.toBe("reject");
+    expect(at("Full-Stack Engineer")).not.toBe("reject");
+    expect(at("Front-End Developer")).not.toBe("reject");
+    expect(at("Data Analyst")).toBe("reject");
+  });
+
   it("applies deterministic hard filters and configurable qualitative pursuit policy", () => {
     const remoteJob = posting("Example Cloud Systems", "Cloud Platform Engineer", ["AWS"], "filter-1");
     const rejected = applyHardFilters(remoteJob, {

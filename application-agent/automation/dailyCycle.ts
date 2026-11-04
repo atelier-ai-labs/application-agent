@@ -163,7 +163,7 @@ const STATUS_WORDING: Record<string, string> = {
   "Ready to Submit": "ready for you to Submit",
   Submitted: "submitted",
   Confirmed: "submitted and confirmed",
-  Skipped: "skipped (not a fit for the form)",
+  Skipped: "skipped",
 };
 
 export function formatDailySummary(record: DailyRunRecord): string {
@@ -177,7 +177,7 @@ export function formatDailySummary(record: DailyRunRecord): string {
   if (a) {
     if ("error" in a) lines.push(`• Applying failed: ${a.error}`);
     else {
-      for (const app of a.started) lines.push(`• ${app.company} — ${app.role}: ${STATUS_WORDING[app.status] ?? app.status}${app.error && !STATUS_WORDING[app.status] ? ` (${app.error})` : ""}`);
+      for (const app of a.started) lines.push(`• ${app.company} — ${app.role}: ${STATUS_WORDING[app.status] ?? app.status}${app.error && (!STATUS_WORDING[app.status] || app.status === "Skipped") ? ` (${app.error})` : ""}`);
       if (a.skippedReason) lines.push(`• No applications started: ${a.skippedReason}.`);
       lines.push(`• ${a.waiting} more job${a.waiting === 1 ? "" : "s"} waiting in the queue.`);
     }

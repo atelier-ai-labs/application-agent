@@ -63,6 +63,22 @@ function matchingAny(value: string | undefined, choices: readonly string[]): boo
 }
 
 /**
+ * Employers title the same job "Engineer" or "Developer" and hyphenate
+ * freely ("Full-Stack", "Front-End"), so a lane matches any of those wordings.
+ */
+function roleTitleWording(value: string | undefined): string {
+  return normalized(value).replace(/\s*-\s*/g, " ").replace(/\bfront end\b/g, "frontend").replace(/\bdevelopers?\b/g, "engineer").replace(/\bengineers\b/g, "engineer");
+}
+
+function matchingRoleLane(title: string | undefined, lanes: readonly string[]): boolean {
+  const wording = roleTitleWording(title);
+  return lanes.some((lane) => {
+    const needle = roleTitleWording(lane);
+    return Boolean(wording && needle) && wording.includes(needle);
+  });
+}
+
+/**
  * A queue row may carry an explicit resume family selected for that posting.
  * Keep this mapping deliberately narrow: it adds only the known Agentic-AI
  * title aliases and only for an explicitly queue-selected job. The generic
@@ -143,7 +159,7 @@ export function applyHardFilters(job: JobPosting, criteria: SearchCriteria): Har
     };
   }
 
-  if (criteria.roleLanes.length > 0 && !matchingAny(job.title, criteria.roleLanes)) {
+  if (criteria.roleLanes.length > 0 && !matchingRoleLane(job.title, criteria.roleLanes)) {
     return {
       decision: "reject",
       reason: "Role title does not match any configured campaign role lane.",
