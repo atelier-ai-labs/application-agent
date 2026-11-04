@@ -482,6 +482,7 @@ export type CareerEventType =
   | "application.ready_to_submit"
   | "application.submitted"
   | "application.applied"
+  | "application.receipt_confirmed"
   | "application.failed"
   | "tracker.update_started"
   | "tracker.updated"

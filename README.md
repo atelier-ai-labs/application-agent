@@ -208,6 +208,10 @@ The timer fires at 17:30 (edit `OnCalendar` in the timer) and catches up after t
 
 `npm run career-agent:history` writes `.local/career-agent/history.html` from the agent's own event log: how many started applications reached Submit, the share of form fields the agent filled itself, questions sent to Slack per application, submits proven by the page versus confirmed by you, CAPTCHAs, failure reasons, inbox outcomes, and a collapsed step-by-step timeline per application. It lists questions, never answer values.
 
+### Confirmation emails replace DONE
+
+While any application waits on your DONE (Submit was clicked but the page never confirmed) or waits at Submit, the agent service checks Gmail (read-only) every 3 minutes for a "thanks for applying" / "application received" email. An email that names the employer (in the sender or subject) and arrives after the application started marks that job Applied, exactly as DONE would: it records the submission, confirms the queue row, closes the open Slack question, and posts a one-line notice. When several waiting jobs are at the same company, the email must name the role; otherwise nothing changes and the agent tells you to reply DONE on the right one. Rejections and older emails are never counted. Set `ATELIER_CAREER_AGENT_RECEIPT_WATCH=disabled` to turn it off.
+
 ### Answer bank
 
 Every answer you give in Slack to an employer's form question is saved to `.local/career-agent/answer-bank.json`. Before the agent asks you anything, it checks the bank:

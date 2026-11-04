@@ -562,6 +562,59 @@ describe("background Career Agent runtime", () => {
     }
   });
 
+  it("marks a job Applied from the employer's confirmation email, with no DONE reply", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "atelier-career-receipt-"));
+    try {
+      const authority = new DurableSubmissionAuthority("runtime-worker", { stateFile: join(directory, "submission.json") });
+      const tracker = new InMemoryJobTracker();
+      const notices: string[] = [];
+      const adapter = Object.assign(new InMemoryNotificationAdapter(), { publishInfoNotice: async (text: string) => { notices.push(text); } });
+      const emails = [
+        { id: "old", receivedAt: "2026-08-01T00:00:00.000Z", from: "Acme <no-reply@ashbyhq.com>", subject: "Thanks for applying to Acme", text: "We received your application." },
+        { id: "new", receivedAt: "2026-09-01T12:05:00.000Z", from: "Acme <no-reply@ashbyhq.com>", subject: "Thanks for applying to Acme", text: "Thank you for applying for the Data Platform Engineer role." },
+      ];
+      let reads = 0;
+      const runtime = new BackgroundCareerAgentRuntimeImpl({
+        ...runtimeOptions(join(directory, "state.json"), new ReadyExecutor(), adapter),
+        tracker,
+        submissionAuthority: authority,
+        receiptInbox: { recentEmails: async (_days, options) => { reads += 1; return emails.filter((email) => !options?.skipIds?.has(email.id)); } },
+      });
+      const campaign = runtime.createCampaign({ ...campaignInput(), submissionPolicy: { authority: "automatic", requireExplicitApproval: false } });
+      runtime.service.activateCampaign(campaign.id);
+      expect(await runtime.checkApplicationReceipts()).toEqual({ confirmed: [], ambiguous: [] });
+      expect(reads).toBe(0);
+
+      const input = { ...listing().input, isExample: false, sourceUrl: "https://jobs.lever.co/acme/post-1", applicationUrl: "https://jobs.lever.co/acme/post-1/apply", rawText: "Acme\nData Platform Engineer\nRemote United States\n" };
+      await runtime.service.processCuratedJob(campaign.id, input);
+      const original = runtime.service.listJobs(campaign.id)[0]!;
+      const blocker = { id: "submission-confirmation", kind: "external_verification" as const, unit: "submission" as const, field: "submission-confirmation", question: "Verify whether the application was submitted", evidence: ["submit:clicked; confirmation:not-detected"], questionProvenance: "POLICY" as const, context: { jobId: original.id, applicationId: original.applicationId, company: original.job.company, role: original.job.title }, reason: "Unknown result", status: "open" as const, createdAt: capturedAt, resumeAfterHuman: false };
+      runtime.careerRepository.saveJob({ ...original, status: "needs_input", applicationStartedAt: "2026-09-01T12:00:00.000Z", blockers: [blocker as never] });
+      const fence = authority.claim(original.applicationId!, original.id, capturedAt);
+      authority.beforeClick(fence, capturedAt);
+      authority.markUnknown(fence, capturedAt);
+      let counter = 0;
+      const created = attentionEventForCareerBlocker({ campaignId: campaign.id, jobId: original.id, blocker: blocker as never, createdAt: capturedAt, createId: (prefix) => `${prefix}-${(counter += 1)}` })!;
+      const stored = runtime.service.getCampaign(campaign.id);
+      runtime.careerRepository.saveCampaign({ ...stored, attentionEvents: [...(stored.attentionEvents ?? []), created.record] });
+
+      for (const email of emails) email.subject = email.subject.replace("Acme", original.job.company);
+      expect(await runtime.checkApplicationReceipts()).toEqual({ confirmed: [`${original.job.company} — ${original.job.title}`], ambiguous: [] });
+      expect(runtime.service.getJob(original.id).status).toBe("applied");
+      expect(authority.reconcile(original.applicationId!, original.id)).toMatchObject({ state: "submitted" });
+      expect(tracker.listUpdates()).toHaveLength(1);
+      expect(runtime.service.listAttentionEvents(campaign.id).map((event) => event.status)).toEqual(["cancelled"]);
+      expect(runtime.service.listEvents(campaign.id).some((event) => event.type === "application.receipt_confirmed")).toBe(true);
+      expect(notices).toEqual([expect.stringContaining("so I marked it Applied")]);
+
+      // Nothing is waiting any more, so the inbox is not read again.
+      await runtime.checkApplicationReceipts();
+      expect(reads).toBe(1);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("accepts the persisted Mastra queue identity with mixed-case Ashby URLs before host execution", async () => {
     const directory = mkdtempSync(join(tmpdir(), "atelier-career-ashby-queue-"));
     try {

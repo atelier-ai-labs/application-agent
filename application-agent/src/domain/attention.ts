@@ -124,6 +124,8 @@ export interface NotificationAdapter {
   publishExpiredSessionNotice?(event: AttentionEvent): Promise<void>;
   /** One-way notice that a queue row needs the human to open its link. */
   publishQueueHandoffNotice?(notice: QueueHandoffNotice): Promise<void>;
+  /** A plain one-line notice with no buttons (for example, "marked Applied"). */
+  publishInfoNotice?(text: string): Promise<void>;
   /** Pre-submit review of one prepared application with an explicit Submit action. */
   publishSubmissionReview?(notice: SubmissionReviewNotice): Promise<void>;
 }

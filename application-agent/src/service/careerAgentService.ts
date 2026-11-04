@@ -112,6 +112,7 @@ import {
   youHiredPostingId,
 } from "../domain/jobUrlClassifier";
 import { isVerifiedAshbyApplicationUrl, isVerifiedAshbyHostedUrl } from "../domain/jobUrlClassifier";
+import { isPostSubmitHumanCheck } from "../domain/applicationReceipt";
 import { answerBankKey, answerRiskTier, findAnswerBankMatch, isBankableQuestion, questionFromBlocker, withRecordedAnswer, type AnswerBankSemanticMatcher, type AnswerBankStore } from "../domain/answerBank";
 import { isVerifiedLeverApplicationUrl, isVerifiedLeverHostedUrl } from "../domain/leverJobSource";
 
@@ -735,18 +736,6 @@ export interface DailyHuntProcessingResult {
   items: readonly DailyHuntProcessingItem[];
   processed: number;
   skipped: number;
-}
-
-/**
- * A question asked after Submit was already clicked and not confirmed: either
- * "did it go through?" or a CAPTCHA the provider raised on Submit. Its Slack
- * prompt says DONE means the page showed the application as submitted.
- */
-function isPostSubmitHumanCheck(blocker: CareerBlocker): boolean {
-  if (blocker.resumeAfterHuman !== false) return false;
-  if (!blocker.evidence.some((item) => item === "submit:clicked" || item.includes("submit:clicked;"))) return false;
-  return (blocker.kind === "external_verification" && blocker.unit === "submission" && blocker.field === "submission-confirmation") ||
-    blocker.kind === "captcha";
 }
 
 export class CareerAgentService {
@@ -3110,6 +3099,21 @@ export class CareerAgentService {
     this.appendEvent(campaign.id, "application.applied", careerEventMetadata(applied, undefined, "manual"));
     applied = await this.syncTrackerForAppliedJob(campaign, applied, appliedApplication, evidence, "tracker.update_started");
     return applied;
+  }
+
+  /**
+   * After a "thanks for applying" email confirmed a job, close its open Slack
+   * questions (the DONE prompt or the Submit review) and log which email it was.
+   */
+  recordReceiptConfirmation(campaignId: string, jobId: string, receipt: { subject: string; receivedAt: string }): void {
+    const job = this.getJob(jobId);
+    if (job.campaignId !== campaignId || job.status !== "applied") throw new Error("Only an Applied job can record a receipt confirmation.");
+    this.markAttentionEventsForJob(campaignId, jobId, "cancelled");
+    this.appendEvent(campaignId, "application.receipt_confirmed", {
+      ...careerEventMetadata(job),
+      emailSubject: receipt.subject.slice(0, 120),
+      emailReceivedAt: receipt.receivedAt,
+    });
   }
 
   /** Correct an explicitly identified false manual-submission confirmation. */

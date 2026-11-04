@@ -57,6 +57,9 @@ import { resolveSlackConfig, type SlackEnvironment } from "../slack/config";
 import { createPlaywrightLeverBrowserExecutor } from "../createLeverBrowserExecutor";
 import { OllamaApplicationAnswerDraftGenerator } from "../answerDraft/ollamaApplicationAnswerDraftGenerator";
 import { FileAnswerBankStore } from "../answerBank/fileAnswerBankStore";
+import { isAwaitingReceipt, matchReceiptToJob } from "../../src/domain/applicationReceipt";
+import { gmailInbox, type InboxSource } from "../gmailInbox";
+import { createGoogleOAuthAccessTokenProvider, gmailSecurityCodesEnabled, resolveGoogleAuthMode } from "../googleOAuth";
 import { createOllamaAnswerBankMatcher } from "../answerBank/ollamaAnswerBankMatcher";
 import { isUsableResumeArtifact } from "../resume/resumeArtifact";
 import { normalizeJobSearchIntent, type JobSearchIntent } from "../../src/domain/searchIntent";
@@ -140,6 +143,9 @@ export interface BackgroundCareerAgentRuntimeOptions {
   applicationAnswerDraftGenerator?: import("../../src/domain/applicationAnswerDraft").ApplicationAnswerDraftGenerator;
   answerBank?: import("../../src/domain/answerBank").AnswerBankStore;
   answerBankMatcher?: import("../../src/domain/answerBank").AnswerBankSemanticMatcher;
+  /** Read-only inbox checked for "thanks for applying" emails while a job waits on DONE. */
+  receiptInbox?: InboxSource;
+  receiptPollIntervalMs?: number;
   defaultCampaignInput?: CreateCampaignInput;
   now?: () => string;
   createId?: CareerAgentServiceOptions["createId"];
@@ -444,11 +450,18 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
   private readonly hostPollTimeoutMs: number;
   private readonly submissionAuthority?: DurableSubmissionAuthority;
   private readonly confirmQueueRow?: (job: CareerJob) => Promise<string | undefined>;
+  private readonly receiptInbox?: InboxSource;
+  private readonly receiptPollIntervalMs: number;
+  private readonly seenReceiptEmails = new Set<string>();
+  private receiptTimer?: ReturnType<typeof setInterval>;
+  private receiptCheckRunning = false;
   private started = false;
   private stopped = false;
 
   constructor(options: BackgroundCareerAgentRuntimeOptions) {
     this.profile = options.profile;
+    this.receiptInbox = options.receiptInbox;
+    this.receiptPollIntervalMs = positiveInteger(options.receiptPollIntervalMs, 3 * 60_000, "Career Agent receipt poll interval");
     this.confirmQueueRow = options.confirmQueueRow;
     const storage = options.stateStorage ?? new FileKeyValueStorage(options.stateFilePath ?? DEFAULT_CAREER_AGENT_STATE_FILE);
     this.stateStorage = storage;
@@ -516,6 +529,14 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
       await this.service.publishPendingAttentionEvents();
       this.started = true;
       await this.resumePendingAttentionContinuations();
+      if (this.receiptInbox) {
+        this.receiptTimer = setInterval(() => {
+          void this.checkApplicationReceipts().catch((error: unknown) => {
+            console.warn(`[career-agent-receipts] check failed: ${error instanceof Error ? error.message.slice(0, 200) : "unknown error"}`);
+          });
+        }, this.receiptPollIntervalMs);
+        this.receiptTimer.unref?.();
+      }
     } catch (error) {
       await this.notification?.stop?.();
       throw error;
@@ -525,6 +546,7 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
   async stop(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    if (this.receiptTimer) clearInterval(this.receiptTimer);
     await this.notification?.stop?.();
     const applicationIds = [
       ...new Set(
@@ -596,6 +618,58 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
 
   confirmManualApplication(campaignId: string, jobId: string): Promise<CareerJob> {
     return this.service.confirmManualApplication(campaignId, jobId, this.submissionAuthority);
+  }
+
+  /**
+   * While any job waits on DONE (or on Submit), look for the employer's
+   * "thanks for applying" email. A receipt that names one waiting job marks
+   * it Applied exactly as DONE would; an ambiguous one is reported once and
+   * changes nothing.
+   */
+  async checkApplicationReceipts(): Promise<{ confirmed: string[]; ambiguous: string[] }> {
+    const result = { confirmed: [] as string[], ambiguous: [] as string[] };
+    if (!this.receiptInbox || this.receiptCheckRunning) return result;
+    this.receiptCheckRunning = true;
+    try {
+      (this.stateStorage as { reload?: () => void } | undefined)?.reload?.();
+      if (!this.service.listJobs().some(isAwaitingReceipt)) return result;
+      const emails = [...await this.receiptInbox.recentEmails(2, { skipIds: this.seenReceiptEmails, maxResults: 25 })]
+        .sort((left, right) => left.receivedAt.localeCompare(right.receivedAt));
+      for (const email of emails) {
+        this.seenReceiptEmails.add(email.id);
+        (this.stateStorage as { reload?: () => void } | undefined)?.reload?.();
+        const match = matchReceiptToJob(email, this.service.listJobs());
+        if (match.kind === "none") continue;
+        if (match.kind === "ambiguous") {
+          result.ambiguous.push(email.subject);
+          await this.notification?.adapter.publishInfoNotice?.(
+            `A "thanks for applying" email arrived ("${email.subject.slice(0, 100)}"), but it could be for ${match.jobs.map((job) => `${job.job.company} — ${job.job.title}`).join(" or ")}. Reply DONE on the right one.`,
+          ).catch(() => undefined);
+          continue;
+        }
+        const job = match.job;
+        const confirm = async () => {
+          (this.stateStorage as { reload?: () => void } | undefined)?.reload?.();
+          const current = this.service.getJob(job.id);
+          if (!isAwaitingReceipt(current)) return undefined;
+          const applied = await this.confirmManualApplication(current.campaignId, current.id);
+          this.service.recordReceiptConfirmation(current.campaignId, current.id, email);
+          return applied;
+        };
+        const storage = this.stateStorage as { withExclusiveLockAsync?: <R>(operation: () => Promise<R>) => Promise<R> } | undefined;
+        const applied = storage?.withExclusiveLockAsync ? await storage.withExclusiveLockAsync(confirm) : await confirm();
+        if (!applied) continue;
+        const queueNote = await this.confirmQueueRowForAppliedJob(applied.id).catch(() => "the queue row could not be updated; confirm it in the Sheet");
+        result.confirmed.push(`${applied.job.company} — ${applied.job.title}`);
+        await this.notification?.adapter.publishInfoNotice?.(
+          `${applied.job.company} — ${applied.job.title}: their confirmation email arrived ("${email.subject.slice(0, 100)}"), so I marked it Applied. No DONE needed.${queueNote && !/confirmed/i.test(queueNote) ? ` (${queueNote})` : ""}`,
+        ).catch(() => undefined);
+        console.info(`[career-agent-receipts] ${applied.job.company} marked Applied from a confirmation email`);
+      }
+      return result;
+    } finally {
+      this.receiptCheckRunning = false;
+    }
   }
 
   correctFalseManualSubmissionConfirmation(campaignId: string, jobId: string, reason?: string): CareerJob {
@@ -1117,6 +1191,7 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
         }
       : {}),
     ...createConfiguredAnswerBank(env),
+    ...createConfiguredReceiptInbox(env),
     notification: {
       adapter: slack,
       hydrate: (events) => {
@@ -1174,6 +1249,22 @@ function createConfiguredAnswerBank(env: Partial<Record<"ATELIER_CAREER_AGENT_AN
     answerBank: new FileAnswerBankStore(env.ATELIER_CAREER_AGENT_ANSWER_BANK_FILE?.trim() || undefined),
     ...(model ? { answerBankMatcher: createOllamaAnswerBankMatcher({ model, ...(baseUrl ? { baseUrl } : {}) }) } : {}),
   };
+}
+
+/**
+ * Confirmation emails are read from Gmail (read-only) when Gmail access is on
+ * and Google uses OAuth; ATELIER_CAREER_AGENT_RECEIPT_WATCH=disabled turns it off.
+ */
+function createConfiguredReceiptInbox(env: BackgroundCareerAgentEnvironment) {
+  if ((env as Record<string, string | undefined>).ATELIER_CAREER_AGENT_RECEIPT_WATCH?.trim() === "disabled") return {};
+  try {
+    const googleEnv = env as never;
+    if (!gmailSecurityCodesEnabled(googleEnv) || resolveGoogleAuthMode(googleEnv).mode !== "oauth") return {};
+    const tokens = createGoogleOAuthAccessTokenProvider(googleEnv, 10_000);
+    return { receiptInbox: gmailInbox(() => tokens.getAccessToken()) };
+  } catch {
+    return {};
+  }
 }
 
 function createConfiguredApplicationAnswerDraftGenerator(

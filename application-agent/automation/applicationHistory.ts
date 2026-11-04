@@ -132,6 +132,7 @@ function describe(event: CareerEvent): { label: string; tone: Tone } | undefined
     case "application.ready_to_submit": return { label: "Ready for your Submit tap", tone: "ok" };
     case "application.submitted": return { label: "Submit clicked", tone: "ok" };
     case "application.applied": return { label: m.reason === "external" ? "Applied: confirmed on the page" : "Applied: confirmed by you", tone: "ok" };
+    case "application.receipt_confirmed": return { label: "Confirmation email arrived (counted as your DONE)", tone: "ok" };
     case "application.execution_failed": return { label: "Browser run failed", tone: "bad" };
     case "application.failed": return { label: `Failed: ${shortReason(m.reason)}`, tone: "bad" };
     case "application.execution_cancelled": return { label: "Browser run cancelled", tone: "info" };
