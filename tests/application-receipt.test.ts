@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isAwaitingReceipt, matchReceiptToJob, type ReceiptEmail } from "../application-agent/src/domain/applicationReceipt";
+import { isAwaitingReceipt, isPostSubmitHumanCheck, matchReceiptToJob, type ReceiptEmail } from "../application-agent/src/domain/applicationReceipt";
 import type { CareerJob } from "../application-agent/src/domain/campaignTypes";
 
 const postSubmit = { id: "b", kind: "external_verification", unit: "submission", field: "submission-confirmation", question: "Verify", evidence: ["submit:clicked; confirmation:not-detected"], status: "open", resumeAfterHuman: false, context: {}, reason: "", createdAt: "2026-11-03T22:40:00.000Z" };
@@ -16,6 +16,15 @@ describe("application receipt emails", () => {
     expect(isAwaitingReceipt(job("a", "Phantom", "AI Engineer", { status: "ready_to_submit", blockers: [] }))).toBe(true);
     expect(isAwaitingReceipt(job("a", "Phantom", "AI Engineer", { blockers: [{ ...postSubmit, kind: "unknown_form_field", evidence: [], resumeAfterHuman: true }] as never }))).toBe(false);
     expect(isAwaitingReceipt(job("a", "Phantom", "AI Engineer", { status: "applied" }))).toBe(false);
+  });
+
+  it("treats a login or emailed-code wall after Submit as a submitted application awaiting DONE", () => {
+    // Sparksoft: Submit, then Greenhouse's "verification code" page, handed off as external_login.
+    const codeWall = { ...postSubmit, kind: "external_login", unit: "external", field: undefined, evidence: ["executor:greenhouse-browser", "submit:clicked", "password-fields:0"] };
+    expect(isPostSubmitHumanCheck(codeWall as never)).toBe(true);
+    // A login wall before any Submit click is not a submission.
+    expect(isPostSubmitHumanCheck({ ...codeWall, evidence: ["password-fields:1", "submit:not-clicked"] } as never)).toBe(false);
+    expect(isPostSubmitHumanCheck({ ...codeWall, resumeAfterHuman: true } as never)).toBe(false);
   });
 
   it("confirms the one waiting job a receipt names", () => {

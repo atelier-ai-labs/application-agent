@@ -28,8 +28,10 @@ export type ReceiptMatch =
 export function isPostSubmitHumanCheck(blocker: CareerBlocker): boolean {
   if (blocker.resumeAfterHuman !== false) return false;
   if (!blocker.evidence.some((item) => item === "submit:clicked" || item.includes("submit:clicked;"))) return false;
+  // A login/emailed-code wall after the click (Greenhouse's security code) is
+  // the same unknown outcome: DONE confirms it rather than resuming the form.
   return (blocker.kind === "external_verification" && blocker.unit === "submission" && blocker.field === "submission-confirmation") ||
-    blocker.kind === "captcha";
+    blocker.kind === "captcha" || blocker.kind === "external_login";
 }
 
 /** Jobs a receipt may confirm: waiting on DONE after Submit, or waiting at Submit. */
