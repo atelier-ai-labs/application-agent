@@ -1250,7 +1250,10 @@ function answerAliases(classification: ApplicationFieldClassification, text: str
       if (hasPhrase(text, /email|e-mail/)) return ["email"];
       if (hasPhrase(text, /phone|telephone|mobile/)) return ["phone"];
       if (hasPhrase(text, /\b(?:location|city|state|country)\b/)) return ["location"];
-      return ["name"];
+      // Only a field that asks for a name gets the full name: an unmatched
+      // contact field (a reference's email, "Preferred first name") does not.
+      if (hasPhrase(text, /\bpreferred\b|\bnickname\b/)) return [];
+      return hasPhrase(text, /\bfull name\b|^name\b|\byour name\b|\blegal name\b/) ? ["name"] : [];
     case "employment_history": return ["employment_history"];
     case "location": return ["location"];
     default: return [];
@@ -1271,30 +1274,36 @@ function answerForField(
   field: ApplicationFieldDescriptor,
   answers: readonly ApplicationAnswer[],
 ): ApplicationAnswer | undefined {
+  // A reference's or referrer's details are someone else's, never a prepared answer.
+  if (/\breferences?\b/.test(sectionTitleOf(field)) ||
+    hasPhrase(inspectedPromptText(field), /\breferr(?:ed|al)\b|\breferences?\b|\bsupervisors?\b|\bemergency contact\b/)) return undefined;
   const text = normalized(`${field.id} ${field.label}`);
   const aliases = new Set(answerAliases(field.classification, text));
   const direct = answers.find((answer) => aliases.has(answer.field) &&
     (field.classification !== "free_text" || subjectiveAnswerMatchesPrompt(field, answer)));
   if (direct) return direct;
 
-  // Free-text drafts are question-specific. Once the exact prompt has been
-  // inspected, never let loose token matching reuse a generic draft for a
-  // different behavioral or personalized employer question.
-  if (field.classification === "free_text") return undefined;
-
-  // Consequential categories may only use their exact answer alias (and the
-  // resolved blocker path); loose token matching can cross-match unrelated
-  // prepared answers such as employment summaries.
-  if (["work_authorization", "sponsorship", "salary", "relocation", "travel", "demographic", "legal_attestation"].includes(field.classification)) {
+  // A shared word is not the same question: substring matching once typed the
+  // skills list into "Do you hold an active security clearance? If yes..." and
+  // the candidate's name into "the name of your first pet". Only a custom
+  // prepared answer whose own key names the field ("marketing" for "Marketing
+  // consent") may match, as whole words; the standard profile answers above
+  // reach a field only through their explicit aliases.
+  if (["free_text", "work_authorization", "sponsorship", "salary", "relocation", "travel", "demographic", "legal_attestation"].includes(field.classification)) {
     return undefined;
   }
-
-  const tokens = normalizedTokens(text);
+  const words = ` ${normalizedTokens(text).join(" ")} `;
   return answers.find((answer) => {
-    const answerText = normalized(`${answer.field} ${answer.question ?? ""}`);
-    return tokens.length > 0 && tokens.some((token) => answerText.includes(token));
+    if (STANDARD_PREPARED_ANSWERS.has(answer.field)) return false;
+    const key = normalizedTokens(answer.field.replace(/_/g, " ")).join(" ");
+    return key.length > 2 && words.includes(` ${key} `);
   });
 }
+
+const STANDARD_PREPARED_ANSWERS = new Set([
+  "name", "email", "phone", "location", "employment_history", "verified_skills", "why_company", "cover_letter",
+  "salary_expectations", "relocation", "travel", "sponsorship", "demographic_disclosure", "legal_attestations",
+]);
 
 function subjectiveAnswerMatchesPrompt(
   field: ApplicationFieldDescriptor,
@@ -1546,6 +1555,9 @@ function profileValueForField(
     if (namePart === "last") return name.last;
     if (hasPhrase(text, /email|e-mail/)) return profile.identity.email ?? undefined;
     if (hasPhrase(text, /phone|telephone|mobile/)) return profile.identity.phone ?? undefined;
+    // "Full Name (Preferred)" with help text "What preferred first and last
+    // name do you go by?" asks for the whole name, not the last one.
+    if (hasPhrase(fieldText(field), /\bfull name\b/) || hasPhrase(text, /\bfirst and last name\b/)) return name.full;
     if (hasPhrase(text, /last name|family name|surname/)) return name.last;
     if (hasPhrase(text, /first name|given name/)) return name.first;
     return name.full;

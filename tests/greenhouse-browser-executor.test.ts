@@ -777,6 +777,22 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(result.state).toBe("ready_to_submit");
   });
 
+  it("never pours a prepared answer into an unrelated question (skills into a clearance box, your name into a reference)", async () => {
+    const clearance = new FakeField({ id: "question_13062993007", label: "Do you currently hold an active security clearance? If yes, please provide details. *", type: "text", required: true });
+    const referrer = new FakeField({ id: "question_referrer", label: "Were you referred by a Kapitus employee? If yes, please provide the employee's full name.", type: "text", required: true });
+    const refEmail = new FakeField({ id: "cards[r][field3]", label: "Email Address", type: "text", required: true, questionDescriptor: { sectionTitle: "References", promptText: "Email Address", sourceStrategy: "question_container", confidence: "high" } });
+    const session = new FakeSession([clearance, referrer, refEmail]);
+    const base = request(session);
+    const answers = [
+      { id: "answer:name", field: "name", question: "Full name", policy: "auto", value: "Nathaniel Magera", status: "resolved", provenance: ["profile:name"] },
+      { id: "answer:verified_skills", field: "verified_skills", question: "Verified skills", policy: "auto", value: "Terraform, Python (FastAPI), TypeScript", status: "resolved", provenance: ["profile:verified_skills"] },
+      { id: "answer:employment_history", field: "employment_history", question: "Employment history", policy: "auto", value: "Team Lead at Walmart", status: "resolved", provenance: ["profile:employment_history"] },
+    ] as Application["answers"];
+    await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" })
+      .execute({ ...base, application: { ...base.application, answers } });
+    expect([clearance.current, referrer.current, refEmail.current]).toEqual([null, null, null]);
+  });
+
   it("fills D.A. Davidson-style education and employment cards without misplacing values", async () => {
     const card = (id: string, sectionTitle: string, promptText: string, type: "text" | "textarea" = "text") =>
       new FakeField({ id: `cards[c][${id}]`, label: promptText, type, required: true, questionDescriptor: { sectionTitle, promptText, sourceStrategy: "question_container", confidence: "high" } });

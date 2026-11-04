@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Application } from "../../src/domain/types";
+import type { Application, ApplicationAnswer } from "../../src/domain/types";
 import type { Campaign, CareerBlockerDraft, CareerJob } from "../../src/domain/campaignTypes";
 import type { CandidateProfile } from "../../src/domain/types";
 import type {
@@ -8,6 +8,7 @@ import type {
 } from "../../src/domain/executor";
 import { LeverBrowserExecutor } from "../../src/domain/leverBrowserExecutor";
 import { normalizeJobPosting } from "../../src/domain/job";
+import { buildDraftAnswer, prepareApplicationAnswers } from "../../src/domain/answers";
 import { classifyJobUrl } from "../../src/domain/jobUrlClassifier";
 import { findAnswerBankMatch, questionFromBlocker, type AnswerBankEntry, type AnswerBankSemanticMatcher, type StandingRecordsLookup } from "../../src/domain/answerBank";
 import type { FormSnapshot } from "./formSnapshot";
@@ -98,7 +99,7 @@ class ReplaySession implements LeverBrowserSession {
 
 const ATS_NAME: Record<string, string> = { lever: "Lever", greenhouse: "Greenhouse", ashby: "Ashby", rippling: "Rippling", workday: "Workday", custom: "Custom" };
 
-function requestFor(snapshot: FormSnapshot, profile: CandidateProfile, now: string) {
+function requestFor(snapshot: FormSnapshot, profile: CandidateProfile, now: string, answers: readonly ApplicationAnswer[] = []) {
   const company = snapshot.company ?? "Unknown company";
   const role = snapshot.role ?? "Unknown role";
   const kind = classifyJobUrl(snapshot.url).kind;
@@ -108,7 +109,7 @@ function requestFor(snapshot: FormSnapshot, profile: CandidateProfile, now: stri
   const familyId = profile.resumeFamilies[0]?.id;
   const application = {
     id: `replay-${snapshot.applicationId}`, isExample: false, job, fit: null,
-    resume: { familyId } as Application["resume"], answers: [], blockers: [], status: "ready_for_review", createdAt: now, updatedAt: now,
+    resume: { familyId } as Application["resume"], answers, blockers: [], status: "ready_for_review", createdAt: now, updatedAt: now,
   } as unknown as Application;
   const careerJob = {
     id: `replay-job-${snapshot.applicationId}`, campaignId: "replay", isExample: false, sourceMode: "live", actionability: "actionable",
@@ -134,11 +135,20 @@ export function snapshotKey(snapshot: FormSnapshot): string {
 
 export async function replayForm(
   snapshot: FormSnapshot,
-  options: { profile: CandidateProfile; answerBank?: readonly AnswerBankEntry[]; matcher?: AnswerBankSemanticMatcher; records?: StandingRecordsLookup; now?: string; showValues?: boolean },
+  options: { profile: CandidateProfile; answerBank?: readonly AnswerBankEntry[]; matcher?: AnswerBankSemanticMatcher; records?: StandingRecordsLookup; now?: string; showValues?: boolean; answers?: readonly ApplicationAnswer[] },
 ): Promise<FormReplay> {
   const now = options.now ?? new Date().toISOString();
   const session = new ReplaySession(snapshot);
-  const { familyId, ...request } = requestFor(snapshot, options.profile, now);
+  const { familyId, ...request } = requestFor(snapshot, options.profile, now, options.answers);
+  // The live run carries the profile's prepared answers (skills, employment,
+  // sponsorship...) into the form. Replay must too, or a wrong prepared-answer
+  // match (the skills list typed into a security-clearance box) never shows.
+  if (!options.answers) {
+    const fit = { strongMatches: [], recommendedResumeFamily: familyId ?? "" } as unknown as Parameters<typeof prepareApplicationAnswers>[2];
+    const resume = { summary: "" } as unknown as Parameters<typeof prepareApplicationAnswers>[3];
+    const answers = await prepareApplicationAnswers(request.application.job, options.profile, fit, resume, async (context) => buildDraftAnswer(context));
+    (request.application as { answers: readonly ApplicationAnswer[] }).answers = answers;
+  }
   const executor = new LeverBrowserExecutor({
     sessionFactory: { open: async () => session },
     provider: "auto",

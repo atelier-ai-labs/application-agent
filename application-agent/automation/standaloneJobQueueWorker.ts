@@ -265,6 +265,10 @@ export function createCareerServiceQueueProcessor(service: CareerServiceQueueBou
         }
         throw error;
       }
+      // The ATS said the posting is gone: that is a closed job, not a failure to repair or retry.
+      if (careerJob.execution?.evidence?.includes("posting:unavailable")) {
+        return { status: "Expired", error: "The posting is no longer open (the job board returned not found or closed)." };
+      }
       if (careerJob.status === "failed") {
         if (recoverableBrowserInteractionError(careerJob.decisionReason)) {
           return { status: "Needs Input", error: "Browser select verification needs human review before this application can continue." };

@@ -291,6 +291,16 @@ describe("standalone queue command", () => {
     })).resolves.toMatchObject({ status: "Failed" });
   });
 
+  it("marks a posting the job board says is gone as Expired, not Failed", async () => {
+    const processor = createCareerServiceQueueProcessor({
+      processCuratedJob: async () => ({ status: "failed" as const, decisionReason: "The browser executor could not inspect this application form.",
+        execution: { status: "failed" as const, evidence: ["navigation:verified", "posting:job-not-found", "posting:unavailable"] }, blockers: [] } as never),
+    }, "campaign-1");
+    await expect(processor.process({
+      jobId: "job-ashby", company: "IFS Nexus Black", role: "AI Engineer (US)", jobLink: "https://jobs.ashbyhq.com/ifsnexusblack/d997cd2d-3e70-4a0a-a55b-60f08e75bc87/application", status: "Ready", workerId: "worker-1", leaseUntil: new Date(Date.now() + 60_000).toISOString(), attemptId: "attempt-1",
+    })).resolves.toMatchObject({ status: "Expired" });
+  });
+
   it("runs one claimed row through the processor and maps Needs Input", async () => {
     const transport = new QueueTransport([queueHeaders, queueRow()]);
     const queue = new GoogleSheetsJobQueue({ spreadsheetId: "s", spreadsheetName: "Queue", sheetTab: "Jobs", timeoutMs: 1000, leaseMs: 60_000 }, transport);
