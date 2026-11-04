@@ -818,7 +818,7 @@ describe("Greenhouse destination execution through the existing browser policy",
     const session = new RedirectingSession([]);
     const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute(request(session));
     expect(result.state).toBe("failed");
-    expect(result.inspection.evidence).toContain("posting:unavailable");
+    expect("inspection" in result ? result.inspection?.evidence : []).toContain("posting:unavailable");
     expect(isGreenhouseClosedPostingRedirect("https://job-boards.greenhouse.io/kapitus?error=true", "kapitus")).toBe(true);
     expect(isGreenhouseClosedPostingRedirect("https://job-boards.greenhouse.io/kapitus/jobs/4390052009", "kapitus")).toBe(false);
     expect(isGreenhouseClosedPostingRedirect("https://job-boards.greenhouse.io/other?error=true", "kapitus")).toBe(false);
