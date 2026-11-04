@@ -208,6 +208,18 @@ The timer fires at 17:30 (edit `OnCalendar` in the timer) and catches up after t
 
 `npm run career-agent:history` writes `.local/career-agent/history.html` from the agent's own event log: how many started applications reached Submit, the share of form fields the agent filled itself, questions sent to Slack per application, submits proven by the page versus confirmed by you, CAPTCHAs, failure reasons, inbox outcomes, and a collapsed step-by-step timeline per application. It lists questions, never answer values.
 
+### Answer bank
+
+Every answer you give in Slack to an employer's form question is saved to `.local/career-agent/answer-bank.json`. Before the agent asks you anything, it checks the bank:
+
+- **Low risk** (how you heard about the job, work region or location, self-ID questions, privacy notices): reused when the question is the same, worded similarly ("Before applying, how did you hear about X?"), or judged the same by the local model.
+- **Medium risk** (years of experience, travel, relocation, education, age): reused only for the same question, so "years with Python" never takes the answer to "years with React".
+- **High risk** (attestations, consent, salary, sponsorship and citizenship, conduct history, questions about that specific employer, dates, essays): never saved and never reused.
+
+The employer's name is replaced with `{company}`, so "How did you hear about Phantom?" also answers the same question from Sparksoft. A saved answer is used only when it is one of the form's options. An answer that names the employer is never saved.
+
+`npm run career-agent:answers` lists the bank. `-- --backfill` seeds it from answers on past applications (add `--dry-run` to preview). The file is plain JSON: change a `value`, or set `"disabled": true` to stop an answer from being reused. Edits apply on the next lookup. Set `ATELIER_CAREER_AGENT_ANSWER_BANK=disabled` to turn the bank off.
+
 ### Source discovery and ATS routing
 
 Discovery references are intentionally separate from full job extraction:

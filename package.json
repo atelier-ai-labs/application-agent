@@ -30,6 +30,7 @@
     "career-agent:discover": "vite-node application-agent/automation/discoverJobsRun.ts",
     "career-agent:inbox": "vite-node application-agent/automation/inboxRun.ts",
     "career-agent:daily": "vite-node application-agent/automation/dailyRun.ts",
+    "career-agent:answers": "vite-node application-agent/automation/answerBankCli.ts",
     "career-agent:history": "vite-node application-agent/automation/historyRun.ts"
   },
   "dependencies": {

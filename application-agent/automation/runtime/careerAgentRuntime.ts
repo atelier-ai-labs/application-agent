@@ -56,6 +56,8 @@ import { SlackNotificationAdapter } from "../slack/slackNotificationAdapter";
 import { resolveSlackConfig, type SlackEnvironment } from "../slack/config";
 import { createPlaywrightLeverBrowserExecutor } from "../createLeverBrowserExecutor";
 import { OllamaApplicationAnswerDraftGenerator } from "../answerDraft/ollamaApplicationAnswerDraftGenerator";
+import { FileAnswerBankStore } from "../answerBank/fileAnswerBankStore";
+import { createOllamaAnswerBankMatcher } from "../answerBank/ollamaAnswerBankMatcher";
 import { isUsableResumeArtifact } from "../resume/resumeArtifact";
 import { normalizeJobSearchIntent, type JobSearchIntent } from "../../src/domain/searchIntent";
 import { DEFAULT_CAREER_AGENT_STATE_FILE, FileKeyValueStorage } from "./fileKeyValueStorage";
@@ -96,6 +98,8 @@ export interface BackgroundCareerAgentEnvironment extends ExecutionHostEnvironme
   ATELIER_CAREER_AGENT_ANSWER_DRAFT_MODE?: string;
   ATELIER_CAREER_AGENT_OLLAMA_BASE_URL?: string;
   ATELIER_CAREER_AGENT_OLLAMA_MODEL?: string;
+  ATELIER_CAREER_AGENT_ANSWER_BANK?: string;
+  ATELIER_CAREER_AGENT_ANSWER_BANK_FILE?: string;
   ATELIER_CAREER_AGENT_OLLAMA_TIMEOUT_MS?: string;
 }
 
@@ -134,6 +138,8 @@ export interface BackgroundCareerAgentRuntimeOptions {
   hostPollTimeoutMs?: number;
   resumeArtifactAvailable?: (familyId: ResumeFamilyId) => boolean;
   applicationAnswerDraftGenerator?: import("../../src/domain/applicationAnswerDraft").ApplicationAnswerDraftGenerator;
+  answerBank?: import("../../src/domain/answerBank").AnswerBankStore;
+  answerBankMatcher?: import("../../src/domain/answerBank").AnswerBankSemanticMatcher;
   defaultCampaignInput?: CreateCampaignInput;
   now?: () => string;
   createId?: CareerAgentServiceOptions["createId"];
@@ -484,6 +490,8 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
               applicationAnswerDraftGenerator: options.applicationAnswerDraftGenerator,
             }
           : {}),
+        ...(options.answerBank ? { answerBank: options.answerBank } : {}),
+        ...(options.answerBankMatcher ? { answerBankMatcher: options.answerBankMatcher } : {}),
         ...(this.executionHost
           ? {
               resumeAttention: async (campaignId, jobId, options) => this.resumeHostExecution(campaignId, jobId, options),
@@ -1108,6 +1116,7 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
           applicationAnswerDraftGenerator: applicationAnswerDraftGenerator.generate.bind(applicationAnswerDraftGenerator),
         }
       : {}),
+    ...createConfiguredAnswerBank(env),
     notification: {
       adapter: slack,
       hydrate: (events) => {
@@ -1148,6 +1157,23 @@ function parsePositiveInteger(value: string | undefined, fallback: number, label
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${label} must be a positive integer.`);
   return parsed;
+}
+
+/**
+ * The answer bank is on unless ATELIER_CAREER_AGENT_ANSWER_BANK=disabled.
+ * When the local model is configured it also matches low-risk questions
+ * worded differently from the saved ones.
+ */
+function createConfiguredAnswerBank(env: Partial<Record<"ATELIER_CAREER_AGENT_ANSWER_BANK" | "ATELIER_CAREER_AGENT_ANSWER_BANK_FILE" | "ATELIER_CAREER_AGENT_OLLAMA_MODEL" | "ATELIER_CAREER_AGENT_OLLAMA_BASE_URL", string | undefined>>) {
+  const setting = env.ATELIER_CAREER_AGENT_ANSWER_BANK?.trim() || "enabled";
+  if (setting === "disabled") return {};
+  if (setting !== "enabled") throw new Error("ATELIER_CAREER_AGENT_ANSWER_BANK must be enabled or disabled.");
+  const model = env.ATELIER_CAREER_AGENT_OLLAMA_MODEL?.trim();
+  const baseUrl = env.ATELIER_CAREER_AGENT_OLLAMA_BASE_URL?.trim();
+  return {
+    answerBank: new FileAnswerBankStore(env.ATELIER_CAREER_AGENT_ANSWER_BANK_FILE?.trim() || undefined),
+    ...(model ? { answerBankMatcher: createOllamaAnswerBankMatcher({ model, ...(baseUrl ? { baseUrl } : {}) }) } : {}),
+  };
 }
 
 function createConfiguredApplicationAnswerDraftGenerator(

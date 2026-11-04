@@ -112,6 +112,7 @@ import {
   youHiredPostingId,
 } from "../domain/jobUrlClassifier";
 import { isVerifiedAshbyApplicationUrl, isVerifiedAshbyHostedUrl } from "../domain/jobUrlClassifier";
+import { answerBankKey, answerRiskTier, findAnswerBankMatch, isBankableQuestion, questionFromBlocker, withRecordedAnswer, type AnswerBankSemanticMatcher, type AnswerBankStore } from "../domain/answerBank";
 import { isVerifiedLeverApplicationUrl, isVerifiedLeverHostedUrl } from "../domain/leverJobSource";
 
 let fallbackId = 0;
@@ -144,6 +145,10 @@ export interface CareerAgentDependencies {
    * falls back to re-checking the retained browser session.
    */
   confirmPostSubmitDone?: (campaignId: string, jobId: string) => Promise<CareerJob>;
+  /** Answers the candidate gave on earlier forms, reused before asking again. */
+  answerBank?: AnswerBankStore;
+  /** Optional local-model matcher for low-risk questions worded differently. */
+  answerBankMatcher?: AnswerBankSemanticMatcher;
 }
 
 export interface LegacyAttentionRepairResult {
@@ -759,6 +764,8 @@ export class CareerAgentService {
   private readonly officialDestinationCandidates: readonly DestinationCandidate[];
   private readonly applicationAnswerDraftGenerator?: ApplicationAnswerDraftGenerator;
   private readonly confirmPostSubmitDone?: (campaignId: string, jobId: string) => Promise<CareerJob>;
+  private readonly answerBank?: AnswerBankStore;
+  private readonly answerBankMatcher?: AnswerBankSemanticMatcher;
   private readonly attentionResponseInFlight = new Map<
     string,
     {
@@ -786,6 +793,8 @@ export class CareerAgentService {
     this.officialDestinationCandidates = dependencies.officialDestinationCandidates ?? [];
     this.applicationAnswerDraftGenerator = dependencies.applicationAnswerDraftGenerator;
     this.confirmPostSubmitDone = dependencies.confirmPostSubmitDone;
+    this.answerBank = dependencies.answerBank;
+    this.answerBankMatcher = dependencies.answerBankMatcher;
   }
 
   listCampaigns(): readonly Campaign[] {
@@ -2310,6 +2319,7 @@ export class CareerAgentService {
     };
     this.careerRepository.saveJob(resolved);
     await this.recordAttentionResolution(campaign, resolved, blocker, value, options.attentionResponse);
+    if (options.attentionResponse) this.rememberAnswer(blocker, value, "slack");
 
     if (options.deferResume) return resolved;
 
@@ -3267,6 +3277,74 @@ export class CareerAgentService {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Save the candidate's answer to an employer's form question so the next
+   * form asking the same thing is filled from it. High-risk questions,
+   * opaque labels, and essays are never saved.
+   */
+  private rememberAnswer(blocker: CareerBlocker, value: AnswerValue, source: "slack" | "history"): void {
+    if (!this.answerBank || blocker.unit !== "submission" || questionProvenanceForBlocker(blocker) !== "ATS_FORM") return;
+    const question = questionFromBlocker(blocker);
+    if (!isBankableQuestion(question, value)) return;
+    try {
+      this.answerBank.save(withRecordedAnswer(this.answerBank.entries(), {
+        id: this.createId("answer"),
+        key: answerBankKey(question.question, question.company),
+        question: question.question,
+        value,
+        tier: answerRiskTier(question),
+        ...(question.fieldType ? { fieldType: question.fieldType } : {}),
+        ...(question.options ? { options: question.options } : {}),
+        ...(question.company ? { company: question.company } : {}),
+        ...(blocker.context.jobId ? { jobId: blocker.context.jobId } : {}),
+        source,
+        recordedAt: this.now(),
+      }));
+    } catch {
+      // The bank is a convenience: failing to write it never fails the answer.
+    }
+  }
+
+  /**
+   * Fill open employer questions from answers the candidate already gave on
+   * other forms. Each reuse is recorded on the blocker as evidence, so the
+   * history shows which answers came from the bank.
+   */
+  private async autoResolveFromAnswerBank(
+    campaign: Campaign,
+    job: CareerJob,
+    drafts: readonly CareerBlockerDraft[],
+  ): Promise<CareerJob> {
+    if (!this.answerBank) return job;
+    let current = job;
+    for (const draft of drafts) {
+      if (draft.unit !== "submission" || draft.questionProvenance !== "ATS_FORM") continue;
+      const blocker = current.blockers.find(
+        (candidate) => candidate.status === "open" && careerBlockerKey(candidate) === careerBlockerKey(draft),
+      );
+      if (!blocker) continue;
+      let entries;
+      try { entries = this.answerBank.entries(); } catch { return current; }
+      const match = await findAnswerBankMatch(entries, questionFromBlocker(blocker), this.answerBankMatcher);
+      if (!match) continue;
+      current = await this.resolveCareerBlocker(campaign.id, current.id, blocker.id, match.value, {
+        deferResume: true,
+        answerEvidence: [
+          "answer-provider:answer-bank",
+          `answer-bank-entry:${match.entry.id}`,
+          `answer-bank-match:${match.kind}`,
+          `answer-bank-tier:${match.entry.tier}`,
+        ],
+      });
+      try {
+        this.answerBank.save(this.answerBank.entries().map((entry) => entry.id === match.entry.id
+          ? { ...entry, usedCount: (entry.usedCount ?? 0) + 1, lastUsedAt: this.now() }
+          : entry));
+      } catch { /* usage counts are informational */ }
+    }
+    return current;
   }
 
   private async draftAtsAnswerForBlocker(job: CareerJob, blocker: CareerBlocker) {
@@ -4785,6 +4863,7 @@ export class CareerAgentService {
         });
       }
 
+      blocked = await this.autoResolveFromAnswerBank(campaign, blocked, drafts);
       blocked = await this.autoResolveGroundedAtsBlockers(campaign, blocked, drafts);
       const openDrafts = drafts.filter((draft) =>
         blocked.blockers.some((candidate) => candidate.status === "open" && careerBlockerKey(candidate) === careerBlockerKey(draft)),
