@@ -99,6 +99,19 @@ function isPartialMatch(jobSkill: string, candidateKeys: ReadonlySet<string>): b
   return (RELATED_SKILLS[normalized] ?? []).some((related) => candidateKeys.has(related));
 }
 
+/**
+ * The posting's own words, without the agent's bookkeeping lines. "Found by
+ * career-agent discover (...)" once counted "agent" as an AI signal and put the
+ * AI resume on a Full Stack role; the "Resume Version:" line is the queue's hint,
+ * which is weighed separately, not posting evidence.
+ */
+export function postingDescription(description: string): string {
+  return description
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*(?:found by career-agent\b|resume version:|priority:|fit:)/i.test(line))
+    .join("\n");
+}
+
 function selectResumeFamily(job: JobPosting, profile: CandidateProfile): {
   family: ResumeFamily;
   reason: string;
@@ -107,7 +120,8 @@ function selectResumeFamily(job: JobPosting, profile: CandidateProfile): {
     throw new Error("Candidate profile must define at least one resume family.");
   }
 
-  const jobText = `${job.title} ${job.description} ${job.requiredSkills.join(" ")} ${job.preferredSkills.join(" ")}`.toLowerCase();
+  const description = postingDescription(job.description);
+  const jobText = `${job.title} ${description} ${job.requiredSkills.join(" ")} ${job.preferredSkills.join(" ")}`.toLowerCase();
   const ranked = profile.resumeFamilies.map((family, index) => ({
     family,
     index,
@@ -121,7 +135,7 @@ function selectResumeFamily(job: JobPosting, profile: CandidateProfile): {
   // details; those are supporting signals when the title/description is
   // clearly about agents, models, or AI platforms.
   const title = job.title.toLowerCase();
-  const descriptionAndSkills = `${job.description} ${job.requiredSkills.join(" ")} ${job.preferredSkills.join(" ")}`.toLowerCase();
+  const descriptionAndSkills = `${description} ${job.requiredSkills.join(" ")} ${job.preferredSkills.join(" ")}`.toLowerCase();
   const familyScore = (family: ResumeFamily): number => {
     const id = family.id;
     const configured = family.focusKeywords.filter((keyword) => containsKeyword(jobText, keyword)).length;

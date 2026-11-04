@@ -360,6 +360,19 @@ describe("Autonomous Career Agent domain seams", () => {
     expect(applyHardFilters({ ...posting("LiteLLM", "Forward Deployed Engineer (New Grad)", ["Python"], "agentic-queue"), employmentType: "1099" }, mapped).decision).toBe("reject");
   });
 
+  it("does not read the agent's own bookkeeping lines as AI signals when picking a resume", () => {
+    const profile = fullyAuthorizedTestProfile();
+    const job = normalizeJobPosting({
+      companyHint: "Sparksoft Corporation", titleHint: "Jr. Full Stack Developer",
+      sourceUrl: "https://job-boards.greenhouse.io/sparksoftcorporation/jobs/5257361007",
+      applicationUrl: "https://job-boards.greenhouse.io/sparksoftcorporation/jobs/5257361007",
+      rawText: "Jr. Full Stack Developer at Sparksoft Corporation\nLocation: Remote/Hybrid if local to Maryland\nResume Version: frontend-software\nPriority: High\nFit: Excellent\nFound by career-agent discover (greenhouse:sparksoftcorporation).",
+    }, "2026-11-04T00:00:00.000Z");
+    const fit = assessFit(job, profile);
+    expect(fit.recommendedResumeFamily).not.toBe("ai-platform-agentic");
+    expect(trustedQueueFitAssessment(fit, true, "Excellent", "High", "frontend-software", profile).recommendedResumeFamily).toBe("frontend-software");
+  });
+
   it("accepts narrow trusted queue fit metadata without weakening ordinary fit policy", () => {
     const profile = fullyAuthorizedTestProfile();
     const job = posting("LiteLLM", "Forward Deployed Engineer", ["COBOL", "Fortran"], "queue-fit");
