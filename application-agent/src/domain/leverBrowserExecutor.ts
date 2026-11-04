@@ -625,6 +625,31 @@ function approvedAcknowledgmentValueForField(
   return undefined;
 }
 
+/**
+ * "I certify the information in this application is true and complete." The
+ * candidate approved checking this on every application (2026-11-04): it only
+ * vouches for answers they gave. Anything that also signs away a right, consents
+ * to a check, or stands in for a signature still goes to the candidate.
+ */
+export function isTruthfulnessCertification(text: string): boolean {
+  const lower = normalized(text);
+  return /\b(?:certif(?:y|ies)|attest|affirm|acknowledge|confirm|declare)\b/.test(lower) &&
+    /\b(?:true|accurate|correct|complete|truthful)\b/.test(lower) &&
+    /\b(?:information|answers|statements|application|responses)\b/.test(lower) &&
+    !/\b(?:arbitrat\w*|waive\w*|release|indemn\w*|non ?compete|background|drug|credit|consent|authori[sz]\w*|e ?sign\w*|electronic signature|signature|sign|type your (?:full )?name|terms of (?:use|service)|privacy|sms|text messages?|marketing|at will|at-will)\b/.test(lower);
+}
+
+function truthfulnessCertificationValue(field: ApplicationFieldDescriptor): AnswerValue | undefined {
+  if (!isTruthfulnessCertification(inspectedPromptText(field))) return undefined;
+  if (field.type === "checkbox") return true;
+  if (field.type === "radio" || field.type === "select") {
+    const affirmative = field.options?.filter((option) =>
+      /^(?:yes|i agree|agree|i certify|i acknowledge|acknowledged?|i confirm|confirm(?:ed)?|i understand)\b/.test(normalized(option.label)));
+    return affirmative?.length === 1 ? affirmative[0]!.label : undefined;
+  }
+  return undefined;
+}
+
 /** Ashby can expose a privacy-policy continuation as a radio control whose
  * prompt is the privacy notice itself rather than an explicit "I acknowledge"
  * text-entry instruction. It is still a legal attestation, never a generic
@@ -1465,6 +1490,12 @@ function explicitValueForField(
   if (field.classification === "legal_attestation" && request.profile) {
     const acknowledgment = approvedAcknowledgmentValueForField(field, request.profile);
     if (acknowledgment) return { value: acknowledgment, explicit: true };
+  }
+  // The checkbox label is often just "I Acknowledge", so this reads the whole
+  // prompt rather than waiting for a legal_attestation classification.
+  if (request.profile) {
+    const certification = truthfulnessCertificationValue(field);
+    if (certification !== undefined) return { value: certification, explicit: true };
   }
   if (isBackgroundCheckConsentField(field) && request.profile?.answerPolicies.background_check === "auto") {
     const approved = request.profile.approvedReusableAnswers.background_check?.trim();

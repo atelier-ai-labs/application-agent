@@ -2223,12 +2223,21 @@ describe("LeverBrowserExecutor", () => {
     expect(optionalDemographic.fields[0].current).toBeNull();
 
     const legal = new FakeSession([
-      new FakeField({ id: "certify", label: "I certify that the information is accurate", type: "checkbox", required: true }),
+      new FakeField({ id: "arbitration", label: "I agree to resolve any employment dispute through binding arbitration", type: "checkbox", required: true }),
     ]);
     const legalResult = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(legal), now: () => capturedAt }).execute(request());
     expect(legalResult.state).toBe("requires_human");
     expect(legalResult.state === "requires_human" && legalResult.blocker.kind).toBe("legal_attestation");
     expect(legal.fields[0].checkCalls).toBe(0);
+
+    // The candidate approved one attestation for every application (2026-11-04):
+    // "the information I gave is true". It is checked, not asked.
+    const truthful = new FakeSession([
+      new FakeField({ id: "certify", label: "I certify that the information is accurate", type: "checkbox", required: true }),
+    ]);
+    const truthfulResult = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(truthful), now: () => capturedAt }).execute(request());
+    expect(truthfulResult.state).toBe("ready_to_submit");
+    expect(truthful.fields[0].current).toBe(true);
 
     const unknown = new FakeSession([
       new FakeField({ id: "years", label: "Years of experience with an unlisted system", type: "text", required: true }),

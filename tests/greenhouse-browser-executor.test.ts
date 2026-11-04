@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { greenhouseEmbedApplicationUrl, isVerifiedGreenhouseEmbedUrl } from "../application-agent/src/domain/greenhouseJobSource";
-import { isTrustedAutomaticConfirmation } from "../application-agent/src/domain/leverBrowserExecutor";
+import { isTrustedAutomaticConfirmation, isTruthfulnessCertification } from "../application-agent/src/domain/leverBrowserExecutor";
 import { OPTIONAL_ANSWER_SKIPPED } from "../application-agent/src/domain/executor";
 import {
   greenhouseLocationOptionMatches,
@@ -791,6 +791,24 @@ describe("Greenhouse destination execution through the existing browser policy",
     await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" })
       .execute({ ...base, application: { ...base.application, answers } });
     expect([clearance.current, referrer.current, refEmail.current]).toEqual([null, null, null]);
+  });
+
+  it("checks the 'I certify my information is true' box but still asks about anything that signs away more", async () => {
+    const certify = "I hereby certify that all information I have provided in this application is true, complete and correct to the best of my knowledge. I understand that any misrepresentation, omission or falsification may disqualify me from further consideration or may result in termination of employment if discovered later. *";
+    const truthful = new FakeField({ id: "question_13062997007[]_35634078007", label: "I Acknowledge", type: "checkbox", required: true, fullPrompt: certify });
+    const arbitration = new FakeField({ id: "arb", label: "I Agree", type: "checkbox", required: true,
+      fullPrompt: "I certify that the information in my application is true and complete, and I agree to resolve any dispute through binding arbitration." });
+    const signature = new FakeField({ id: "sig", label: "I certify that my answers are true and correct. Type your full name as your electronic signature.", type: "text", required: true });
+    const session = new FakeSession([truthful]);
+    await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute(request(session));
+    expect(truthful.current).toBe(true);
+    const arbitrationSession = new FakeSession([arbitration]);
+    const asked = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(arbitrationSession), provider: "greenhouse" }).execute(request(arbitrationSession));
+    expect(arbitration.current).toBeNull();
+    expect(asked.state).not.toBe("ready_to_submit");
+    expect(isTruthfulnessCertification(certify)).toBe(true);
+    expect(isTruthfulnessCertification(signature.label)).toBe(false);
+    expect(isTruthfulnessCertification("I certify the information is accurate and I authorize a background check.")).toBe(false);
   });
 
   it("fills D.A. Davidson-style education and employment cards without misplacing values", async () => {
