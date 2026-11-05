@@ -105,7 +105,7 @@ function requestFor(snapshot: FormSnapshot, profile: CandidateProfile, now: stri
   const kind = classifyJobUrl(snapshot.url).kind;
   // Ashby and Lever pair a posting page with its /application or /apply page.
   const sourceUrl = snapshot.url.replace(/\/(?:application|apply)\/?(?=$|[?#])/, "");
-  const job = normalizeJobPosting({ companyHint: company, titleHint: role, sourceUrl, applicationUrl: snapshot.url, rawText: `${company}\n${role}\nRemote - United States` }, now);
+  const job = normalizeJobPosting({ companyHint: company, titleHint: role, sourceUrl, applicationUrl: snapshot.url, rawText: `${company}\n${role}\nLocation: Remote - United States` }, now);
   const familyId = profile.resumeFamilies[0]?.id;
   const application = {
     id: `replay-${snapshot.applicationId}`, isExample: false, job, fit: null,

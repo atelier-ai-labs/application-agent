@@ -135,6 +135,8 @@ export interface WorkAuthorization {
   status: string | null;
   countries: readonly string[];
   sponsorshipRequired: boolean | null;
+  /** Countries the candidate is a citizen of; answers "Citizen" status questions. */
+  citizenship?: readonly string[];
 }
 
 export interface ResumeFamily {

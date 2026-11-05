@@ -279,7 +279,22 @@ function isBackgroundCheckConsentField(field: Pick<LeverBrowserField, "id" | "la
  * phone-number or work-authorization fact. The candidate has explicitly
  * opted out, so this narrow rule always supplies No for these prompts.
  */
-function isSmsConsentField(field: Pick<LeverBrowserField, "id" | "label" | "section">): boolean {
+/**
+ * The profile phone, with "+1" when the prompt asks for the international
+ * country code ("starting with '+'", Instructure) and the candidate is in the US.
+ */
+function phoneAsPromptAsks(profile: CandidateProfile | undefined, text: string, value: string): string {
+  const phone = value.trim();
+  if (!profile || !phone || phone.startsWith("+") || !/^[\d\s().-]{7,}$/.test(phone)) return value;
+  const wantsCountryCode = /\b(?:international |country )(?:dialing |calling )?code\b|\bstarting with ['"]?\+|\binclude (?:the )?\+/.test(text);
+  const location = normalized(profile.identity.location ?? profile.location ?? "");
+  return wantsCountryCode && /\b(?:usa|united states|u s a?)$/.test(location) ? `+1 ${phone}` : phone;
+}
+
+function isSmsConsentField(field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[] }): boolean {
+  // Ashby labels its text-message consent radio just "Phone"; the options say what it is.
+  const options = (field.options ?? []).map((option) => normalized(option.label)).join(" ");
+  if (/\bconsent to receiv\w* text messages?\b/.test(options) && /\bdo not consent\b/.test(options)) return true;
   const text = directFieldPromptText(field);
   return /\b(?:sms|text\s*messages?|text-message)\b/.test(text) &&
     /\b(?:consent|agree(?:ment)?|opt\s*(?:in|out)|receive|updates?|messages?)\b/.test(text);
@@ -431,12 +446,47 @@ function approvedJobSourceValueForField(
  * "Are you currently based in the U.S.?" is Yes when the profile's own
  * location is in the United States; any other location stays a question.
  */
+/** The job is in the US: "Remote — U.S.", "United States", "New York, NY, USA". */
+function isUnitedStatesJobLocation(location: string | null | undefined): boolean {
+  const lower = (location ?? "").toLowerCase();
+  return /\bu\.?\s?s\.?a?\b|\bunited states\b|\bus[- ]remote\b/.test(lower) && !/\b(?:canada|uk|united kingdom|europe|india|mexico|brazil)\b/.test(lower);
+}
+
+/**
+ * "What is your current work authorization status in the country where this
+ * position is located?" with a Citizen option: answered only from the
+ * profile's recorded citizenship of the job's country, and only when exactly
+ * one option says citizen.
+ */
+function citizenshipStatusValueForField(
+  field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[]; type?: string },
+  profile: CandidateProfile,
+  jobLocation: string | null | undefined,
+): string | undefined {
+  if (!field.options?.length) return undefined;
+  const text = inspectedPromptText(field);
+  if (!/\b(?:work authori[sz]ation|citizenship|immigration|residency) status\b/.test(text)) return undefined;
+  const asksUs = /\b(?:u\.?\s?s\.?a?|united states)\b/.test(text) ||
+    (/\bthe country where (?:this|the) (?:position|role|job) is (?:located|based)\b/.test(text) && isUnitedStatesJobLocation(jobLocation));
+  if (!asksUs) return undefined;
+  const citizenOf = profile.workAuthorization.citizenship ?? [];
+  if (!citizenOf.some((country) => /\bu\.?\s?s\.?a?\b|\bunited states\b/i.test(country))) return undefined;
+  const citizen = field.options.filter((option) => /^(?:(?:u\.?\s?s\.?|united states) )?citizen\b/.test(normalized(option.label)));
+  return citizen.length === 1 ? citizen[0]!.label : undefined;
+}
+
 function basedInUsValueForField(
   field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[] },
   profile: CandidateProfile,
+  jobLocation?: string | null,
 ): string | undefined {
   const text = inspectedPromptText(field);
-  if (!/\b(?:are you|currently)\b.{0,40}\b(?:based|located|living|residing|reside)\b.{0,20}\b(?:in )?(?:the )?(?:u\.?\s?s\.?a?|united states)\b/.test(text)) return undefined;
+  const namesUs = /\b(?:are you|currently)\b.{0,40}\b(?:based|located|living|residing|reside)\b.{0,20}\b(?:in )?(?:the )?(?:u\.?\s?s\.?a?|united states)\b/.test(text);
+  // "Do you currently reside in the country where this position is located?"
+  // (Instructure) names the job's country instead; it is the US when the job is.
+  const namesJobCountry = /\b(?:are you|do you|currently)\b.{0,40}\b(?:based|located|living|residing|reside|live)\b.{0,20}\bin the country where (?:this|the) (?:position|role|job) is (?:located|based)\b/.test(text) &&
+    isUnitedStatesJobLocation(jobLocation);
+  if (!namesUs && !namesJobCountry) return undefined;
   const location = normalized(profile.identity.location ?? profile.location ?? "");
   if (!/\b(?:usa|united states|u s a?)$/.test(location)) return undefined;
   const yes = field.options?.find((option) => normalized(option.label) === "yes" || /^yes\b/.test(normalized(option.label)));
@@ -1500,8 +1550,10 @@ function explicitValueForField(
     if (approvedSource) return { value: approvedSource, explicit: true };
     const highestEducation = highestEducationValueForField(field, request.profile);
     if (highestEducation) return { value: highestEducation, explicit: true };
-    const basedInUs = basedInUsValueForField(field, request.profile);
+    const basedInUs = basedInUsValueForField(field, request.profile, request.careerJob.job.location);
     if (basedInUs) return { value: basedInUs, explicit: true };
+    const citizenship = citizenshipStatusValueForField(field, request.profile, request.careerJob.job.location);
+    if (citizenship) return { value: citizenship, explicit: true };
     const workLocationState = workLocationStateValueForField(field, request.profile);
     if (workLocationState) return { value: workLocationState, explicit: true };
     const residesInListedStates = residesInListedStatesValueForField(field, request.profile);
@@ -1772,6 +1824,8 @@ function optionValue(
       demographicTextAliases.some((alias) => labels.some((label) => label === alias || label.startsWith(`${alias} `) || label.includes(`/${alias}`))) ||
       demographicGenderAliases.some((alias) => labels.includes(alias)) ||
       smsAliases.some((alias) => labels.includes(alias)) ||
+      // Ashby: "No - I do not consent to receiving text messages".
+      (smsAliases.length > 0 && labels.some((label) => /^no\b/.test(label) && /\bdo not consent\b/.test(label))) ||
       (demographicAliases.includes("no") && labels.some((label) => /not\s+(?:a\s+)?protected\s+veteran|do\s+not\s+have\s+(?:a\s+)?disability/.test(label))) ||
       // Greenhouse's phone-country control appends the dialing code to the
       // grounded country name (for example, "United States +1"). Preserve
@@ -1949,6 +2003,9 @@ function decisionForField(
   const stringValue = valueAsString(supplied.value);
   if (!stringValue) {
     return missingFieldDecision(field, "The verified value was empty; no replacement was invented.", undefined, executor);
+  }
+  if (field.classification === "contact" && (field.type === "tel" || hasPhrase(fieldText(field), /phone|telephone|mobile/))) {
+    return { value: phoneAsPromptAsks(request.profile, inspectedPromptText(field), stringValue), explicit: supplied.explicit };
   }
   return { value: stringValue, explicit: supplied.explicit };
 }

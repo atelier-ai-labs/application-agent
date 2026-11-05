@@ -845,6 +845,37 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(await run("Do you currently hold a professional license? *")).toBeNull();
   });
 
+  it("answers Instructure's citizen status, residence, +1 phone and text-message consent from the profile", async () => {
+    const radio = (id: string, label: string, options: string[]) => new FakeField({ id, label, type: "radio", required: true,
+      options: options.map((option) => ({ label: option, value: "on" })), questionDescriptor: { promptText: label, sourceStrategy: "question_container", confidence: "high" } });
+    const phone = new FakeField({ id: "992441f2", label: "Phone", type: "tel", required: true,
+      questionDescriptor: { promptText: "Phone", nearbyInstructionText: "Please include your international country code starting with '+' (e.g., +1 555-123-4567 or +44 20 7946 0912).", sourceStrategy: "question_container", confidence: "high" } });
+    const sms = new FakeField({ id: "992441f2--2", label: "Phone", type: "radio", required: true,
+      options: [{ label: "Yes - I consent to receiving text messages", value: "given" }, { label: "No - I do not consent to receiving text messages", value: "notGiven" }] });
+    const status = radio("0d6a9b73", "What is your current work authorization status in the country where this position is located?",
+      ["Citizen", "Permanent resident / indefinite right to work", "Temporary visa with employer-specific authorization", "Temporary visa with open / transferable work authorization", "I am not currently authorized to work in this country"]);
+    const reside = radio("624c4b82", "Do you currently reside in the country where this position is located?",
+      ["Yes", "No, but I plan to relocate at my own expense", "No, and I would require employer support to relocate"]);
+    const run = async (profile: CandidateProfile, location: string) => {
+      for (const field of [phone, sms, status, reside]) field.current = null;
+      const session = new FakeSession([phone, sms, status, reside]);
+      const base = request(session);
+      await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" })
+        .execute({ ...base, profile, careerJob: { ...base.careerJob, job: { ...base.careerJob.job, location } } });
+      return [phone.current, sms.current, status.current, reside.current];
+    };
+    const citizen: CandidateProfile = {
+      ...exampleCandidateProfile,
+      identity: { ...exampleCandidateProfile.identity, phone: "412-480-0379", location: "McDonald, Pennsylvania, USA" },
+      workAuthorization: { status: "authorized", countries: ["United States"], sponsorshipRequired: false, citizenship: ["United States"] },
+    };
+    expect(await run(citizen, "Remote — U.S.")).toEqual(["+1 412-480-0379", "notGiven", "Citizen", "Yes"]);
+    // Citizenship is never inferred from work authorization, and a non-US job's country is not assumed.
+    const authorizedOnly: CandidateProfile = { ...citizen, workAuthorization: { status: "authorized", countries: ["United States"], sponsorshipRequired: false } };
+    expect((await run(authorizedOnly, "Remote — U.S."))[2]).toBeNull();
+    expect((await run(citizen, "Toronto, Canada")).slice(2)).toEqual([null, null]);
+  });
+
   it("fills D.A. Davidson-style education and employment cards without misplacing values", async () => {
     const card = (id: string, sectionTitle: string, promptText: string, type: "text" | "textarea" = "text") =>
       new FakeField({ id: `cards[c][${id}]`, label: promptText, type, required: true, questionDescriptor: { sectionTitle, promptText, sourceStrategy: "question_container", confidence: "high" } });

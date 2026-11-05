@@ -260,6 +260,7 @@ export function isCandidateProfile(value: unknown): value is CandidateProfile {
     isStringOrNull(authorization.status) &&
     isStringArray(authorization.countries) &&
     (authorization.sponsorshipRequired === null || typeof authorization.sponsorshipRequired === "boolean") &&
+    (authorization.citizenship === undefined || isStringArray(authorization.citizenship)) &&
     Array.isArray(value.resumeFamilies) &&
     value.resumeFamilies.every(isResumeFamily) &&
     isRecord(answerPolicies) &&
