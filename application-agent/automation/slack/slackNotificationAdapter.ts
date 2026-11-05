@@ -518,6 +518,42 @@ export class SlackNotificationAdapter implements NotificationAdapter {
   }
 
   /** Posts an informational message (inbox updates) that asks no question. */
+  /** A link to one message in the configured channel, or undefined when Slack will not say. */
+  async permalink(messageTs: string): Promise<string | undefined> {
+    try {
+      const query = new URLSearchParams({ channel: this.config.channelId, message_ts: messageTs });
+      const response = await this.fetcher(`${this.config.apiBaseUrl}/chat.getPermalink?${query.toString()}`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${this.config.botToken}` },
+      });
+      const data = responsePayload(await response.json()) as { ok?: boolean; permalink?: unknown } | undefined;
+      return data?.ok && typeof data.permalink === "string" && /^https:\/\//.test(data.permalink) ? data.permalink : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Post the "Waiting on you" board as the newest message, then delete the
+   * previous board, so the channel holds exactly one board, near the bottom.
+   * Returns the new board's message timestamp.
+   */
+  async replaceWaitingBoard(board: { text: string; blocks: unknown[] }, previousTs?: string): Promise<string> {
+    const result = await this.callApi("chat.postMessage", this.config.botToken, {
+      channel: this.config.channelId, text: board.text, blocks: board.blocks, unfurl_links: false, unfurl_media: false,
+    });
+    const ts = typeof result.ts === "string" && result.ts.trim() ? result.ts.trim() : undefined;
+    if (!ts) throw new Error("Slack chat.postMessage did not return a message timestamp.");
+    if (previousTs && previousTs !== ts) {
+      await this.callApi("chat.delete", this.config.botToken, { channel: this.config.channelId, ts: previousTs }).catch(async () => {
+        await this.callApi("chat.update", this.config.botToken, {
+          channel: this.config.channelId, ts: previousTs, text: "(An updated Waiting on you board is below.)", blocks: [],
+        }).catch(() => undefined);
+      });
+    }
+    return ts;
+  }
+
   async publishInfoNotice(text: string): Promise<void> {
     await this.callApi("chat.postMessage", this.config.botToken, {
       channel: this.config.channelId,

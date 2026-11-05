@@ -1324,6 +1324,26 @@ export class CareerAgentService {
   }
 
   /** Re-delivers only durable open events that were not acknowledged by an adapter. */
+  /**
+   * Post the next question for recent waiting jobs whose question never
+   * reached Slack (for example, a job left waiting after an answer was carried
+   * over). Jobs untouched since `recentSince` are left alone, so long-stalled
+   * applications never flood the channel. Returns how many jobs were posted.
+   */
+  async publishUnaskedAttention(recentSince: string): Promise<number> {
+    let posted = 0;
+    for (const job of this.careerRepository.listJobs()) {
+      if (job.status !== "needs_input" || job.updatedAt < recentSince) continue;
+      const campaign = this.getCampaign(job.campaignId);
+      if (campaign.status !== "active") continue;
+      if ((campaign.attentionEvents ?? []).some((event) => event.jobId === job.id && event.status === "open")) continue;
+      if (!this.nextAttentionBlocker(campaign, job)) continue;
+      await this.publishAttentionForJob(campaign, job);
+      posted += 1;
+    }
+    return posted;
+  }
+
   async publishPendingAttentionEvents(campaignId?: string): Promise<number> {
     const campaigns = this.careerRepository
       .listCampaigns()

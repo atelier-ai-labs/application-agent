@@ -74,6 +74,26 @@ try {
     console.log(`[career-agent-runtime] campaign ${campaignId} completed: ${result.attentionRequired} item(s) need attention`);
   }
 
+  // The Slack "Waiting on you" board: one message, rebuilt from job state.
+  // ATELIER_SLACK_WAITING_BOARD=disabled turns it off.
+  if (process.env.ATELIER_SLACK_WAITING_BOARD?.trim() !== "disabled") {
+    const activeRuntime = runtime;
+    let refreshing = false;
+    const refreshBoard = async () => {
+      if (refreshing || shuttingDown) return;
+      refreshing = true;
+      try {
+        if (await activeRuntime.refreshWaitingBoard() === "posted") console.log("[career-agent-runtime] Waiting on you board updated");
+      } catch (error) {
+        console.warn(`[career-agent-runtime] Waiting on you board refresh failed: ${error instanceof Error ? error.message.slice(0, 200) : "unknown error"}`);
+      } finally {
+        refreshing = false;
+      }
+    };
+    void refreshBoard();
+    setInterval(() => { void refreshBoard(); }, 60_000).unref?.();
+  }
+
   console.log(`[career-agent-runtime] durable state: ${runtime.stateFilePath ?? "injected storage"}`);
   console.log("[career-agent-runtime] Slack attention listener is active; routine discovery activity remains quiet.");
   process.once("SIGINT", () => { void shutdown(0); });

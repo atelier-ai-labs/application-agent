@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { ApplicationService, type ApplicationServiceOptions } from "../../src/service/applicationService";
 import {
   CareerAgentService,
@@ -58,6 +58,7 @@ import { createPlaywrightLeverBrowserExecutor } from "../createLeverBrowserExecu
 import { OllamaApplicationAnswerDraftGenerator } from "../answerDraft/ollamaApplicationAnswerDraftGenerator";
 import { FileAnswerBankStore } from "../answerBank/fileAnswerBankStore";
 import { isAwaitingReceipt, matchReceiptToJob } from "../../src/domain/applicationReceipt";
+import { renderWaitingBoard, waitingBoardItems, waitingBoardSignature, WAITING_BOARD_RECENT_MS } from "../../src/domain/waitingBoard";
 import { gmailInbox, type InboxSource } from "../gmailInbox";
 import { createGoogleOAuthAccessTokenProvider, gmailSecurityCodesEnabled, resolveGoogleAuthMode } from "../googleOAuth";
 import { createOllamaAnswerBankMatcher } from "../answerBank/ollamaAnswerBankMatcher";
@@ -66,7 +67,7 @@ import { normalizeJobSearchIntent, type JobSearchIntent } from "../../src/domain
 import { DEFAULT_CAREER_AGENT_STATE_FILE, FileKeyValueStorage } from "./fileKeyValueStorage";
 import { assertDuplicateRiskRetryAuthorization, assertSubmitPreparedApplicationPreflight } from "./submitPreparedApplicationPreflight";
 import { authorizeThenSubmit } from "./submitPreparedApplicationFlow";
-import type { AttentionEvent, AttentionResponse, NotificationAdapter, PersistedAttentionEvent, QueueHandoffNotice } from "../../src/domain/attention";
+import { attentionDescriptorSignature, type AttentionEvent, type AttentionResponse, type NotificationAdapter, type PersistedAttentionEvent, type QueueHandoffNotice } from "../../src/domain/attention";
 import { DurableSubmissionAuthority } from "../executionHost/submissionAuthority";
 
 export interface BackgroundCareerAgentEnvironment extends ExecutionHostEnvironment, SlackEnvironment {
@@ -111,6 +112,12 @@ export interface RuntimeNotificationTransport {
   hydrate?(events: readonly PersistedAttentionEvent[]): void | Promise<void>;
   start?(): Promise<void>;
   stop?(): void | Promise<void>;
+}
+
+/** The Slack adapter's board methods (the in-memory adapter has none). */
+interface WaitingBoardPort {
+  permalink(messageTs: string): Promise<string | undefined>;
+  replaceWaitingBoard(board: { text: string; blocks: unknown[] }, previousTs?: string): Promise<string>;
 }
 
 /** The existing execution-host HTTP seam, kept as a narrow runtime port. */
@@ -166,6 +173,8 @@ export interface BackgroundCareerAgentRuntime {
   readonly service: CareerAgentService;
   readonly defaultCampaignInput?: CreateCampaignInput;
   start(): Promise<void>;
+  /** Rebuild the Slack "Waiting on you" board; see the implementation. */
+  refreshWaitingBoard(now?: Date): Promise<"posted" | "unchanged" | "unavailable">;
   stop(): Promise<void>;
   createCampaign(input: CreateCampaignInput): Campaign;
   runCampaign(campaignId: string): Promise<CampaignRunResult>;
@@ -455,6 +464,7 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
   private readonly seenReceiptEmails = new Set<string>();
   private receiptTimer?: ReturnType<typeof setInterval>;
   private receiptCheckRunning = false;
+  private readonly boardPermalinks = new Map<string, string>();
   private started = false;
   private stopped = false;
 
@@ -678,6 +688,52 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
     } finally {
       this.receiptCheckRunning = false;
     }
+  }
+
+  /**
+   * Refresh the Slack "Waiting on you" board from job state: post any recent
+   * question that never reached Slack, then, only when the board's content
+   * changed, post the new board and delete the old one. Run by the
+   * long-lived runtime service on an interval.
+   */
+  async refreshWaitingBoard(now = new Date()): Promise<"posted" | "unchanged" | "unavailable"> {
+    const adapter = this.notification?.adapter as Partial<WaitingBoardPort> | undefined;
+    if (typeof adapter?.replaceWaitingBoard !== "function") return "unavailable";
+    const storage = this.stateStorage as { reload?: () => void; withExclusiveLockAsync?: <R>(operation: () => Promise<R>) => Promise<R> } | undefined;
+    const recentSince = new Date(now.getTime() - WAITING_BOARD_RECENT_MS).toISOString();
+    const postMissing = async () => { storage?.reload?.(); return this.service.publishUnaskedAttention(recentSince); };
+    await (storage?.withExclusiveLockAsync ? storage.withExclusiveLockAsync(postMissing) : postMissing()).catch(() => 0);
+    storage?.reload?.();
+    const events = this.careerRepository.listCampaigns().flatMap((campaign) => campaign.attentionEvents ?? []);
+    const board = waitingBoardItems(this.service.listJobs(), events,
+      (blocker, job) => attentionDescriptorSignature(blocker, job.job.compensation) !== undefined, now);
+    const signature = waitingBoardSignature(board);
+    const saved = this.readWaitingBoardState();
+    if (saved?.ts && saved.signature === signature) return "unchanged";
+    for (const item of board.items) {
+      if (item.link && !this.boardPermalinks.has(item.link)) {
+        const url = await adapter.permalink?.(item.link).catch(() => undefined);
+        if (url) this.boardPermalinks.set(item.link, url);
+      }
+    }
+    const ts = await adapter.replaceWaitingBoard(renderWaitingBoard(board, now, (messageTs) => this.boardPermalinks.get(messageTs)), saved?.ts);
+    this.writeWaitingBoardState({ ts, signature });
+    return "posted";
+  }
+
+  private get waitingBoardStatePath(): string {
+    return resolve(this.stateFilePath ? dirname(this.stateFilePath) : ".local/career-agent", "slack-waiting-board.json");
+  }
+
+  private readWaitingBoardState(): { ts?: string; signature?: string } | undefined {
+    try { return JSON.parse(readFileSync(this.waitingBoardStatePath, "utf8")) as { ts?: string; signature?: string }; } catch { return undefined; }
+  }
+
+  private writeWaitingBoardState(state: { ts: string; signature: string }): void {
+    const path = this.waitingBoardStatePath;
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(`${path}.tmp`, JSON.stringify(state));
+    renameSync(`${path}.tmp`, path);
   }
 
   correctFalseManualSubmissionConfirmation(campaignId: string, jobId: string, reason?: string): CareerJob {

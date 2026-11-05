@@ -562,6 +562,43 @@ describe("background Career Agent runtime", () => {
     }
   });
 
+  it("keeps one Waiting on you board: posts missed questions, skips when unchanged, replaces the old board", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "atelier-career-board-"));
+    try {
+      const boards: { text: string; previous?: string }[] = [];
+      const adapter = Object.assign(new InMemoryNotificationAdapter(), {
+        permalink: async (ts: string) => `https://example.slack.com/archives/C1/p${ts.replace(".", "")}`,
+        replaceWaitingBoard: async (board: { text: string }, previous?: string) => { boards.push({ text: board.text, ...(previous ? { previous } : {}) }); return `board-${boards.length}`; },
+      });
+      const runtime = new BackgroundCareerAgentRuntimeImpl(runtimeOptions(join(directory, "state.json"), new UnknownThenReadyExecutor(), adapter));
+      const campaign = runtime.createCampaign(campaignInput());
+      runtime.service.activateCampaign(campaign.id);
+      await runtime.runCampaign(campaign.id);
+      const waiting = runtime.service.listJobs(campaign.id).find((job) => job.status === "needs_input")!;
+      const at = new Date(Date.parse(waiting.updatedAt) + 60_000);
+
+      // The job's question lost its Slack message (as after a carried-over answer).
+      const stored = runtime.service.getCampaign(campaign.id);
+      runtime.careerRepository.saveCampaign({ ...stored, attentionEvents: (stored.attentionEvents ?? []).map((event) => ({ ...event, status: "cancelled" as const })) });
+      const postedBefore = adapter.publishedEvents.length;
+
+      expect(await runtime.refreshWaitingBoard(at)).toBe("posted");
+      expect(adapter.publishedEvents.length).toBe(postedBefore + 1);
+      expect(boards).toHaveLength(1);
+      expect(boards[0]!.text).toContain(`*${waiting.job.company} — ${waiting.job.title}*: 1 question`);
+
+      expect(await runtime.refreshWaitingBoard(new Date(at.getTime() + 60_000))).toBe("unchanged");
+      expect(boards).toHaveLength(1);
+
+      runtime.careerRepository.saveJob({ ...runtime.service.getJob(waiting.id), status: "ready_to_submit", blockers: [] });
+      expect(await runtime.refreshWaitingBoard(new Date(at.getTime() + 120_000))).toBe("posted");
+      expect(boards[1]).toMatchObject({ previous: "board-1" });
+      expect(boards[1]!.text).toContain("ready, tap Submit");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("marks a job Applied from the employer's confirmation email, with no DONE reply", async () => {
     const directory = mkdtempSync(join(tmpdir(), "atelier-career-receipt-"));
     try {
