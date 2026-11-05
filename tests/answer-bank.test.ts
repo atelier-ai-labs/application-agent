@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   answerBankKey, answerRiskTier, findAnswerBankMatch, isBankableQuestion, isOpaqueQuestion, questionFromBlocker,
-  standingRecordsFromJobs, standingTopicFor, valueForOptions, withRecordedAnswer, withStandingAnswer, type AnswerBankEntry, type StandingTopicId,
+  standingEntryKey, standingRecordsFromJobs, standingTopicFor, valueForOptions, withRecordedAnswer, withStandingAnswer, type AnswerBankEntry, type StandingTopicId,
 } from "../application-agent/src/domain/answerBank";
 
 const entry = (question: string, value: string, company?: string, extra: Partial<AnswerBankEntry> = {}): AnswerBankEntry => ({
@@ -141,5 +141,21 @@ describe("standing answers", () => {
     // Interviewed before: unknowable after a past application, so it asks.
     expect(await ask("Have you previously interviewed for a role at Sparksoft?", "Sparksoft Corporation")).toBeUndefined();
     expect((await ask("Have you previously interviewed for a role at Phantom?", "Phantom"))?.value).toBe("No");
+  });
+});
+
+describe("related-to-an-employee standing answer", () => {
+  const entries = [{ id: "s", key: standingEntryKey("related_to_employee"), question: "Related to anyone who works at the company", value: "No", tier: "high" as const, source: "manual" as const, recordedAt: "2026-11-05T00:00:00.000Z", topic: "related_to_employee" as const }];
+  it("answers Yes/No questions No and writes a sentence into a free-text box", async () => {
+    expect(standingTopicFor("If you are related to anyone at Instructure, what is your relationship?", "Instructure")).toBe("related_to_employee");
+    expect(standingTopicFor("Are you related to any current Instructure employee?", "Instructure")).toBe("related_to_employee");
+    expect(standingTopicFor("Do you have any relatives currently employed by Acme?", "Acme")).toBe("related_to_employee");
+    expect((await findAnswerBankMatch(entries, { question: "If you are related to anyone at Instructure, what is your relationship?", company: "Instructure", fieldType: "text" }))?.value)
+      .toBe("Not applicable. I am not related to anyone at Instructure.");
+    expect((await findAnswerBankMatch(entries, { question: "Are you related to any current Instructure employee?", company: "Instructure", fieldType: "radio", options: ["Yes", "No"] }))?.value).toBe("No");
+  });
+  it("leaves other topics' 'If you have…, explain' boxes alone and ignores unrelated 'related to' wording", () => {
+    expect(standingTopicFor("If you have been convicted of a crime, please explain.", "Acme")).toBeUndefined();
+    expect(standingTopicFor("Do you have experience related to distributed systems at scale?", "Acme")).toBeUndefined();
   });
 });

@@ -58,12 +58,21 @@ export interface AnswerBankQuestion {
  */
 export type StandingTopicId =
   | "criminal_conviction" | "terminated" | "financial_judgments" | "financial_license" | "regulatory_discipline"
-  | "restrictive_agreements" | "background_check" | "essential_functions" | "previously_applied" | "previously_interviewed";
+  | "restrictive_agreements" | "background_check" | "essential_functions" | "previously_applied" | "previously_interviewed"
+  | "related_to_employee";
 
 /** A standing value that is looked up from the agent's own records instead of fixed. */
 export const STANDING_FROM_RECORDS = "@records";
 
-export const STANDING_TOPICS: readonly { id: StandingTopicId; label: string; pattern: RegExp }[] = [
+export const STANDING_TOPICS: readonly {
+  id: StandingTopicId;
+  label: string;
+  pattern: RegExp;
+  /** Also matches "If you are related to…, what is…?" prompts. */
+  conditional?: boolean;
+  /** The sentence for a free-text box, from a "No" standing value. */
+  asText?: (value: string, company?: string) => string | undefined;
+}[] = [
   { id: "criminal_conviction", label: "Convicted of, or pled guilty / no contest to, a crime", pattern: /\bconvicted\b|\bple(?:d|aded) guilty\b|\bnolo contendere\b|\bno contest\b/ },
   { id: "terminated", label: "Fired, or asked to resign", pattern: /\b(?:been|were you|ever been) (?:fired|terminated|discharged|dismissed)\b|\basked to resign\b/ },
   { id: "financial_judgments", label: "Unsatisfied liens or judgments, bankruptcy, or a bond denied or revoked", pattern: /\b(?:unsatisfied|outstanding) (?:judge?ments?|liens?)\b|\bliens?\b.{0,30}\bagainst you\b|\bbankruptcy\b|\bbond(?:ing)? company\b|\bbond\b.{0,40}\b(?:denied|revoked|paid out)\b/ },
@@ -74,14 +83,22 @@ export const STANDING_TOPICS: readonly { id: StandingTopicId; label: string; pat
   { id: "essential_functions", label: "Can perform the essential functions with or without reasonable accommodation", pattern: /\bessential functions\b/ },
   { id: "previously_applied", label: "Previously applied to this company", pattern: /\b(?:previously|ever|before)\b.{0,20}\bappl(?:ied|y)\b.{0,40}\{company\}|\bappl(?:ied)\b.{0,30}\{company\}.{0,20}\b(?:before|previously)\b/ },
   { id: "previously_interviewed", label: "Previously interviewed at this company", pattern: /\b(?:previously|ever|before)\b.{0,20}\binterview(?:ed)?\b.{0,40}\{company\}/ },
+  {
+    id: "related_to_employee", label: "Related to anyone who works at the company",
+    pattern: /\brelated to\b.{0,30}\b(?:anyone|any(?:one)? (?:current )?employees?|an? (?:current )?employee|someone)\b.{0,30}(?:\{company\}|\bemploy)|\brelated to\b.{0,20}\{company\}|\b(?:relatives?|family members?)\b.{0,40}\b(?:work(?:s|ing)?|employed)\b.{0,20}(?:\{company\}|\bhere\b)/,
+    conditional: true,
+    asText: (value, company) => /^no\b/i.test(value.trim()) ? `Not applicable. I am not related to anyone at ${company?.trim() || "the company"}.` : undefined,
+  },
 ];
 
 /** The one standing topic a question is about, or undefined for none or several. */
 export function standingTopicFor(question: string, company?: string): StandingTopicId | undefined {
   const key = answerBankKey(question, company);
   // Only questions about the candidate: statements to acknowledge are not answers.
-  if (!/\b(?:have you|are you|do you|were you|has a|has any|did you|can you|would you|will you|is there)\b/.test(key)) return undefined;
-  const topics = STANDING_TOPICS.filter((topic) => topic.pattern.test(key));
+  const interrogative = /\b(?:have you|are you|do you|were you|has a|has any|did you|can you|would you|will you|is there)\b/.test(key);
+  const conditional = /\bif you (?:are|have)\b/.test(key);
+  if (!interrogative && !conditional) return undefined;
+  const topics = STANDING_TOPICS.filter((topic) => (interrogative || topic.conditional) && topic.pattern.test(key));
   return topics.length === 1 ? topics[0]!.id : undefined;
 }
 
@@ -331,6 +348,13 @@ export async function findAnswerBankMatch(
     if (!entry) return undefined;
     const value = entry.value === STANDING_FROM_RECORDS ? records?.(topic, question.company) : entry.value;
     if (value === undefined) return undefined;
+    if (!question.options?.length && (question.fieldType === "text" || question.fieldType === "textarea")) {
+      const asText = STANDING_TOPICS.find((candidate) => candidate.id === topic)?.asText;
+      if (asText) {
+        const text = asText(String(value), question.company);
+        return text === undefined ? undefined : { entry, value: text, kind: "standing" };
+      }
+    }
     const mapped = valueForOptions(value, question.options);
     return mapped === undefined ? undefined : { entry, value: mapped, kind: "standing" };
   }
