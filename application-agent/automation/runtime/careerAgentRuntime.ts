@@ -662,7 +662,7 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
           (this.stateStorage as { reload?: () => void } | undefined)?.reload?.();
           const current = this.service.getJob(job.id);
           if (!isAwaitingReceipt(current)) return undefined;
-          const applied = await this.confirmManualApplication(current.campaignId, current.id);
+          const applied = await this.service.confirmManualApplication(current.campaignId, current.id, this.submissionAuthority, { fromReceipt: true });
           this.service.recordReceiptConfirmation(current.campaignId, current.id, email);
           return applied;
         };

@@ -3082,14 +3082,21 @@ export class CareerAgentService {
    * manual Submit boundary. This is the only Career Agent path that turns a
    * ready-to-submit packet into Applied without executor submission proof.
    */
-  async confirmManualApplication(campaignId: string, jobId: string, submissionAuthority?: DurableSubmissionAuthority): Promise<CareerJob> {
+  /**
+   * `fromReceipt`: the employer's "thanks for applying" email is the proof.
+   * It also confirms a job still waiting on questions, which the candidate
+   * answered in the form themselves; those questions close as answered by
+   * hand and are never saved as reusable answers.
+   */
+  async confirmManualApplication(campaignId: string, jobId: string, submissionAuthority?: DurableSubmissionAuthority, options: { fromReceipt?: boolean } = {}): Promise<CareerJob> {
     const campaign = this.getCampaign(campaignId);
     const job = this.getJob(jobId);
     if (job.campaignId !== campaignId) throw new Error("That job does not belong to the selected campaign.");
     if (job.status === "applied") return job;
     const ambiguousBlocker = job.blockers.find((candidate) => candidate.status === "open" && isPostSubmitHumanCheck(candidate));
     const unknownRecovery = job.status === "needs_input" && Boolean(ambiguousBlocker);
-    if (job.status !== "ready_to_submit" && !unknownRecovery) throw new Error("Only a prepared or explicitly unknown application stopped at the manual Submit boundary can be marked Applied.");
+    const finishedByHand = options.fromReceipt === true && job.status === "needs_input" && !unknownRecovery;
+    if (job.status !== "ready_to_submit" && !unknownRecovery && !finishedByHand) throw new Error("Only a prepared or explicitly unknown application stopped at the manual Submit boundary can be marked Applied.");
     if (!job.applicationId) throw new Error("The career job has no application packet to mark Applied.");
 
     const application = this.applicationService.getApplication(job.applicationId);
@@ -3109,13 +3116,17 @@ export class CareerAgentService {
     const evidence = appliedApplication.manualSubmissionConfirmation;
     if (!evidence) throw new Error("The manual submission confirmation was not persisted.");
 
+    const openBeforeConfirm = new Set(job.blockers.filter((blocker) => blocker.status === "open").map((blocker) => blocker.id));
     let applied = this.saveJob({
       ...job,
       status: "applied",
       manualSubmissionConfirmation: evidence,
       blockers: this.mergeBlockers(job, [], application.id).map((blocker) => ambiguousBlocker && blocker.id === ambiguousBlocker.id
         ? { ...blocker, status: "resolved" as const, resolvedAt: this.now(), value: "user_confirmed_external_success" }
-        : blocker),
+        : finishedByHand && openBeforeConfirm.has(blocker.id)
+          ? { ...blocker, status: "resolved" as const, resolvedAt: this.now(), value: "answered_by_candidate_in_form",
+            evidence: [...blocker.evidence, "answer-provider:candidate-in-form"] }
+          : blocker),
       trackerFailureReason: undefined,
       trackerSync: {
         status: "pending",

@@ -34,11 +34,14 @@ export function isPostSubmitHumanCheck(blocker: CareerBlocker): boolean {
     blocker.kind === "captcha" || blocker.kind === "external_login";
 }
 
-/** Jobs a receipt may confirm: waiting on DONE after Submit, or waiting at Submit. */
+/**
+ * Jobs a receipt may confirm: waiting on DONE after Submit, waiting at
+ * Submit, or still waiting on questions the candidate answered in the form
+ * themselves before submitting it.
+ */
 export function isAwaitingReceipt(job: CareerJob): boolean {
   if (!job.applicationId) return false;
-  if (job.status === "ready_to_submit") return true;
-  return job.status === "needs_input" && job.blockers.some((blocker) => blocker.status === "open" && isPostSubmitHumanCheck(blocker));
+  return job.status === "ready_to_submit" || job.status === "needs_input";
 }
 
 /** Company names that are ordinary words and must not be matched from an email body. */

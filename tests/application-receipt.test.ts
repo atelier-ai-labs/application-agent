@@ -14,7 +14,8 @@ describe("application receipt emails", () => {
   it("waits only on post-Submit checks and Submit reviews", () => {
     expect(isAwaitingReceipt(job("a", "Phantom", "AI Engineer"))).toBe(true);
     expect(isAwaitingReceipt(job("a", "Phantom", "AI Engineer", { status: "ready_to_submit", blockers: [] }))).toBe(true);
-    expect(isAwaitingReceipt(job("a", "Phantom", "AI Engineer", { blockers: [{ ...postSubmit, kind: "unknown_form_field", evidence: [], resumeAfterHuman: true }] as never }))).toBe(false);
+    // Still waiting on a question: the candidate may have answered it in the form and submitted.
+    expect(isAwaitingReceipt(job("a", "Phantom", "AI Engineer", { blockers: [{ ...postSubmit, kind: "unknown_form_field", evidence: [], resumeAfterHuman: true }] as never }))).toBe(true);
     expect(isAwaitingReceipt(job("a", "Phantom", "AI Engineer", { status: "applied" }))).toBe(false);
   });
 

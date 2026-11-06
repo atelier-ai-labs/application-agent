@@ -678,6 +678,34 @@ describe("background Career Agent runtime", () => {
     }
   });
 
+  it("marks Applied from the email when the candidate answered the open questions in the form themselves", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "atelier-career-receipt-byhand-"));
+    try {
+      const authority = new DurableSubmissionAuthority("runtime-worker", { stateFile: join(directory, "submission.json") });
+      let company = "";
+      const runtime = new BackgroundCareerAgentRuntimeImpl({
+        ...runtimeOptions(join(directory, "state.json"), new ReadyExecutor(), new InMemoryNotificationAdapter()),
+        submissionAuthority: authority,
+        receiptInbox: { recentEmails: async () => [{ id: "r1", receivedAt: "2026-09-01T12:05:00.000Z", from: "no-reply@ashbyhq.com", subject: `Thanks for applying to ${company}!`, text: "We've received your application." }] },
+      });
+      const campaign = runtime.createCampaign({ ...campaignInput(), submissionPolicy: { authority: "automatic", requireExplicitApproval: false } });
+      runtime.service.activateCampaign(campaign.id);
+      await runtime.service.processCuratedJob(campaign.id, { ...listing().input, isExample: false, sourceUrl: "https://jobs.lever.co/acme/post-3", applicationUrl: "https://jobs.lever.co/acme/post-3/apply", rawText: "Acme\nData Platform Engineer\nRemote United States\n" });
+      const original = runtime.service.listJobs(campaign.id)[0]!;
+      company = original.job.company;
+      const question = { id: "q-phone", kind: "unknown_form_field", unit: "submission", field: "phone", question: "Phone", evidence: ["field-type:tel"], questionProvenance: "ATS_FORM", context: { jobId: original.id, applicationId: original.applicationId, company: original.job.company, role: original.job.title }, reason: "Unknown", status: "open", createdAt: capturedAt, resumeAfterHuman: true };
+      runtime.careerRepository.saveJob({ ...original, status: "needs_input", applicationStartedAt: "2026-09-01T12:00:00.000Z", blockers: [question as never] });
+
+      await expect(runtime.checkApplicationReceipts()).resolves.toEqual({ confirmed: [`${company} — ${original.job.title}`], ambiguous: [] });
+      const applied = runtime.service.getJob(original.id);
+      expect(applied.status).toBe("applied");
+      // Closed as answered by hand, with evidence that keeps it out of the answer bank.
+      expect(applied.blockers.find((blocker) => blocker.id === "q-phone")).toMatchObject({ status: "resolved", value: "answered_by_candidate_in_form", evidence: expect.arrayContaining(["answer-provider:candidate-in-form"]) });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("accepts the persisted Mastra queue identity with mixed-case Ashby URLs before host execution", async () => {
     const directory = mkdtempSync(join(tmpdir(), "atelier-career-ashby-queue-"));
     try {
