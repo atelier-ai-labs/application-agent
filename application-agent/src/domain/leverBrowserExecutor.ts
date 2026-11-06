@@ -465,6 +465,12 @@ function citizenshipStatusValueForField(
 ): string | undefined {
   if (!field.options?.length) return undefined;
   const text = inspectedPromptText(field);
+  // "This position is open to U.S. citizens only. Are you a U.S. citizen?" (Yes/No)
+  if (/\bare you an? (?:u\.?\s?s\.?a?|united states) citizen\b/.test(text)) {
+    const citizenOfUs = (profile.workAuthorization.citizenship ?? []).some((country) => /\bu\.?\s?s\.?a?\b|\bunited states\b/i.test(country));
+    const yes = field.options.filter((option) => /^yes\b/.test(normalized(option.label)));
+    return citizenOfUs && yes.length === 1 ? yes[0]!.label : undefined;
+  }
   if (!/\b(?:work authori[sz]ation|citizenship|immigration|residency) status\b/.test(text)) return undefined;
   const asksUs = /\b(?:u\.?\s?s\.?a?|united states)\b/.test(text) ||
     (/\bthe country where (?:this|the) (?:position|role|job) is (?:located|based)\b/.test(text) && isUnitedStatesJobLocation(jobLocation));

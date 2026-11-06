@@ -33,6 +33,7 @@
     "career-agent:capture": "vite-node application-agent/automation/formSnapshots/captureCli.ts",
     "career-agent:replay": "vite-node application-agent/automation/formSnapshots/replayCli.ts",
     "career-agent:answers": "vite-node application-agent/automation/answerBankCli.ts",
+    "career-agent:questionnaire": "vite-node application-agent/automation/questionnaireCli.ts",
     "career-agent:history": "vite-node application-agent/automation/historyRun.ts"
   },
   "dependencies": {

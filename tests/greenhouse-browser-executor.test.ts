@@ -876,6 +876,22 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect((await run(citizen, "Toronto, Canada")).slice(2)).toEqual([null, null]);
   });
 
+  it("answers a U.S.-citizens-only Yes/No from profile citizenship, never from work authorization", async () => {
+    const label = "Due to federal contract and security requirements, this position is open to U.S. citizens only. Are you a U.S. citizen?";
+    const field = new FakeField({ id: "db581cf5", label, type: "radio", required: true,
+      options: [{ label: "Yes", value: "on" }, { label: "No", value: "on" }], questionDescriptor: { promptText: label, sourceStrategy: "question_container", confidence: "high" } });
+    const run = async (workAuthorization: CandidateProfile["workAuthorization"]) => {
+      field.current = null;
+      const session = new FakeSession([field]);
+      const base = request(session);
+      await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" })
+        .execute({ ...base, profile: { ...exampleCandidateProfile, workAuthorization } });
+      return field.current;
+    };
+    expect(await run({ status: "authorized", countries: ["United States"], sponsorshipRequired: false, citizenship: ["United States"] })).toBe("Yes");
+    expect(await run({ status: "authorized", countries: ["United States"], sponsorshipRequired: false })).toBeNull();
+  });
+
   it("fills D.A. Davidson-style education and employment cards without misplacing values", async () => {
     const card = (id: string, sectionTitle: string, promptText: string, type: "text" | "textarea" = "text") =>
       new FakeField({ id: `cards[c][${id}]`, label: promptText, type, required: true, questionDescriptor: { sectionTitle, promptText, sourceStrategy: "question_container", confidence: "high" } });
