@@ -4,9 +4,26 @@ import type {
   CandidateProfile,
   FitAssessment,
   HumanRequiredField,
+  JobCompensation,
   JobPosting,
   TailoredResume,
 } from "./types";
+
+/**
+ * The middle of a posted annual USD pay range, rounded to the nearest
+ * $1,000, or undefined when the posting's numbers do not look like a real
+ * salary range (one number, hourly pay, a stray "$60" parsed from the page,
+ * or a spread too wide to be one band).
+ */
+export function postedSalaryMidpoint(compensation: JobCompensation | undefined): number | undefined {
+  const minimum = compensation?.minimum;
+  const maximum = compensation?.maximum;
+  if (typeof minimum !== "number" || typeof maximum !== "number" || !Number.isFinite(minimum) || !Number.isFinite(maximum)) return undefined;
+  if (compensation?.currency && compensation.currency.toUpperCase() !== "USD") return undefined;
+  if (compensation?.period && !/^(?:annual|year|yearly|per year)$/i.test(compensation.period)) return undefined;
+  if (minimum < 20_000 || maximum > 1_000_000 || maximum < minimum || maximum > minimum * 2.5) return undefined;
+  return Math.round((minimum + maximum) / 2 / 1000) * 1000;
+}
 
 export const DEFAULT_ANSWER_POLICIES: Readonly<Record<string, AnswerPolicy>> = {
   name: "auto",
@@ -227,6 +244,17 @@ export async function prepareApplicationAnswers(
         );
       }
       continue;
+    }
+
+    if (field === "salary_expectations" && profile.workPreferences.salaryStrategy === "posting_midpoint") {
+      const midpoint = postedSalaryMidpoint(job.compensation);
+      if (midpoint !== undefined) {
+        answers.push({
+          id: answerId(field), field, question, policy, value: String(midpoint), status: "resolved",
+          provenance: ["profile:workPreferences.salaryStrategy=posting_midpoint", `posting:compensation:${job.compensation!.minimum}-${job.compensation!.maximum}`],
+        });
+        continue;
+      }
     }
 
     answers.push(unresolvedAnswer(field, question, policy));

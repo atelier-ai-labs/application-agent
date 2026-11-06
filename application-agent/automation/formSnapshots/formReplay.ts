@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Application, ApplicationAnswer } from "../../src/domain/types";
+import type { Application, ApplicationAnswer, JobPosting } from "../../src/domain/types";
 import type { Campaign, CareerBlockerDraft, CareerJob } from "../../src/domain/campaignTypes";
 import type { CandidateProfile } from "../../src/domain/types";
 import type {
@@ -99,13 +99,15 @@ class ReplaySession implements LeverBrowserSession {
 
 const ATS_NAME: Record<string, string> = { lever: "Lever", greenhouse: "Greenhouse", ashby: "Ashby", rippling: "Rippling", workday: "Workday", custom: "Custom" };
 
-function requestFor(snapshot: FormSnapshot, profile: CandidateProfile, now: string, answers: readonly ApplicationAnswer[] = []) {
+function requestFor(snapshot: FormSnapshot, profile: CandidateProfile, now: string, answers: readonly ApplicationAnswer[] = [], compensation?: JobPosting["compensation"]) {
   const company = snapshot.company ?? "Unknown company";
   const role = snapshot.role ?? "Unknown role";
   const kind = classifyJobUrl(snapshot.url).kind;
   // Ashby and Lever pair a posting page with its /application or /apply page.
   const sourceUrl = snapshot.url.replace(/\/(?:application|apply)\/?(?=$|[?#])/, "");
-  const job = normalizeJobPosting({ companyHint: company, titleHint: role, sourceUrl, applicationUrl: snapshot.url, rawText: `${company}\n${role}\nLocation: Remote - United States` }, now);
+  const parsed = normalizeJobPosting({ companyHint: company, titleHint: role, sourceUrl, applicationUrl: snapshot.url, rawText: `${company}\n${role}\nLocation: Remote - United States` }, now);
+  // The real posting's pay range, so salary answers replay as they would live.
+  const job = compensation ? { ...parsed, compensation } : parsed;
   const familyId = profile.resumeFamilies[0]?.id;
   const application = {
     id: `replay-${snapshot.applicationId}`, isExample: false, job, fit: null,
@@ -135,11 +137,11 @@ export function snapshotKey(snapshot: FormSnapshot): string {
 
 export async function replayForm(
   snapshot: FormSnapshot,
-  options: { profile: CandidateProfile; answerBank?: readonly AnswerBankEntry[]; matcher?: AnswerBankSemanticMatcher; records?: StandingRecordsLookup; now?: string; showValues?: boolean; answers?: readonly ApplicationAnswer[] },
+  options: { profile: CandidateProfile; answerBank?: readonly AnswerBankEntry[]; matcher?: AnswerBankSemanticMatcher; records?: StandingRecordsLookup; now?: string; showValues?: boolean; answers?: readonly ApplicationAnswer[]; compensation?: JobPosting["compensation"] },
 ): Promise<FormReplay> {
   const now = options.now ?? new Date().toISOString();
   const session = new ReplaySession(snapshot);
-  const { familyId, ...request } = requestFor(snapshot, options.profile, now, options.answers);
+  const { familyId, ...request } = requestFor(snapshot, options.profile, now, options.answers, options.compensation);
   // The live run carries the profile's prepared answers (skills, employment,
   // sponsorship...) into the form. Replay must too, or a wrong prepared-answer
   // match (the skills list typed into a security-clearance box) never shows.

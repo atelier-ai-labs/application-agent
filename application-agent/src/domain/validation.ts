@@ -256,6 +256,7 @@ export function isCandidateProfile(value: unknown): value is CandidateProfile {
     isStringOrNull(preferences.travel) &&
     (preferences.preferredWorkLocation === undefined || isStringOrNull(preferences.preferredWorkLocation)) &&
     (preferences.availabilityStartDate === undefined || isStringOrNull(preferences.availabilityStartDate)) &&
+    (preferences.salaryStrategy === undefined || preferences.salaryStrategy === "ask" || preferences.salaryStrategy === "posting_midpoint") &&
     isRecord(authorization) &&
     isStringOrNull(authorization.status) &&
     isStringArray(authorization.countries) &&

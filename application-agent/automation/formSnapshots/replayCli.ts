@@ -50,8 +50,10 @@ export async function runReplayCli(argv: readonly string[] = process.argv.slice(
   for (const snapshot of snapshots) {
     if (only && !`${snapshot.company ?? ""} ${snapshot.url}`.toLowerCase().includes(only)) continue;
     // "Applied here before?" as it would have been answered on that application: other jobs only.
-    const records = standingRecordsFromJobs(jobs, jobs.find((job) => job.applicationId === snapshot.applicationId)?.id);
-    replays.push(await replayForm(snapshot, { profile, answerBank: bank, ...(matcher ? { matcher } : {}), records, showValues }));
+    const live = jobs.find((job) => job.applicationId === snapshot.applicationId);
+    const records = standingRecordsFromJobs(jobs, live?.id);
+    const compensation = live?.job.compensation;
+    replays.push(await replayForm(snapshot, { profile, answerBank: bank, ...(matcher ? { matcher } : {}), records, showValues, ...(compensation ? { compensation } : {}) }));
   }
 
   console.log("Form                                              fields  filled  bank  ask  blank");

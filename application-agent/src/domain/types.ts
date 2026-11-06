@@ -129,6 +129,12 @@ export interface WorkPreferences {
   preferredWorkLocation?: string | null;
   /** Optional explicit authority for application availability/start-date questions. */
   availabilityStartDate?: string | null;
+  /**
+   * How to answer expected-compensation questions. "ask" (default) always
+   * asks; "posting_midpoint" answers with the middle of the pay range the
+   * posting lists, and still asks when it lists none.
+   */
+  salaryStrategy?: "ask" | "posting_midpoint";
 }
 
 export interface WorkAuthorization {

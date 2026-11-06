@@ -254,6 +254,19 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(country.current).toBe("United States");
   });
 
+  it("types the posted-range midpoint into a salary box as a plain number", async () => {
+    const salary = new FakeField({ id: "question_salary", label: "What are you compensation expectations for this position?", type: "text", required: true,
+      questionDescriptor: { promptText: "What are you compensation expectations for this position?", sourceStrategy: "question_container", confidence: "high" } });
+    const session = new FakeSession([salary]);
+    const base = request(session);
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({
+      ...base,
+      application: { ...base.application, answers: [{ id: "answer:salary_expectations", field: "salary_expectations", question: "Expected compensation", policy: "ask", value: "140000", status: "resolved", provenance: ["profile:workPreferences.salaryStrategy=posting_midpoint"] }] },
+    });
+    expect(result.state).toBe("ready_to_submit");
+    expect(salary.current).toBe("140000");
+  });
+
   it("maps a grounded US location to the Greenhouse state option without using the full location", async () => {
     const state = new FakeField({
       id: "question_state",
