@@ -18,9 +18,15 @@ import {
   attentionEventForConfiguration,
   attentionEventForCareerBlocker,
   isAttentionResponse,
+  optionIdForTypedAnswer,
+  parseNumberedReply,
   publicAttentionEvent,
+  questionForBlocker,
   questionProvenanceForBlocker,
+  type AttentionActorIdentity,
+  type AttentionBatchQuestion,
   type AttentionClosureReason,
+  type AttentionQuestion,
   type AttentionEvent,
   type AttentionResponse,
   type NotificationAdapter,
@@ -204,7 +210,22 @@ interface CareerBlockerResolutionOptions {
 
 export type CareerAttentionResponseResult =
   | { status: "resolved"; event: AttentionEvent; careerJob: CareerJob }
-  | { status: "duplicate"; event: AttentionEvent; careerJob: CareerJob };
+  | { status: "duplicate"; event: AttentionEvent; careerJob: CareerJob }
+  /** A numbered reply that skipped question 1: the other answers are saved; question 1 is still open. */
+  | { status: "partial"; event: AttentionEvent; careerJob: CareerJob };
+
+/** A typed answer as this question's reply: the option id for a choice, the text itself otherwise. */
+function typedAnswerForQuestion(question: AttentionQuestion, text: string): string | undefined {
+  if (/^\s*skip\s*$/i.test(text)) return question.required === false ? "SKIP" : undefined;
+  return question.kind === "single_choice" ? optionIdForTypedAnswer(question.options, text) : text.trim() || undefined;
+}
+
+/** Questions that need their own message: essays to review, browser handoffs, files. */
+const UNBATCHED_BLOCKER_KINDS: ReadonlySet<string> = new Set([
+  "subjective_answer", "captcha", "external_login", "external_verification", "resume_missing", "required_file_missing",
+  "submission_approval", "unsupported_widget",
+]);
+const MAX_BATCH_QUESTIONS = 8;
 
 /** A narrow, non-resuming correction for a response that was already persisted. */
 export interface ResolvedCareerAnswerRevision {
@@ -2481,6 +2502,39 @@ export class CareerAgentService {
       throw new AttentionResponseError("That attention event is no longer open.");
     }
 
+    // One numbered reply answers the whole batch: keep the later answers for
+    // their own questions and continue with answer 1 as the reply to this one.
+    if (record.batch && record.batchBlockerIds && record.batch.length > 1) {
+      const parsed = parseNumberedReply(response.selectedOption, record.batch.length);
+      if (parsed.numbered) {
+        const later: Record<string, string> = {};
+        for (const [number, text] of parsed.answers) {
+          const blockerId = record.batchBlockerIds[number - 1];
+          if (number >= 2 && blockerId) later[blockerId] = text;
+        }
+        this.savePendingBatchAnswers(campaign.id, record.id, later, response.actorIdentity);
+        const first = parsed.answers.get(1);
+        if (first === undefined) {
+          await this.notificationAdapter?.publishInfoNotice?.(
+            `${record.context.company}: saved your answers to ${[...parsed.answers.keys()].sort((a, b) => a - b).join(", ")}. Question 1 still needs one: "${record.question.prompt.slice(0, 140)}". Reply with 1. and the answer.`,
+          ).catch(() => undefined);
+          return { status: "partial", event: publicAttentionEvent(record), careerJob: this.getJob(record.jobId) };
+        }
+        response = { ...response, selectedOption: first };
+      }
+    }
+    // A typed answer to a choice question in a batch names the option by its label.
+    if (record.batch && record.question.kind === "single_choice" && !record.question.options.some((option) => option.id === response.selectedOption)) {
+      const optionId = optionIdForTypedAnswer(record.question.options, response.selectedOption);
+      if (!optionId) {
+        await this.notificationAdapter?.publishInfoNotice?.(
+          `${record.context.company}: "${response.selectedOption.slice(0, 80)}" isn't one of the choices for "${record.question.prompt.slice(0, 120)}" (${record.question.options.map((option) => option.label).join(" / ")}). Reply again with 1. and one of them.`,
+        ).catch(() => undefined);
+        throw new AttentionResponseError("That choice is not valid for this attention event.");
+      }
+      response = { ...response, selectedOption: optionId };
+    }
+
     const job = this.getJob(record.jobId);
     if (job.campaignId !== campaign.id || job.applicationId !== record.applicationId || job.status !== "needs_input") {
       throw new AttentionResponseError("That application is no longer eligible for this attention response.");
@@ -3579,7 +3633,8 @@ export class CareerAgentService {
     }
 
     if (!blocker) return;
-    const draft = await this.draftAtsAnswerForBlocker(job, blocker);
+    const pending = this.takePendingBatchAnswer(campaign.id, job.id, blocker.id);
+    const draft = pending ? undefined : await this.draftAtsAnswerForBlocker(job, blocker);
     const generated = attentionEventForCareerBlocker({
       campaignId: campaign.id,
       jobId: job.id,
@@ -3590,15 +3645,88 @@ export class CareerAgentService {
       createId: this.createId,
     });
     if (!generated) return;
+    const batch = draft || pending ? undefined : this.batchForJob(currentCampaign, job, blocker);
+    const record: PersistedAttentionEvent = batch
+      ? { ...generated.record, batch: batch.questions, batchBlockerIds: batch.blockerIds }
+      : generated.record;
 
     // Persist the durable event before attempting any external delivery.
     const next = {
       ...currentCampaign,
-      attentionEvents: [...(currentCampaign.attentionEvents ?? []), generated.record],
+      attentionEvents: [...(currentCampaign.attentionEvents ?? []), record],
       updatedAt: this.now(),
     };
     this.careerRepository.saveCampaign(next);
-    await this.deliverAttentionRecord(generated.record);
+    // This question was already answered in an earlier numbered reply: use
+    // that answer through the normal reply path instead of asking again.
+    if (pending && record.question) {
+      const selectedOption = typedAnswerForQuestion(record.question, pending.text);
+      if (selectedOption !== undefined) {
+        try {
+          await this.resolveAttentionResponse({ eventId: record.id, selectedOption, actorIdentity: pending.actor, respondedAt: this.now() });
+          return;
+        } catch {
+          // The saved answer did not fit; ask the question on its own below.
+        }
+      }
+      await this.notificationAdapter?.publishInfoNotice?.(
+        `${job.job.company}: your answer "${pending.text.slice(0, 80)}" didn't fit "${record.question.prompt.slice(0, 120)}", so I'm asking it on its own.`,
+      ).catch(() => undefined);
+    }
+    await this.deliverAttentionRecord(record);
+  }
+
+  /**
+   * Every open question for this application that can be answered in one
+   * numbered reply, in form order, starting with `first`. Undefined when
+   * only one would be listed, so a single question keeps its usual message.
+   */
+  private batchForJob(campaign: Campaign, job: CareerJob, first: CareerBlocker): { questions: AttentionBatchQuestion[]; blockerIds: string[] } | undefined {
+    const batchable = (candidate: CareerBlocker) => !UNBATCHED_BLOCKER_KINDS.has(candidate.kind) && Boolean(questionForBlocker(candidate));
+    if (!batchable(first)) return undefined;
+    const executedAt = job.execution?.updatedAt;
+    const answered = new Set((campaign.attentionEvents ?? [])
+      .filter((event) => event.jobId === job.id && event.status === "resolved" && event.blockerId &&
+        !(executedAt && event.resolvedAt && executedAt > event.resolvedAt))
+      .map((event) => event.blockerId as string));
+    const rest = job.blockers.filter((candidate) => candidate.id !== first.id && candidate.status === "open" && !answered.has(candidate.id) &&
+      attentionDescriptorSignature(candidate, job.job.compensation) !== undefined && batchable(candidate));
+    const members = [first, ...rest].slice(0, MAX_BATCH_QUESTIONS);
+    if (members.length < 2) return undefined;
+    return {
+      questions: members.map((member) => {
+        const question = questionForBlocker(member)!;
+        return { prompt: question.prompt, kind: question.kind, options: question.options, ...(question.required !== undefined ? { required: question.required } : {}) };
+      }),
+      blockerIds: members.map((member) => member.id),
+    };
+  }
+
+  private savePendingBatchAnswers(campaignId: string, eventId: string, answers: Readonly<Record<string, string>>, actor: AttentionActorIdentity): void {
+    if (Object.keys(answers).length === 0) return;
+    const campaign = this.getCampaign(campaignId);
+    this.careerRepository.saveCampaign({
+      ...campaign,
+      attentionEvents: (campaign.attentionEvents ?? []).map((event) => event.id === eventId
+        ? { ...event, pendingBatchAnswers: { ...(event.pendingBatchAnswers ?? {}), ...answers }, batchResponder: actor }
+        : event),
+      updatedAt: this.now(),
+    });
+  }
+
+  /** Remove and return a saved numbered-reply answer for this blocker, if one is waiting. */
+  private takePendingBatchAnswer(campaignId: string, jobId: string, blockerId: string): { text: string; actor: AttentionActorIdentity } | undefined {
+    const campaign = this.getCampaign(campaignId);
+    const source = (campaign.attentionEvents ?? []).find((event) => event.jobId === jobId && event.pendingBatchAnswers?.[blockerId] !== undefined);
+    if (!source || !source.batchResponder) return undefined;
+    const text = source.pendingBatchAnswers![blockerId]!;
+    const { [blockerId]: _used, ...remaining } = source.pendingBatchAnswers!;
+    this.careerRepository.saveCampaign({
+      ...campaign,
+      attentionEvents: (campaign.attentionEvents ?? []).map((event) => event.id === source.id ? { ...event, pendingBatchAnswers: remaining } : event),
+      updatedAt: this.now(),
+    });
+    return { text, actor: source.batchResponder };
   }
 
   /**
@@ -3700,8 +3828,12 @@ export class CareerAgentService {
     if (!record || record.type !== "needs_input" || !record.question) return;
 
     const rawValue = typeof value === "string" ? value.trim() : String(value);
-    const option =
-      record.question.kind === "free_text"
+    // SKIP on an optional question stores the skip marker as the value; the
+    // reply itself was "SKIP", and the event is answered all the same.
+    const skipped = rawValue === OPTIONAL_ANSWER_SKIPPED && suppliedResponse !== undefined && /^\s*skip\s*$/i.test(suppliedResponse.selectedOption);
+    const option = skipped
+      ? { id: suppliedResponse!.selectedOption, label: "SKIP" }
+      : record.question.kind === "free_text"
         ? { id: rawValue, label: rawValue }
         : record.question.options.find(
             (candidate) => candidate.id === rawValue || candidate.label.toLowerCase() === rawValue.toLowerCase(),

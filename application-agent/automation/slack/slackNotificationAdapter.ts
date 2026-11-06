@@ -29,7 +29,7 @@ export interface SlackInteractionResult {
 }
 
 export type SlackAttentionResponseHandler = (response: AttentionResponse) => Promise<{
-  status: "resolved" | "duplicate";
+  status: "resolved" | "duplicate" | "partial";
 }>;
 
 /** Runs one explicit, human-approved submit of an exact prepared application. */
@@ -181,6 +181,32 @@ function eventMessage(
       blocks: [
         { type: "header", text: { type: "plain_text", text: safeText(event.title, 150) } },
         { type: "section", text: { type: "mrkdwn", text: body } },
+      ],
+    };
+  }
+  // Every open question for this application in one message, answered with one numbered reply.
+  if (event.batch && event.batch.length > 1) {
+    const items = event.batch.map((item, index) => {
+      const optional = item.required === false ? " _(optional)_" : "";
+      const choices = item.kind === "single_choice" && item.options.length > 0
+        ? `\n      Choices: ${item.options.map((option) => markdownText(option.label, 120)).join(" · ")}`
+        : "";
+      return `*${index + 1}.* ${markdownText(item.prompt, 240)}${optional}${choices}`;
+    });
+    const postedCompensation = event.batch.some((_, index) => index === 0 && event.blockerType === "salary")
+      ? formatPostedCompensation(event.context.postingCompensation)
+      : undefined;
+    const pay = postedCompensation ? `\n\n_The posting lists ${postedCompensation}._` : "";
+    const optionalNote = event.batch.some((item) => item.required === false) ? " Optional ones take SKIP." : "";
+    const howTo = `Reply once in this thread with numbered answers, for example:\n\`1. Yes\`\n\`2. No\`${optionalNote} You can answer some now and the rest later.`;
+    const body = `${event.batch.length} questions for this application:\n\n${items.join("\n")}${pay}\n\n${howTo}`;
+    if (renderOptions.threadReply === true) return { text: body, blocks: [{ type: "section", text: { type: "mrkdwn", text: body.slice(0, 2900) } }] };
+    const text = `${markdownText(event.title, 160)}\n${markdownText(event.context.company, 160)} — ${markdownText(event.context.role, 200)}\n\n${body}`;
+    return {
+      text,
+      blocks: [
+        { type: "header", text: { type: "plain_text", text: safeText(`${event.context.company} — ${event.batch.length} questions`, 150) } },
+        { type: "section", text: { type: "mrkdwn", text: `*${markdownText(event.context.company, 160)} — ${markdownText(event.context.role, 200)}*\n\n${body}`.slice(0, 2900) } },
       ],
     };
   }
@@ -876,7 +902,7 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     const userId = stringValue(message.user, 128);
     const channelId = stringValue(message.channel, 128);
     const threadTs = stringValue(message.thread_ts, 128);
-    const text = stringValue(message.text, 512) ?? richTextMessageValue(message, 512);
+    const text = stringValue(message.text, 2000) ?? richTextMessageValue(message, 2000);
     const teamId = stringValue(payload.team_id, 128) ?? stringValue(message.team, 128);
     if (!userId) {
       this.diagnosticLogger.info("ignored: message had no user");
@@ -936,7 +962,8 @@ export class SlackNotificationAdapter implements NotificationAdapter {
       return;
     }
     const event = openEvents[0];
-    if (event.type !== "needs_input" || !event.question || event.question.kind !== "free_text") {
+    // A batch takes typed answers even when its first question is a choice.
+    if (event.type !== "needs_input" || !event.question || (event.question.kind !== "free_text" && !(event.batch && event.batch.length > 1))) {
       this.diagnosticLogger.info("ignored: attention event is not a free-text input");
       return;
     }
@@ -1060,7 +1087,8 @@ export class SlackNotificationAdapter implements NotificationAdapter {
         },
         respondedAt: new Date().toISOString(),
       });
-      return { status: result.status };
+      // A button press is never a numbered reply, so "partial" cannot come back here.
+      return { status: result.status === "partial" ? "ignored" : result.status };
     } catch {
       return { status: "rejected", reason: "attention_response_rejected" };
     }

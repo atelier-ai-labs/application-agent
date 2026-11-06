@@ -984,6 +984,41 @@ describe("Slack human-attention adapter", () => {
     expect(responses).toEqual(["attention-free-text-1:USD 150000 base salary"]);
   });
 
+  it("posts every question for an application in one numbered message and routes the numbered reply", async () => {
+    const requests: string[] = [];
+    const responses: string[] = [];
+    const batchEvent: AttentionEvent = {
+      ...event(),
+      id: "attention-batch-1",
+      context: { company: "Kapitus", role: "Software Engineer II" },
+      question: { prompt: "Do you hold an active security clearance?", kind: "single_choice", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
+      batch: [
+        { prompt: "Do you hold an active security clearance?", kind: "single_choice", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
+        { prompt: "Which city will you work from?", kind: "free_text", options: [] },
+        { prompt: "Pronouns", kind: "free_text", options: [], required: false },
+      ],
+    };
+    const adapter = new SlackNotificationAdapter({
+      config,
+      eventLookup: (eventId) => (eventId === batchEvent.id ? batchEvent : undefined),
+      responseHandler: async (attentionResponse) => { responses.push(attentionResponse.selectedOption); return { status: "resolved" }; },
+      fetcher: async (_input, init) => {
+        requests.push(typeof init?.body === "string" ? init.body : "");
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000002" }) } as Response;
+      },
+    });
+    await adapter.publishAttentionEvent(batchEvent);
+    const posted = JSON.parse(requests[0]!) as { text: string; blocks: unknown[] };
+    expect(posted.text).toContain("3 questions for this application");
+    expect(posted.text).toMatch(/\*1\.\* Do you hold an active security clearance\?\n\s+Choices: Yes · No/);
+    expect(posted.text).toContain("*3.* Pronouns _(optional)_");
+    expect(posted.text).toContain("Reply once in this thread with numbered answers");
+    expect(JSON.stringify(posted.blocks)).not.toContain("\"actions\"");
+    // Question 1 is a choice, but a typed numbered reply still reaches the agent.
+    await adapter.handleSocketEnvelope(JSON.stringify(messageEnvelope({ text: "1. No\n2. Pittsburgh, PA\n3. SKIP" })));
+    expect(responses).toEqual(["1. No\n2. Pittsburgh, PA\n3. SKIP"]);
+  });
+
   it("routes an authorized free-text thread reply through the existing response core", async () => {
     const responses: string[] = [];
     const adapter = new SlackNotificationAdapter({

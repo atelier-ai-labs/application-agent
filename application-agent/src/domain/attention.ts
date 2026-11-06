@@ -24,6 +24,18 @@ export interface AttentionQuestion {
   required?: boolean;
 }
 
+/**
+ * One question in an application's batch: every open question for one
+ * application is listed in a single Slack message and answered with one
+ * numbered reply. Item 1 is always the event's own question.
+ */
+export interface AttentionBatchQuestion {
+  prompt: string;
+  kind: AttentionQuestionKind;
+  options: readonly AttentionOption[];
+  required?: boolean;
+}
+
 /** A local model suggestion shown for human review; it is never an answer approval. */
 export interface AttentionDraft {
   answer: string;
@@ -65,6 +77,8 @@ export interface AttentionEvent {
   draft?: AttentionDraft;
   /** The exact answer persisted for this blocker after an explicit response. */
   answerUsed?: string;
+  /** All of this application's open questions, numbered from 1, when more than one is waiting. */
+  batch?: readonly AttentionBatchQuestion[];
   message?: string;
   remediation?: string;
   reasonCode?: AttentionConfigurationReason;
@@ -109,6 +123,12 @@ export interface PersistedAttentionEvent extends AttentionEvent {
   /** Historical lifecycle metadata kept private to durable state. */
   closureReason?: AttentionClosureReason;
   replacementEventId?: string;
+  /** Blocker for each `batch` item, in the same order. */
+  batchBlockerIds?: readonly string[];
+  /** Answers given in a numbered reply for later batch items, by blocker id, not yet used. */
+  pendingBatchAnswers?: Readonly<Record<string, string>>;
+  /** Who sent the numbered reply, so a later item's answer is recorded as theirs. */
+  batchResponder?: AttentionActorIdentity;
 }
 
 export interface NotificationAdapter {
@@ -189,7 +209,8 @@ export class InMemoryNotificationAdapter implements NotificationAdapter {
 export const ATTENTION_EVENT_HISTORY_LIMIT = 64;
 
 const MAX_PROMPT_LENGTH = 240;
-const MAX_RESPONSE_LENGTH = 512;
+// A numbered reply to an application's batch of questions can run long.
+const MAX_RESPONSE_LENGTH = 2000;
 const MAX_CONTEXT_LENGTH = 160;
 // The signature includes the exact inspected prompt plus bounded field,
 // section, option, and provenance metadata. Keep the serialized identity
@@ -406,7 +427,7 @@ function questionKind(options: readonly AttentionOption[]): AttentionQuestionKin
   return options.length > 0 ? "single_choice" : "free_text";
 }
 
-function questionForBlocker(blocker: CareerBlocker): AttentionQuestion | undefined {
+export function questionForBlocker(blocker: CareerBlocker): AttentionQuestion | undefined {
   if (!isHumanAttentionBlockerKind(blocker.kind)) return undefined;
   const prompt = promptFor(blocker);
   if (!prompt || !blocker.context.applicationId) return undefined;
@@ -621,6 +642,9 @@ export function publicAttentionEvent(record: PersistedAttentionEvent): Attention
     response: _response,
     closureReason: _closureReason,
     replacementEventId: _replacementEventId,
+    batchBlockerIds: _batchBlockerIds,
+    pendingBatchAnswers: _pendingBatchAnswers,
+    batchResponder: _batchResponder,
     ...event
   } = record;
   return clone(event);
@@ -804,4 +828,44 @@ export function isPersistedAttentionEvent(value: unknown): value is PersistedAtt
       candidate.closureReason === "reclassified_non_blocking") &&
     (candidate.replacementEventId === undefined || boundedText(candidate.replacementEventId, 128))
   );
+}
+
+/**
+ * Splits "1. Yes 2. No\n3) SKIP" into answers by number. A reply with no
+ * numbers at all is not numbered: the caller treats it as the answer to
+ * question 1, as before batching existed.
+ */
+export function parseNumberedReply(text: string, count: number): { numbered: boolean; answers: Map<number, string> } {
+  const answers = new Map<number, string>();
+  const marker = /(?:^|\s)(\d{1,2})\s*[.):\-]\s+/g;
+  const hits: { number: number; start: number; end: number }[] = [];
+  for (let match = marker.exec(text); match; match = marker.exec(text)) {
+    const number = Number(match[1]);
+    if (number < 1 || number > count) continue;
+    // Numbers must climb ("1. ... 2. ..."); "I have 3 years" is not a marker.
+    if (hits.length > 0 && number <= hits[hits.length - 1]!.number) continue;
+    hits.push({ number, start: match.index, end: match.index + match[0].length });
+  }
+  if (hits.length === 0) return { numbered: false, answers };
+  // Text before the first marker is not an answer to anything.
+  if (text.slice(0, hits[0]!.start).trim() !== "") return { numbered: false, answers };
+  hits.forEach((hit, index) => {
+    const value = text.slice(hit.end, index + 1 < hits.length ? hits[index + 1]!.start : undefined).trim();
+    if (value) answers.set(hit.number, value);
+  });
+  return { numbered: true, answers };
+}
+
+/** The option a typed answer names: its id or label, or a lone "yes"/"no" that starts one label. */
+export function optionIdForTypedAnswer(options: readonly AttentionOption[], text: string): string | undefined {
+  const wanted = text.trim().toLowerCase().replace(/[.!]+$/, "");
+  if (!wanted) return undefined;
+  const exact = options.find((option) => option.id.toLowerCase() === wanted || option.label.trim().toLowerCase().replace(/[.!]+$/, "") === wanted);
+  if (exact) return exact.id;
+  if (/^(?:yes|no|y|n)$/.test(wanted)) {
+    const word = wanted.startsWith("y") ? "yes" : "no";
+    const leading = options.filter((option) => new RegExp(`^${word}\\b`, "i").test(option.label.trim()));
+    if (leading.length === 1) return leading[0]!.id;
+  }
+  return undefined;
 }
