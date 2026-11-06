@@ -51,4 +51,13 @@ describe("application receipt emails", () => {
     const earlier = job("d", "Sparksoft Corporation", "DevOps Engineer", { status: "applied", blockers: [] });
     expect(matchReceiptToJob(email("Thank you for applying to Sparksoft", "Your application for DevOps Engineer was received."), [junior, earlier]).kind).toBe("none");
   });
+
+  it("matches an employer that signs with a different suffix only when the email names the role", () => {
+    const mission = job("m", "Mission Underwriting Services", "Applied AI Engineer");
+    const receipt = (text: string) => email("Thank You For Applying To Mission Underwriting Managers", text, "no-reply@ats.rippling.com");
+    expect(matchReceiptToJob(receipt("Thank you for applying to Mission Underwriting Managers! We have received your application. Position: Applied AI Engineer"), [mission]))
+      .toMatchObject({ kind: "confirmed", job: { id: "m" } });
+    // Same first two words, but no role named: not enough.
+    expect(matchReceiptToJob(receipt("Thank you for applying to Mission Underwriting Managers! We have received your application."), [mission])).toEqual({ kind: "none" });
+  });
 });

@@ -74,12 +74,26 @@ function namesRole(email: ReceiptEmail, role: string): boolean {
   return hasWords(text(`${email.subject} ${email.text.slice(0, 4_000)}`), text(role));
 }
 
+/**
+ * The same employer under a different legal suffix ("Mission Underwriting
+ * Managers" for "Mission Underwriting Services"): the first two words match
+ * and the email names this exact role, so a look-alike company is not enough.
+ */
+function namesCompanyByPrefixAndRole(email: ReceiptEmail, job: CareerJob): boolean {
+  const words = companyKey(job.job.company).split(" ").filter(Boolean);
+  if (words.length < 3) return false;
+  const prefix = words.slice(0, 2).join(" ");
+  if (prefix.length < 8 || COMMON_WORDS.has(words[0]!)) return false;
+  const body = text(`${email.from} ${email.subject} ${email.text.slice(0, 4_000)}`);
+  return hasWords(body, prefix) && namesRole(email, job.job.title);
+}
+
 export function matchReceiptToJob(email: ReceiptEmail, jobs: readonly CareerJob[]): ReceiptMatch {
   if (classifyJobEmail(email) !== "received") return { kind: "none" };
   const candidates = jobs.filter((job) => isAwaitingReceipt(job) &&
     // An older receipt from the same employer is not proof of this application.
     (!job.applicationStartedAt || email.receivedAt >= job.applicationStartedAt) &&
-    namesCompany(email, job.job.company));
+    (namesCompany(email, job.job.company) || namesCompanyByPrefixAndRole(email, job)));
   if (candidates.length === 0) return { kind: "none" };
   const companies = new Set(candidates.map((job) => companyKey(job.job.company)));
   if (companies.size > 1) return { kind: "ambiguous", jobs: candidates };
