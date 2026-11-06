@@ -95,6 +95,15 @@ export async function checkInboxForTracker(options: CheckInboxOptions): Promise<
     const done = () => { if (options.apply) options.processed.add(email.id); };
     if (kind === "not_job") { done(); continue; }
     const matches = matchingRows(email, rows, companyCol, roleCol);
+    // A "thanks for applying" email only ever moves a Researching row to
+    // Applied. When every matching row is already past that, it changes
+    // nothing, so there is nothing to ask about.
+    if (kind === "received" && matches.length > 1 &&
+      matches.every((index) => !["researching", ""].includes(key(String(rows[index]?.[statusCol] ?? "").trim())))) {
+      decisions.push({ email: label, kind, action: "skipped", reason: "every matching row is already past Applied" });
+      done();
+      continue;
+    }
     if (matches.length !== 1) {
       const reason = matches.length === 0 ? "no tracker row matched" : "several tracker rows matched";
       // Ping only when the email is plausibly ours: several matching rows, or

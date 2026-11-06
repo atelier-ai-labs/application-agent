@@ -54,6 +54,16 @@ describe("inbox monitor", () => {
     expect((await run(tracker, [email], processed)).decisions).toEqual([]);
   });
 
+  it("stays quiet about a receipt matching several rows that are all already Applied, but asks when one could change", async () => {
+    const receipt = mail("m9", "no-reply@us.greenhouse-mail.io", "Thank you for applying to Sparksoft Corporation", "Your application has been received.");
+    const done = new Tracker([headers, row("Sparksoft Corporation", "Jr. Full Stack Developer", "Applied"), row("Sparksoft Corporation", "Full Stack Developer - Mid-Level", "Applied")]);
+    const quiet = await run(done, [receipt]);
+    expect(quiet.notices).toEqual([]);
+    expect(quiet.decisions[0]).toMatchObject({ action: "skipped" });
+    const open = new Tracker([headers, row("Sparksoft Corporation", "Jr. Full Stack Developer", "Applied"), row("Sparksoft Corporation", "Full Stack Developer - Mid-Level", "Researching")]);
+    expect((await run(open, [{ ...receipt, id: "m10" }])).notices).toEqual([expect.stringContaining("several tracker rows matched")]);
+  });
+
   it("does not match a company named by an everyday word in the body, and asks when unsure", async () => {
     const tracker = new Tracker([headers, row("Future", "Applied AI Engineer", "Applied"), row("Clair", "DevOps Engineer", "Applied")]);
     const { decisions, notices } = await run(tracker, [mail("m4", "talent@othercorp.com", "Your application",
