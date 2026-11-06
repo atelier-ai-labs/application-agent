@@ -85,6 +85,10 @@ function safeText(value: string, maximum = 240): string {
   return value.replace(/\s+/g, " ").trim().slice(0, maximum);
 }
 
+function threadReplyOnly(options: { threadReply?: boolean }): boolean {
+  return options.threadReply === true;
+}
+
 function markdownText(value: string, maximum = 240): string {
   return safeText(value, maximum).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
@@ -157,6 +161,26 @@ function eventMessage(
       blocks: [
         { type: "header", text: { type: "plain_text", text: safeText(event.title, 150) } },
         { type: "section", text: { type: "mrkdwn", text: `${handoffText}\n\n${instruction}${link}` } },
+      ],
+    };
+  }
+  // A dropped or missing resume is a file to attach, not a question to answer in text.
+  if (event.blockerType === "resume_missing" || event.blockerType === "required_file_missing") {
+    const problem = event.blockerType === "resume_missing"
+      ? "I attached your résumé, but the page dropped it (sites sometimes clear an upload when the form re-renders), and attaching it again didn't stick."
+      : "The résumé file chosen for this application isn't on this computer, so I couldn't attach it.";
+    const where = renderOptions.handoffUrl ? "from the link below or in the agent's Chromium window" : "in the agent's Chromium window";
+    const optional = event.question.required === false ? " The field is optional: reply SKIP to continue without a résumé." : "";
+    const instruction = `Attach your résumé ${where}, then reply DONE in this thread.${optional}`;
+    const link = renderOptions.handoffUrl ? `\n\nOpen the protected browser handoff: ${markdownText(renderOptions.handoffUrl, 500)}` : "";
+    const body = `${problem}\n\n${instruction}${link}`;
+    if (threadReplyOnly(renderOptions)) return { text: body, blocks: [{ type: "section", text: { type: "mrkdwn", text: body } }] };
+    const text = `${markdownText(event.title, 160)}\n${markdownText(event.context.company, 160)} — ${markdownText(event.context.role, 200)}\n\n${body}`;
+    return {
+      text,
+      blocks: [
+        { type: "header", text: { type: "plain_text", text: safeText(event.title, 150) } },
+        { type: "section", text: { type: "mrkdwn", text: body } },
       ],
     };
   }

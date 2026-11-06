@@ -2930,6 +2930,36 @@ describe("Rippling field classification regressions", () => {
     expect(session.submitClicks).toBe(0);
   });
 
+  it("attaches the resume once more when a rerender dropped it, before asking anyone", async () => {
+    const postingId = "a3b7147c-f9c5-4dd4-9cf2-e8c183b19162";
+    const sourceUrl = `https://jobs.ashbyhq.com/MeridianLink/${postingId}`;
+    const applicationUrl = `${sourceUrl}/application`;
+    const resume = new FakeField({ id: "_systemfield_resume", label: "Resume", type: "file", required: true });
+    const session = new FakeSession([resume]);
+    let checks = 0;
+    session.verifyUploadedFile = async () => (checks += 1) > 1;
+    const base = request();
+    const ashbyJob = careerJob({
+      sourceId: "curated-live",
+      sourceRecordId: `MeridianLink:${postingId}`,
+      destinationResolution: { status: "resolved", attemptedAt: capturedAt, destinationUrl: applicationUrl, ats: "Ashby", actionable: true, provenance: "recognized_ats_evidence", evidence: ["curated:explicit-public-posting"] },
+      job: { ...base.careerJob.job, sourceUrl, applicationUrl },
+    });
+    const result = await new LeverBrowserExecutor({
+      sessionFactory: new FakeSessionFactory(session),
+      provider: "auto",
+      resumePaths: { "cloud-platform": "/tmp/synthetic-cloud-platform.pdf" },
+      resumeFileExists: () => true,
+      now: () => capturedAt,
+    }).execute(request({ careerJob: ashbyJob, application: application({ job: ashbyJob.job }) }));
+
+    expect(result.state).toBe("ready_to_submit");
+    if (result.state !== "ready_to_submit") return;
+    expect(resume.uploadCalls).toHaveLength(2);
+    expect(result.inspection?.evidence).toContain("resume-verification:confirmed-after-reupload");
+    expect(session.submitClicks).toBe(0);
+  });
+
   it("does not reselect an arbitrary Ashby location when options are unavailable", async () => {
     const postingId = "a3b7147c-f9c5-4dd4-9cf2-e8c183b19162";
     const sourceUrl = `https://jobs.ashbyhq.com/MeridianLink/${postingId}`;

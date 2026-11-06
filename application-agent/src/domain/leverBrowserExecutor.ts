@@ -1465,6 +1465,9 @@ function resolvedCareerValue(
   field: ApplicationFieldDescriptor,
   request: ApplicationExecutionRequest,
 ): AnswerValue | undefined {
+  // A file comes from the configured resume artifacts, never from a reply
+  // ("DONE" after attaching a dropped resume by hand is not a file path).
+  if (field.type === "file") return undefined;
   // Newest answer first: when a question was asked again because the form
   // rejected the earlier answer, the later reply is the one to use.
   const candidates = request.careerJob.blockers.filter(
@@ -2990,7 +2993,23 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
     // ready; the immediate FileList/upload acknowledgement is not durable.
     if ((observed.target.provider === "ashby" || observed.target.provider === "rippling") && resumePath && resumeUsed && observed.session.verifyUploadedFile) {
       const resumeField = observed.fields.find((field) => descriptor(field).classification === "resume_upload");
-      const verified = await observed.session.verifyUploadedFile(resumePath).catch(() => false);
+      let verified = await observed.session.verifyUploadedFile(resumePath).catch(() => false);
+      if (!verified) {
+        // A rerender cleared the attachment. Attach it once more to the
+        // current resume control and check again before asking anyone.
+        const current = await observed.session.inspectFields().catch(() => [] as readonly LeverBrowserField[]);
+        const target = current.find((field) => field.type === "file" && descriptor(field).classification === "resume_upload");
+        if (target) {
+          try {
+            await target.uploadFile(resumePath);
+            evidence.push("resume-reupload:attempted");
+            verified = await observed.session.verifyUploadedFile(resumePath).catch(() => false);
+          } catch {
+            evidence.push("resume-reupload:failed");
+          }
+          if (verified) evidence.push("resume-verification:confirmed-after-reupload");
+        }
+      }
       if (!verified) {
         const fieldDescriptor = resumeField
           ? descriptor(resumeField)
@@ -3004,7 +3023,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         unresolvedFields.add(fieldDescriptor.label);
         blockers.push(formBlocker(
           fieldDescriptor,
-          `${observed.target.provider === "rippling" ? "Rippling" : "Ashby"} no longer shows the selected resume attached after the form finished rendering; it was left for review.`,
+          `${observed.target.provider === "rippling" ? "Rippling" : "Ashby"} dropped the attached resume after the form re-rendered, and attaching it again did not stick.`,
           "resume_missing",
           "ATS_FORM",
           executorEvidenceLabel(observed.target.provider),

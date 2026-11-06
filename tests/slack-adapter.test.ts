@@ -411,6 +411,23 @@ describe("Slack human-attention adapter", () => {
     expect(requests[0]).toContain("This question is optional: reply SKIP to leave it blank.");
   });
 
+  it("asks to attach a dropped résumé instead of asking for a text answer", async () => {
+    const requests: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        requests.push(typeof init?.body === "string" ? init.body : "");
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000004" }) } as Response;
+      },
+    });
+    const event = freeTextEvent();
+    await adapter.publishAttentionEvent({ ...event, blockerType: "resume_missing", question: { ...event.question!, prompt: "Résumé", required: false } });
+    expect(requests[0]).toContain("the page dropped it");
+    expect(requests[0]).toContain("then reply DONE");
+    expect(requests[0]).toContain("reply SKIP to continue without a résumé");
+    expect(requests[0]).not.toContain("one grounded answer");
+  });
+
   it("reannounces one buried open question as a fresh top-level message", async () => {
     const requests: string[] = [];
     let sequence = 1;

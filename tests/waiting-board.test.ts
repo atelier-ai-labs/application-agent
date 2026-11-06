@@ -13,6 +13,11 @@ function job(id: string, company: string, title: string, status: string, blocker
 const askable = () => true;
 
 describe("Waiting on you board", () => {
+  it("shows a dropped résumé as something to attach, not a question called Résumé", () => {
+    const board = waitingBoardItems([job("mission", "Mission Underwriting Services", "Applied AI Engineer", "needs_input", [question("field-1", "Résumé", { kind: "resume_missing" })])], [], askable, now);
+    expect(board.items[0]!.questions).toEqual(["Résumé upload didn't stick: attach it in the window, then reply DONE"]);
+  });
+
   it("lists recent waiting applications from job state, verify and Submit first, with every open question", () => {
     const jobs = [
       job("mid", "Sparksoft Corporation", "Full Stack Developer - Mid-Level", "needs_input", [

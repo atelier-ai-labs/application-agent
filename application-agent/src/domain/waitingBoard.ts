@@ -37,6 +37,12 @@ export const WAITING_BOARD_RECENT_MS = 7 * 24 * 60 * 60 * 1000;
 
 const cleanQuestion = (question: string) => question.replace(/\s*\*+\s*$/, "").replace(/\s+/g, " ").trim().slice(0, 110);
 
+/** A file to attach reads as an action, not as a question named "Résumé". */
+const boardLine = (blocker: CareerBlocker) =>
+  blocker.kind === "resume_missing" ? "Résumé upload didn't stick: attach it in the window, then reply DONE"
+    : blocker.kind === "required_file_missing" ? "Résumé file not found: attach it in the window, then reply DONE"
+      : cleanQuestion(blocker.question);
+
 export function waitingBoardItems(
   jobs: readonly CareerJob[],
   events: readonly WaitingBoardEvent[],
@@ -50,7 +56,7 @@ export function waitingBoardItems(
     if (job.status !== "needs_input" && job.status !== "ready_to_submit") continue;
     const open = job.blockers.filter((blocker) => blocker.status === "open");
     const verify = open.some(isPostSubmitHumanCheck);
-    const questions = open.filter((blocker) => !isPostSubmitHumanCheck(blocker) && isAskable(blocker, job)).map((blocker) => cleanQuestion(blocker.question));
+    const questions = open.filter((blocker) => !isPostSubmitHumanCheck(blocker) && isAskable(blocker, job)).map(boardLine);
     const state: WaitingState | undefined = verify ? "verify" : job.status === "ready_to_submit" ? "submit" : questions.length > 0 ? "questions" : undefined;
     if (!state) continue;
     if (Date.parse(job.updatedAt) < cutoff) { olderCount += 1; continue; }
