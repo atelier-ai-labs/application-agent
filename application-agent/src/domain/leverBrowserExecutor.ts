@@ -1151,6 +1151,20 @@ function valueAsString(value: AnswerValue | undefined): string | undefined {
  * candidate's authorized amount exact while normalizing only the presentation
  * syntax accepted by a numeric input.
  */
+/**
+ * "Start two weeks from when I apply": with availabilityNoticeDays set, the
+ * start date is that many days after the day this form is filled (local
+ * date, YYYY-MM-DD), so it never goes stale like a fixed date does.
+ */
+export function withNoticePeriodStartDate(profile: CandidateProfile | undefined, now: string): CandidateProfile | undefined {
+  const days = profile?.workPreferences.availabilityNoticeDays;
+  const at = Date.parse(now);
+  if (!profile || typeof days !== "number" || !Number.isInteger(days) || days < 0 || days > 180 || !Number.isFinite(at)) return profile;
+  const start = new Date(at + days * 86_400_000);
+  const date = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, "0")}-${String(start.getDate()).padStart(2, "0")}`;
+  return { ...profile, workPreferences: { ...profile.workPreferences, availabilityStartDate: date } };
+}
+
 export function normalizeNumericSalaryValue(value: string): string | undefined {
   const compact = value.replace(/\bUSD\b/gi, "").replace(/[\s$,]/g, "").trim();
   return /^\d+(?:\.\d{1,2})?$/.test(compact) ? compact : undefined;
@@ -1658,6 +1672,11 @@ function profileValueForField(
     const availability = profile.workPreferences.availabilityStartDate;
     if (hasPhrase(text, /\byear\b/)) return groundedDatePart(availability, "year");
     if (hasPhrase(text, /\bmonth\b/)) return groundedDatePart(availability, "month");
+    // A typed box that names its format: "MM/DD/YYYY" or "MM/YYYY".
+    const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(availability ?? "");
+    const hint = fieldText(field);
+    if (iso && /\bmm\s*\/\s*dd\s*\/\s*yyyy\b/.test(hint)) return `${iso[2]}/${iso[3]}/${iso[1]}`;
+    if (iso && /\bmm\s*\/\s*yyyy\b/.test(hint)) return `${iso[2]}/${iso[1]}`;
     return availability ?? undefined;
   }
   const name = splitFullName(profile.identity.fullName ?? undefined);
@@ -2760,6 +2779,8 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
 
   async execute(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult> {
     const startedAt = this.now();
+    const profile = withNoticePeriodStartDate(request.profile, startedAt);
+    if (profile) request = { ...request, profile };
     let observed = await this.inspectForm(request, startedAt, "executor");
     if (observed.inspection.status === "failed") {
       return failedResult(

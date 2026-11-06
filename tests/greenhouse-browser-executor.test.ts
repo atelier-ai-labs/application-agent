@@ -254,6 +254,26 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(country.current).toBe("United States");
   });
 
+  it("fills the start date as two weeks after the day it applies, in the format the box asks for", async () => {
+    const field = (id: string, label: string) => new FakeField({ id, label, type: "text", required: true,
+      questionDescriptor: { promptText: label, sourceStrategy: "question_container", confidence: "high" } });
+    const run = async (workPreferences: CandidateProfile["workPreferences"], label: string, now: string) => {
+      const start = field("question_start", label);
+      const session = new FakeSession([start]);
+      const base = request(session);
+      await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse", now: () => now })
+        .execute({ ...base, profile: { ...exampleCandidateProfile, workPreferences } });
+      return start.current;
+    };
+    const notice = { ...exampleCandidateProfile.workPreferences, availabilityStartDate: "2026-10-01", availabilityNoticeDays: 14 };
+    expect(await run(notice, "Earliest available start date", "2026-11-05T17:00:00.000Z")).toBe("2026-11-19");
+    expect(await run(notice, "When can you start? (MM/DD/YYYY)", "2026-11-05T17:00:00.000Z")).toBe("11/19/2026");
+    // Across a month end, and a later application gets a later date.
+    expect(await run(notice, "Earliest available start date", "2026-12-20T17:00:00.000Z")).toBe("2027-01-03");
+    // Without the setting, the fixed profile date is used as before.
+    expect(await run({ ...notice, availabilityNoticeDays: undefined }, "Earliest available start date", "2026-11-05T17:00:00.000Z")).toBe("2026-10-01");
+  });
+
   it("types the posted-range midpoint into a salary box as a plain number", async () => {
     const salary = new FakeField({ id: "question_salary", label: "What are you compensation expectations for this position?", type: "text", required: true,
       questionDescriptor: { promptText: "What are you compensation expectations for this position?", sourceStrategy: "question_container", confidence: "high" } });

@@ -135,6 +135,11 @@ export interface WorkPreferences {
    * posting lists, and still asks when it lists none.
    */
   salaryStrategy?: "ask" | "posting_midpoint";
+  /**
+   * Start date as a notice period: this many days after the day the form is
+   * filled (14 = "two weeks from when I apply"). Overrides availabilityStartDate.
+   */
+  availabilityNoticeDays?: number;
 }
 
 export interface WorkAuthorization {
