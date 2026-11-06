@@ -10,12 +10,14 @@ import {
 } from "../domain/policies";
 import { assertCampaignTransition } from "../domain/campaignLifecycle";
 import { createApplicationService, type ApplicationService } from "./applicationService";
+import { ResumeFamilyTieError } from "../domain/fit";
 import type { DurableSubmissionAuthority } from "../../automation/executionHost/submissionAuthority";
 import { attentionCategoryForEvent, isAttentionWorthyEvent } from "../domain/notifications";
 import { isVerifiedOfficialEmployerCandidate, type ApplicationDestinationResolver, type DestinationCandidate, type DestinationResolutionRunResult } from "../domain/applicationDestinationResolver";
 import {
   attentionDescriptorSignature,
   attentionEventForConfiguration,
+  attentionEventForResumeChoice,
   attentionEventForCareerBlocker,
   isAttentionResponse,
   optionIdForTypedAnswer,
@@ -296,6 +298,11 @@ export type StalePreSubmitHostUnavailable = "not_found" | "closed";
 
 /** Blocker kinds never carried to another application, even at the same employer. */
 const CARRY_OVER_EXCLUDED_KINDS: ReadonlySet<string> = new Set(["salary", "legal_attestation", "demographic_disclosure", "external_login", "external_verification", "captcha"]);
+
+/** Held-job reason for a résumé tie. Its wording keeps the queue row in Needs Input, not Skipped. */
+function resumeChoiceReason(error: ResumeFamilyTieError): string {
+  return `Résumé choice needed: this posting matches ${error.tiedFamilies.join(" and ")} equally. Pick one in Slack.`;
+}
 
 export function trustedQueueFitAssessment(
   fit: FitAssessment,
@@ -1136,7 +1143,9 @@ export class CareerAgentService {
       // was corrected, re-evaluate it under the current durable inputs rather
       // than allowing history dedupe to make the old decision permanent. The
       // existing job identity and source provenance remain unchanged.
-      if ((updated.status === "rejected" || updated.status === "held") && !updated.applicationId && updated.sourceId === CURATED_JOB_SOURCE_ID) {
+      // A résumé tie used to fail the job outright; it is now a held question, so look again.
+      const failedOnResumeTie = updated.status === "failed" && /^Resume family selection requires review because the posting ties/.test(updated.decisionReason ?? "");
+      if ((updated.status === "rejected" || updated.status === "held" || failedOnResumeTie) && !updated.applicationId && updated.sourceId === CURATED_JOB_SOURCE_ID) {
         return this.reconsiderRejectedCuratedJob(campaign, updated, destinationResolution, Boolean(input.queueSelected), input.resumeFamily, input.queueFit, input.queuePriority);
       }
       // A queue-selected retry may recover the same packet after a browser
@@ -1649,6 +1658,57 @@ export class CareerAgentService {
       }
     }
     return result;
+  }
+
+  /** Asks which résumé to use when a posting matches two equally; one open question per job. */
+  private async publishResumeChoice(campaignId: string, job: CareerJob, tiedFamilies: readonly ResumeFamilyId[]): Promise<void> {
+    const campaign = this.getCampaign(campaignId);
+    const existing = campaign.attentionEvents?.find((event) => event.type === "resume_choice" && event.status === "open" && event.jobId === job.id);
+    if (existing) {
+      await this.deliverAttentionRecord(existing);
+      return;
+    }
+    const families = tiedFamilies.map((id) => ({ id, label: this.profile.resumeFamilies.find((family) => family.id === id)?.label ?? id }));
+    const generated = attentionEventForResumeChoice({
+      campaignId, jobId: job.id, createdAt: this.now(), createId: this.createId,
+      company: job.job.company, role: job.job.title, families,
+    });
+    this.careerRepository.saveCampaign({ ...campaign, attentionEvents: [...(campaign.attentionEvents ?? []), generated.record], updatedAt: this.now() });
+    await this.deliverAttentionRecord(generated.record);
+  }
+
+  /**
+   * Records the tapped résumé as the job's queue résumé. The runtime then sets
+   * the queue row's Resume Version and puts it back to Ready, and the next run
+   * applies with that résumé (the tie is broken by it, see assessFit).
+   */
+  private resolveResumeChoice(campaign: Campaign, record: PersistedAttentionEvent, response: AttentionResponse): CareerAttentionResponseResult {
+    if (!record.jobId || !record.question) throw new AttentionResponseError("That attention event does not accept a response.");
+    const job = this.getJob(record.jobId);
+    if (record.status === "resolved") {
+      if (record.response?.selectedOption !== response.selectedOption) throw new AttentionResponseError("That attention event was already resolved with a different choice.");
+      return { status: "duplicate", event: publicAttentionEvent(record), careerJob: job };
+    }
+    if (record.status !== "open") throw new AttentionResponseError("That attention event is no longer open.");
+    const option = record.question.options.find((candidate) => candidate.id === response.selectedOption)
+      ?? record.question.options.find((candidate) => candidate.id === optionIdForTypedAnswer(record.question!.options, response.selectedOption));
+    if (!option) throw new AttentionResponseError("Choose one of the listed résumés.");
+    const updatedJob = this.saveJob({
+      ...job,
+      queueResumeFamily: option.id,
+      decisionReason: `Résumé chosen by you: ${option.label}. It starts on the next run.`,
+      updatedAt: this.now(),
+    });
+    const resolvedAt = this.now();
+    const resolved: PersistedAttentionEvent = { ...record, status: "resolved", resolvedAt, response, answerUsed: option.label };
+    const current = this.getCampaign(campaign.id);
+    this.careerRepository.saveCampaign({
+      ...current,
+      attentionEvents: (current.attentionEvents ?? []).map((event) => (event.id === record.id ? resolved : event)),
+      updatedAt: this.now(),
+    });
+    void this.notificationAdapter?.closeAttentionEvent?.(publicAttentionEvent(resolved))?.catch?.(() => undefined);
+    return { status: "resolved", event: publicAttentionEvent(resolved), careerJob: updatedJob };
   }
 
   private async publishConfigurationAttention(
@@ -2482,6 +2542,7 @@ export class CareerAgentService {
     const located = this.findAttentionRecord(response.eventId);
     if (!located) throw new AttentionResponseError("That attention event is unknown.");
     const { campaign, record } = located;
+    if (record.type === "resume_choice") return this.resolveResumeChoice(campaign, record, response);
     if (record.type !== "needs_input" || !record.applicationId || !record.jobId || !record.blockerId || !record.question) {
       throw new AttentionResponseError("That attention event does not accept a response.");
     }
@@ -2732,7 +2793,7 @@ export class CareerAgentService {
     const currentApplication = this.applicationService.getApplication(job.applicationId);
     if (currentApplication.submissionProof || currentApplication.status === "applied") throw new Error("A proof-bearing application cannot be refreshed.");
     const refreshedFit = trustedQueueFitAssessment(
-      await this.applicationService.assessJob(job.job),
+      await this.applicationService.assessJob(job.job, { preferredResumeFamily: canonicalQueueResumeFamily(job.queueResumeFamily) }),
       Boolean(job.queueSelected),
       job.queueFit,
       job.queuePriority,
@@ -4395,8 +4456,14 @@ export class CareerAgentService {
 
     let fit: FitAssessment;
     try {
-      fit = trustedQueueFitAssessment(await this.applicationService.assessJob(existing.job), queueSelected, queueFit, queuePriority, resumeFamily, this.profile);
+      fit = trustedQueueFitAssessment(await this.applicationService.assessJob(existing.job, { preferredResumeFamily: canonicalQueueResumeFamily(resumeFamily) }), queueSelected, queueFit, queuePriority, resumeFamily, this.profile);
     } catch (error) {
+      if (error instanceof ResumeFamilyTieError) {
+        const held = this.saveJob({ ...existing, status: "held", destinationResolution, decisionReason: resumeChoiceReason(error), updatedAt: this.now() });
+        this.appendEvent(campaign.id, "job.held", careerEventMetadata(held, undefined, held.decisionReason));
+        await this.publishResumeChoice(campaign.id, held, error.tiedFamilies);
+        return held;
+      }
       const reason = error instanceof Error ? error.message : "Fit assessment failed.";
       const failed = this.saveJob({
         ...existing,
@@ -4544,14 +4611,20 @@ export class CareerAgentService {
     let fit: FitAssessment;
     try {
       fit = trace
-          ? await trace.measure(`job.fit.${careerJob.id}`, "judgment", () => this.applicationService.assessJob(careerJob.job).then((fit) => trustedQueueFitAssessment(fit, Boolean(scouted.queueSelected), scouted.queueFit, scouted.queuePriority, scouted.queueResumeFamily, this.profile)), {
+          ? await trace.measure(`job.fit.${careerJob.id}`, "judgment", () => this.applicationService.assessJob(careerJob.job, { preferredResumeFamily: canonicalQueueResumeFamily(scouted.queueResumeFamily) }).then((fit) => trustedQueueFitAssessment(fit, Boolean(scouted.queueSelected), scouted.queueFit, scouted.queuePriority, scouted.queueResumeFamily, this.profile)), {
             parentNodeId,
             inputCount: 1,
             outputCount: () => 1,
             metadata: { stage: "job.fit", jobId: careerJob.id },
           })
-        : trustedQueueFitAssessment(await this.applicationService.assessJob(careerJob.job), Boolean(scouted.queueSelected), scouted.queueFit, scouted.queuePriority, scouted.queueResumeFamily, this.profile);
+        : trustedQueueFitAssessment(await this.applicationService.assessJob(careerJob.job, { preferredResumeFamily: canonicalQueueResumeFamily(scouted.queueResumeFamily) }), Boolean(scouted.queueSelected), scouted.queueFit, scouted.queuePriority, scouted.queueResumeFamily, this.profile);
     } catch (error) {
+      if (error instanceof ResumeFamilyTieError) {
+        careerJob = this.decideJob(careerJob, "held", resumeChoiceReason(error));
+        this.appendEvent(campaign.id, "job.held", careerEventMetadata(careerJob, undefined, careerJob.decisionReason));
+        await this.publishResumeChoice(campaign.id, careerJob, error.tiedFamilies);
+        return { held: true };
+      }
       const reason = error instanceof Error ? error.message : "Fit assessment failed.";
       careerJob = this.decideJob(careerJob, "failed", reason);
       this.appendEvent(campaign.id, "application.failed", careerEventMetadata(careerJob, undefined, reason));

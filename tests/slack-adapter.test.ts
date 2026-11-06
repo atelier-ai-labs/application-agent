@@ -251,6 +251,34 @@ describe("Slack human-attention adapter", () => {
     expect(responses).toEqual(["yes", "no"]);
   });
 
+  it("posts a résumé choice with one button per résumé and routes the tap", async () => {
+    const choice: AttentionEvent = {
+      id: "attention-resume-1", type: "resume_choice", source: "career-agent", campaignId: "campaign-1",
+      createdAt: "2026-11-06T22:30:00.000Z", status: "open", title: "📄 Which résumé should I use?", questionProvenance: "POLICY",
+      context: { company: "Span", role: "Platform Engineer" },
+      question: { prompt: "This posting matches Cloud / Platform and AI Platform / Agentic equally.", kind: "single_choice",
+        options: [{ id: "cloud-platform", label: "Cloud / Platform" }, { id: "ai-platform-agentic", label: "AI Platform / Agentic" }] },
+    };
+    const requests: string[] = [];
+    const responses: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      eventLookup: (eventId) => (eventId === choice.id ? choice : undefined),
+      responseHandler: async (input) => { responses.push(input.selectedOption); return { status: "resolved" }; },
+      fetcher: async (_url, init) => { requests.push(String(init?.body ?? "")); return new Response(JSON.stringify({ ok: true, ts: "1700000000.000100" }), { status: 200 }); },
+    });
+    const delivery = await adapter.publishAttentionEvent(choice);
+    expect(delivery).toMatchObject({ messageTs: "1700000000.000100" });
+    const body = JSON.parse(requests[0]!) as { text: string; blocks: Array<{ type: string; elements?: Array<{ text: { text: string }; value: string }> }> };
+    expect(body.text).toContain("Span");
+    expect(body.blocks.find((block) => block.type === "actions")?.elements?.map((element) => element.text.text)).toEqual(["Cloud / Platform", "AI Platform / Agentic"]);
+    await expect(adapter.handleInteraction(slackResponse("attention-resume-1|ai-platform-agentic", {
+      actions: [{ action_id: `${ACTION_ID}_1`, value: "attention-resume-1|ai-platform-agentic" }],
+    }))).resolves.toEqual({ status: "resolved" });
+    await expect(adapter.handleInteraction(slackResponse("attention-resume-1|frontend-software"))).resolves.toEqual({ status: "rejected", reason: "invalid_option" });
+    expect(responses).toEqual(["ai-platform-agentic"]);
+  });
+
   it("keeps the legacy action ID compatible while rejecting unscoped or mismatched generated IDs", async () => {
     const adapter = new SlackNotificationAdapter({
       config,

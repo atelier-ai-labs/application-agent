@@ -12,6 +12,9 @@ import { createConfiguredGoogleSheetsTransport, type GoogleSheetsApiTransport, t
 import { createRuntimeSources, loadBackgroundSearchIntent } from "./runtime/careerAgentRuntime";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { postingLinkKey } from "./postingLink";
+
+export { postingLinkKey };
 
 /**
  * Finds new jobs with the configured sources and search intent and, with
@@ -72,7 +75,7 @@ export async function discoverJobsToTracker(options: DiscoverJobsOptions): Promi
     if (column(required) < 0) throw new Error(`The tracker tab needs a "${required}" column.`);
   }
   const existingRoles = new Set(rows.slice(1).map((row) => `${key(row[column("Company")])}|${key(row[column("Role")])}`));
-  const existingLinks = new Set(rows.slice(1).map((row) => String(row[column("Job Link")] ?? "").trim()).filter(Boolean));
+  const existingLinks = new Set(rows.slice(1).map((row) => postingLinkKey(row[column("Job Link")])).filter(Boolean));
 
   const result = await options.scout.discover({ id: "career-agent-discover", ...options.campaignInput } as never);
   const decisions: DiscoveryDecision[] = [];
@@ -83,7 +86,7 @@ export async function discoverJobsToTracker(options: DiscoverJobsOptions): Promi
     const role = job.title.trim();
     const skip = (reason: Extract<DiscoveryDecision, { action: "skip" }>["reason"]) => decisions.push({ action: "skip", company, role, reason });
     const roleKey = `${key(company)}|${key(role)}`;
-    if (existingRoles.has(roleKey) || [job.applicationUrl, job.sourceUrl].some((link) => link && existingLinks.has(link))) { skip("in tracker"); continue; }
+    if (existingRoles.has(roleKey) || [job.applicationUrl, job.sourceUrl].some((link) => link && existingLinks.has(postingLinkKey(link)))) { skip("in tracker"); continue; }
     if (seen.has(roleKey)) { skip("duplicate"); continue; }
     seen.add(roleKey);
     const screen = screenDiscoveredJob(job, options.intent);
@@ -103,8 +106,8 @@ export async function discoverJobsToTracker(options: DiscoverJobsOptions): Promi
       const resolved = await resolveLink({ company, role }).catch(() => undefined);
       link = resolved?.status === "resolved" ? resolved.url : undefined;
     }
-    if (!link || existingLinks.has(link)) { skip(link ? "in tracker" : "no direct link"); continue; }
-    existingLinks.add(link);
+    if (!link || existingLinks.has(postingLinkKey(link))) { skip(link ? "in tracker" : "no direct link"); continue; }
+    existingLinks.add(postingLinkKey(link));
     decisions.push({
       action: "add", company, role, link,
       location: [job.location, job.remoteStatus === "remote" && !/remote/i.test(job.location ?? "") ? "Remote" : undefined].filter(Boolean).join(" — "),

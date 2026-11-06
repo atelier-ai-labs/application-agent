@@ -1,7 +1,8 @@
 import type { CareerBlocker, CareerBlockerKind, QuestionProvenance } from "./campaignTypes";
 import type { JobCompensation } from "./types";
 
-export type AttentionEventType = "needs_input" | "configuration_required";
+/** `resume_choice`: a posting matched two résumés equally, before any application exists. */
+export type AttentionEventType = "needs_input" | "configuration_required" | "resume_choice";
 export type AttentionEventStatus = "open" | "resolved" | "cancelled" | "expired";
 export type AttentionQuestionKind = "single_choice" | "free_text";
 export type AttentionDeliveryFailureCode = "provider_error" | "unknown";
@@ -628,6 +629,38 @@ export function attentionEventForConfiguration(input: {
   };
 }
 
+/**
+ * One tap in Slack picks the résumé when a posting matches two equally.
+ * The job waits (held) until then; nothing is applied with a guessed résumé.
+ */
+export function attentionEventForResumeChoice(input: {
+  campaignId: string;
+  jobId: string;
+  createdAt: string;
+  createId: (prefix: string) => string;
+  company: string;
+  role: string;
+  families: readonly AttentionOption[];
+}): { event: AttentionEvent; record: PersistedAttentionEvent } {
+  const event: AttentionEvent = {
+    id: input.createId("attention"),
+    type: "resume_choice",
+    source: "career-agent",
+    campaignId: input.campaignId,
+    createdAt: input.createdAt,
+    status: "open",
+    title: "📄 Which résumé should I use?",
+    questionProvenance: "POLICY",
+    context: { company: input.company, role: input.role },
+    question: {
+      prompt: `This posting matches ${input.families.map((family) => family.label).join(" and ")} equally. Tap the résumé to apply with; I'll start the application on the next run.`,
+      kind: "single_choice",
+      options: input.families.map((family) => ({ id: family.id, label: family.label })),
+    },
+  };
+  return { event, record: { ...event, jobId: input.jobId, descriptorSignature: `resume-choice:${input.jobId}` } };
+}
+
 export function publicAttentionEvent(record: PersistedAttentionEvent): AttentionEvent {
   const {
     jobId: _jobId,
@@ -711,7 +744,7 @@ export function isAttentionEvent(value: unknown): value is AttentionEvent {
   const question = candidate.question;
   const common =
     boundedText(candidate.id, 128) &&
-    (candidate.type === "needs_input" || candidate.type === "configuration_required") &&
+    (candidate.type === "needs_input" || candidate.type === "configuration_required" || candidate.type === "resume_choice") &&
     candidate.source === "career-agent" &&
     boundedText(candidate.campaignId, 128) &&
     timestamp(candidate.createdAt) &&
@@ -772,6 +805,21 @@ export function isAttentionEvent(value: unknown): value is AttentionEvent {
       candidate.reasonCode === undefined
     );
   }
+  if (candidate.type === "resume_choice") {
+    return Boolean(
+      candidate.applicationId === undefined &&
+      candidate.blockerType === undefined &&
+      candidate.message === undefined &&
+      candidate.reasonCode === undefined &&
+      question &&
+      typeof question === "object" &&
+      boundedText(question.prompt, MAX_PROMPT_LENGTH) &&
+      question.kind === "single_choice" &&
+      Array.isArray(question.options) &&
+      question.options.length >= 2 &&
+      question.options.every(isAttentionOption),
+    );
+  }
   return (
     candidate.applicationId === undefined &&
     candidate.question === undefined &&
@@ -806,7 +854,9 @@ export function isPersistedAttentionEvent(value: unknown): value is PersistedAtt
   const internalCareerLink =
     candidate.type === "needs_input"
       ? boundedText(candidate.jobId, 128) && boundedText(candidate.blockerId, 128)
-      : candidate.jobId === undefined && candidate.blockerId === undefined;
+      : candidate.type === "resume_choice"
+        ? boundedText(candidate.jobId, 128) && candidate.blockerId === undefined
+        : candidate.jobId === undefined && candidate.blockerId === undefined;
   return (
     internalCareerLink &&
     boundedText(candidate.descriptorSignature, MAX_SIGNATURE_LENGTH) &&

@@ -51,6 +51,7 @@ import {
 } from "../../src/service/executionHostClient";
 import { createConfiguredGoogleSheetsJobTracker, createConfiguredGoogleSheetsTransport, type GoogleSheetsEnvironment } from "../googleSheetsJobTracker";
 import { GoogleSheetsJobQueue } from "../googleSheetsJobQueue";
+import { applyResumeChoiceToSheets } from "../resumeChoiceSheets";
 import { resolveExecutionHostConfig, resolveResumePathsFromEnv, type ExecutionHostEnvironment } from "../executionHost/config";
 import { SlackNotificationAdapter } from "../slack/slackNotificationAdapter";
 import { resolveSlackConfig, type SlackEnvironment } from "../slack/config";
@@ -1182,6 +1183,13 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
       try {
         reloadSharedState();
         const result = await runtime.service.resolveAttentionResponse(response);
+        if (result.status === "resolved" && result.event.type === "resume_choice") {
+          const chosen = result.careerJob.queueResumeFamily ?? "";
+          const note = applyResumeChoice
+            ? await applyResumeChoice(result.careerJob, chosen).catch(() => "the Sheet could not be updated, so set Resume Version and Ready in the Sheet")
+            : "no queue Sheet is configured";
+          await slack.publishInfoNotice(`${result.careerJob.job.company}: using ${result.event.answerUsed ?? chosen}; ${note}.`).catch(() => undefined);
+        }
         console.info(
           `[career-agent-slack] ${result.status === "resolved" ? "CareerAgentService resume completed" : "attention event already resolved; no resume needed"}`,
         );
@@ -1232,6 +1240,23 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
           lastError: "",
         });
         return "marked Confirmed";
+      }
+    : undefined;
+  const applyResumeChoice = queueSpreadsheetId && queueSpreadsheetName
+    ? async (job: CareerJob, resumeFamily: string): Promise<string> => {
+        const transport = createConfiguredGoogleSheetsTransport(env as GoogleSheetsEnvironment);
+        const queue = new GoogleSheetsJobQueue({
+          spreadsheetId: queueSpreadsheetId,
+          spreadsheetName: queueSpreadsheetName,
+          sheetTab: env.ATELIER_GOOGLE_SHEET_QUEUE_TAB?.trim() || "Application Queue",
+          timeoutMs: 10_000,
+        }, transport);
+        return applyResumeChoiceToSheets({
+          transport, spreadsheetId: queueSpreadsheetId, queue,
+          trackerTab: env.ATELIER_GOOGLE_SHEET_TAB?.trim() || "Job Tracker",
+          company: job.job.company, role: job.job.title, links: [job.job.applicationUrl, job.job.sourceUrl],
+          resumeFamily,
+        });
       }
     : undefined;
   const created = createBackgroundCareerAgentRuntime({

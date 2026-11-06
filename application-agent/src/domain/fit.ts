@@ -112,7 +112,23 @@ export function postingDescription(description: string): string {
     .join("\n");
 }
 
-function selectResumeFamily(job: JobPosting, profile: CandidateProfile): {
+/**
+ * The posting matches two or more résumés equally. The caller settles it with
+ * the tracker's Resume Version or by asking the candidate; it never guesses.
+ */
+export class ResumeFamilyTieError extends Error {
+  constructor(readonly tiedFamilies: readonly ResumeFamilyId[]) {
+    super(`Resume family selection requires review because the posting ties between: ${tiedFamilies.join(", ")}.`);
+    this.name = "ResumeFamilyTieError";
+  }
+}
+
+export interface AssessFitOptions {
+  /** Breaks a tie between equally matching résumés; it never overrides a clear winner. */
+  preferredResumeFamily?: ResumeFamilyId;
+}
+
+function selectResumeFamily(job: JobPosting, profile: CandidateProfile, preferred?: ResumeFamilyId): {
   family: ResumeFamily;
   reason: string;
 } {
@@ -169,12 +185,18 @@ function selectResumeFamily(job: JobPosting, profile: CandidateProfile): {
     ? ranked.filter((candidate) => candidate.matches.some((match) => /frontend|react|typescript|javascript|web|software/i.test(match)))
     : ranked;
   eligible.sort((a, b) => b.score - a.score || b.matches.length - a.matches.length || a.index - b.index);
-  const selected = eligible[0] ?? ranked[0];
-  if (!selected) throw new Error("No verified resume family is available for this posting.");
-  const tied = eligible.filter((candidate) => candidate.score === selected.score && candidate.score > 0);
+  const top = eligible[0] ?? ranked[0];
+  if (!top) throw new Error("No verified resume family is available for this posting.");
+  const tied = eligible.filter((candidate) => candidate.score === top.score && candidate.score > 0);
+  const chosen = tied.length > 1 ? tied.find((candidate) => candidate.family.id === preferred) : top;
+  if (!chosen) throw new ResumeFamilyTieError(tied.map((candidate) => candidate.family.id as ResumeFamilyId));
   if (tied.length > 1) {
-    throw new Error(`Resume family selection requires review because the posting ties between: ${tied.map((candidate) => candidate.family.id).join(", ")}.`);
+    return {
+      family: chosen.family,
+      reason: `${chosen.family.label} was chosen by the tracker's Resume Version because the posting matches ${tied.map((candidate) => candidate.family.id).join(" and ")} equally.`,
+    };
   }
+  const selected = chosen;
   const semanticSignals = selected.family.id === "cloud-platform"
     ? [
         /\b(?:cloud|infrastructure|devops|platform)\b/i.test(title) ? "platform/infrastructure role" : "",
@@ -195,7 +217,7 @@ function selectResumeFamily(job: JobPosting, profile: CandidateProfile): {
   return { family: selected.family, reason };
 }
 
-export function assessFit(job: JobPosting, profile: CandidateProfile): FitAssessment {
+export function assessFit(job: JobPosting, profile: CandidateProfile, options: AssessFitOptions = {}): FitAssessment {
   const candidateKeys = profileSkillKeys(profile);
   const strongMatches: string[] = [];
   const partialMatches: string[] = [];
@@ -242,7 +264,7 @@ export function assessFit(job: JobPosting, profile: CandidateProfile): FitAssess
     classification = "weak";
   }
 
-  const { family, reason } = selectResumeFamily(job, profile);
+  const { family, reason } = selectResumeFamily(job, profile, options.preferredResumeFamily);
   const applicationRecommendation = classification === "strong" || classification === "good"
     ? "proceed"
     : classification === "stretch"

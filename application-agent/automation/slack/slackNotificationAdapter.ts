@@ -453,7 +453,7 @@ export class SlackNotificationAdapter implements NotificationAdapter {
       ...(humanVerificationHandoff ? { unfurl_links: false, unfurl_media: false } : {}),
     });
     const timestamp = typeof result.ts === "string" && result.ts.trim() ? result.ts.trim() : undefined;
-    if (event.type === "needs_input" && !timestamp) {
+    if ((event.type === "needs_input" || event.type === "resume_choice") && !timestamp) {
       throw new Error("Slack chat.postMessage did not return a message timestamp.");
     }
     if (!timestamp) return;
@@ -725,7 +725,7 @@ export class SlackNotificationAdapter implements NotificationAdapter {
       const delivery = event.providerDelivery;
       if (!delivery || delivery.provider !== "slack" || delivery.channelId !== this.config.channelId) continue;
       this.publishedAttentionEvents.set(event.id, event);
-      if (event.publishedAt && event.type === "needs_input" && event.status === "open") {
+      if (event.publishedAt && (event.type === "needs_input" || event.type === "resume_choice") && event.status === "open") {
         this.rememberMessageTimestamp(event.id, delivery.messageTs);
         hydrated += 1;
       }
@@ -1061,7 +1061,7 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     await this.refreshPublishedAttentionEvents();
     const event = this.eventLookup?.(eventId) ?? this.publishedAttentionEvents.get(eventId);
     if (!event || event.status !== "open") return { status: "rejected", reason: "unknown_or_closed_event" };
-    if (event && (event.type !== "needs_input" || !event.question)) {
+    if (event && ((event.type !== "needs_input" && event.type !== "resume_choice") || !event.question)) {
       return { status: "rejected", reason: "non_interactive_event" };
     }
     if (
@@ -1070,7 +1070,7 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     ) {
       return { status: "rejected", reason: "unexpected_action" };
     }
-    if (event?.type === "needs_input" && event.question && !event.question.options.some((option) => option.id === selectedOption)) {
+    if ((event?.type === "needs_input" || event?.type === "resume_choice") && event.question && !event.question.options.some((option) => option.id === selectedOption)) {
       return { status: "rejected", reason: "invalid_option" };
     }
     if (optionIndex !== undefined && event?.question?.options[optionIndex]?.id !== selectedOption) {
