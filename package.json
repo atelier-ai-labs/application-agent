@@ -27,6 +27,7 @@
     "test:evals": "vite-node evals/run.ts",
     "test:evals:negatives": "vite-node evals/runNegatives.ts",
     "career-agent:resolve-links": "vite-node application-agent/automation/resolveTrackerLinksRun.ts",
+    "career-agent:check-open": "vite-node application-agent/automation/checkOpenRun.ts",
     "career-agent:discover": "vite-node application-agent/automation/discoverJobsRun.ts",
     "career-agent:inbox": "vite-node application-agent/automation/inboxRun.ts",
     "career-agent:daily": "vite-node application-agent/automation/dailyRun.ts",

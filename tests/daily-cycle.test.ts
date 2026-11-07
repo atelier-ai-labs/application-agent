@@ -41,6 +41,7 @@ describe("daily cycle", () => {
   it("finds jobs, checks the inbox, and starts applications into the free browser windows", async () => {
     const runner = fakeRunner({
       "career-agent:discover": { code: 0, stdout: "+ Pinecone | Platform Engineer | Remote | Good | cloud | https://x\n[career-agent-discover] 9 jobs found; 1 new, 1 added to the tracker.\n" },
+      "career-agent:check-open --apply": { code: 0, stdout: "x row 64 | Guidewire | Junior AI Engineer | Workday no longer lists this posting | tracker + 1 queue row marked Expired\n? row 17 | NewRocket | AI Platform Engineer | the page answered 403\n" },
       "career-agent:resolve-links --apply": { code: 0, stdout: "row 21 | Defense Unicorns | Platform Engineer | resolved | https://job-boards.greenhouse.io/defenseunicorns/jobs/5227539007\n[career-agent-links] 31 rows checked, 1 direct links found.\n" },
       "career-agent:queue --import-tracker": { code: 0, stdout: `${JSON.stringify({ mode: "tracker-import", promoted: 1 })}\n` },
       "career-agent:inbox": { code: 0, stdout: "~ row 70 Upstart — DevOps Engineer II: Rejected [rejection] Follow up from Upstart (2026-11-02)\n" },
@@ -60,6 +61,9 @@ describe("daily cycle", () => {
     // Job-board links are swapped for the employer's posting before the queue picks jobs.
     expect(runner.calls.indexOf("career-agent:resolve-links --apply")).toBeLessThan(runner.calls.findIndex((call) => call.startsWith("career-agent:queue --import-tracker")));
     expect(record.links).toEqual({ fixed: 1 });
+    expect(record.closed).toEqual({ expired: ["Guidewire — Junior AI Engineer"] });
+    expect(notices[0]).toContain("1 job closed and marked Expired: Guidewire — Junior AI Engineer");
+    expect(runner.calls.indexOf("career-agent:check-open --apply")).toBeLessThan(runner.calls.indexOf("career-agent:resolve-links --apply"));
     expect(notices[0]).toContain("Found the employer's own posting for 1 job that only had a job-board link.");
     expect(notices[0]).toContain("Inbox: Upstart — DevOps Engineer II: Rejected");
     expect(notices[0]).toContain("Sparksoft — Jr. Full Stack Engineer: waiting on your answers");

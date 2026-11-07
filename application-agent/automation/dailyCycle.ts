@@ -52,6 +52,8 @@ export interface DailyRunRecord {
   startedAt: string;
   finishedAt: string;
   discovered?: { added: number; jobs: string[] } | { error: string };
+  /** Tracked jobs whose posting had closed, now marked Expired. */
+  closed?: { expired: string[] } | { error: string };
   /** Job-board links swapped for the employer's own posting. */
   links?: { fixed: number } | { error: string };
   queueImport?: { promoted: number } | { error: string };
@@ -106,6 +108,14 @@ export async function runDailyCycle(deps: DailyCycleDependencies, options: Daily
     const jobs = result.stdout.split("\n").filter((line) => line.startsWith("+ ")).map((line) => line.slice(2).split(" | ").slice(0, 2).join(" — "));
     const added = Number(/(\d+) added to the tracker/.exec(result.stdout)?.[1] ?? 0);
     record.discovered = result.code === 0 ? { added, jobs: jobs.slice(0, added) } : { error: failure(result, "Job search") };
+  }
+
+  // Closed postings leave the tracker and queue first, so nothing below spends time on them.
+  if (phases.has("apply") || phases.has("discover")) {
+    const result = await deps.run("career-agent:check-open", ["--apply"], 15 * 60_000);
+    const expired = result.stdout.split("\n").filter((line) => line.startsWith("x row ") && / marked Expired$/.test(line))
+      .map((line) => line.replace(/^x row \d+ \| /, "").split(" | ").slice(0, 2).join(" — "));
+    record.closed = result.code === 0 ? { expired } : { error: failure(result, "Open-posting check") };
   }
 
   // Tracker rows that only link to a job board (Remotive, nogigiddy, ...) get
@@ -180,6 +190,10 @@ export function formatDailySummary(record: DailyRunRecord): string {
   const lines = [`*Daily run* (${new Date(record.startedAt).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })})`];
   const d = record.discovered;
   if (d) lines.push("error" in d ? `• Job search failed: ${d.error}` : d.added === 0 ? "• No new jobs found." : `• Found ${d.added} new job${d.added === 1 ? "" : "s"}: ${d.jobs.join("; ")}`);
+  if (record.closed) {
+    if ("error" in record.closed) lines.push(`• ${record.closed.error}`);
+    else if (record.closed.expired.length > 0) lines.push(`• ${record.closed.expired.length} job${record.closed.expired.length === 1 ? "" : "s"} closed and marked Expired: ${record.closed.expired.join("; ")}`);
+  }
   if (record.links) {
     if ("error" in record.links) lines.push(`• ${record.links.error}`);
     else if (record.links.fixed > 0) lines.push(`• Found the employer's own posting for ${record.links.fixed} job${record.links.fixed === 1 ? "" : "s"} that only had a job-board link.`);
