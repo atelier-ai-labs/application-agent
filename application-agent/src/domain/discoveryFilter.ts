@@ -25,7 +25,8 @@ const US_STATES = [
   "north dakota", "ohio", "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina", "south dakota", "tennessee", "texas",
   "utah", "vermont", "virginia", "washington", "west virginia", "wisconsin", "wyoming", "district of columbia",
 ];
-const US_STATE_CODES = /,\s*(?:a[klrz]|c[aot]|d[ce]|fl|ga|hi|i[adln]|k[sy]|la|m[adeinost]|n[cdehjmvy]|o[hkr]|pa|ri|s[cd]|t[nx]|ut|v[at]|w[aivy])\b/;
+/** Uppercase only: "Portland, OR" is Oregon, "BC, or NS Only" (Instacart, Canada-only) is not. */
+const US_STATE_CODES = /,\s*(?:A[KLRZ]|C[AOT]|D[CE]|FL|GA|HI|I[ADLN]|K[SY]|LA|M[ADEINOST]|N[CDEHJMVY]|O[HKR]|PA|RI|S[CD]|T[NX]|UT|V[AT]|W[AIVY])\b/;
 const US_CITIES = [
   "san francisco", "bay area", "new york city", "nyc", "seattle", "austin", "boston", "chicago", "los angeles", "denver", "atlanta",
   "miami", "dallas", "houston", "philadelphia", "pittsburgh", "portland", "san diego", "san jose", "washington dc", "arlington", "raleigh",
@@ -94,7 +95,7 @@ export function locationAllowed(job: Pick<JobPosting, "location" | "remoteStatus
   // Allow-list, not a block-list: a remote posting must name a place in an
   // allowed country or name no place at all ("Remote", "Flexible / Remote").
   const namesUsPlace = US_STATES.some((state) => hasPhrase(location, state)) || US_CITIES.some((city) => hasPhrase(location, city)) ||
-    US_STATE_CODES.test((job.location ?? "").toLowerCase());
+    US_STATE_CODES.test(job.location ?? "");
   if (countries.includes("united states") && namesUsPlace) return true;
   return location.replace(REMOTE_WORDS, " ").replace(/[^a-z]+/g, "").length === 0;
 }

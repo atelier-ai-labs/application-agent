@@ -55,3 +55,12 @@ describe("discovery screening", () => {
     expect(locationAllowed({ location: "Remote (Buenos Aires)" }, withCanada)).toBe(false);
   });
 });
+
+describe("state codes in remote locations", () => {
+  it("reads an uppercase code as a US state but not the word 'or'", async () => {
+    const { locationAllowed } = await import("../application-agent/src/domain/discoveryFilter");
+    const intent = { locations: ["United States", "Pittsburgh, PA"], remotePreference: "remote_preferred" } as never;
+    expect(locationAllowed({ location: "Canada - Remote (ON, AB, BC, or NS Only)", remoteStatus: "remote" } as never, intent)).toBe(false);
+    expect(locationAllowed({ location: "Portland, OR (Remote)", remoteStatus: "remote" } as never, intent)).toBe(true);
+  });
+});

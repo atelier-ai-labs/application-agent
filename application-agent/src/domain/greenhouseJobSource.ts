@@ -448,7 +448,8 @@ export class GreenhouseJobSource implements JobSource {
     if (!Number.isInteger(this.maxResults) || this.maxResults <= 0) {
       throw new Error("Greenhouse source result cap must be a positive integer.");
     }
-    this.retrievalCap = options.retrievalCap ?? Math.max(200, this.maxResults);
+    // The whole board arrives in one response; reading every posting is cheap, and big employers (Databricks, Anthropic) list 500+.
+    this.retrievalCap = options.retrievalCap ?? Math.max(2_000, this.maxResults);
     if (!Number.isInteger(this.retrievalCap) || this.retrievalCap <= 0) {
       throw new Error("Greenhouse retrieval cap must be a positive integer.");
     }

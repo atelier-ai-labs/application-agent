@@ -51,6 +51,7 @@ import {
 } from "../../src/service/executionHostClient";
 import { createConfiguredGoogleSheetsJobTracker, createConfiguredGoogleSheetsTransport, type GoogleSheetsEnvironment } from "../googleSheetsJobTracker";
 import { GoogleSheetsJobQueue } from "../googleSheetsJobQueue";
+import { DEFAULT_LEARNED_BOARDS_FILE, loadLearnedBoards } from "../boardLearning";
 import { applyResumeChoiceToSheets } from "../resumeChoiceSheets";
 import { resolveExecutionHostConfig, resolveResumePathsFromEnv, type ExecutionHostEnvironment } from "../executionHost/config";
 import { SlackNotificationAdapter } from "../slack/slackNotificationAdapter";
@@ -392,7 +393,18 @@ export function createRuntimeSources(env: BackgroundCareerAgentEnvironment): Run
   const himalayasEndpoint = valueOrDefault(env.ATELIER_HIMALAYAS_API_BASE_URL, DEFAULT_HIMALAYAS_API_BASE_URL);
   const leverEndpoint = valueOrDefault(env.VITE_LEVER_API_BASE_URL, DEFAULT_LEVER_POSTINGS_BASE_URL);
   const greenhouseEndpoint = valueOrDefault(env.VITE_GREENHOUSE_API_BASE_URL, DEFAULT_GREENHOUSE_API_BASE_URL);
-  const discovery = loadBackgroundDiscoveryConfig(env);
+  const configured = loadBackgroundDiscoveryConfig(env);
+  // Boards the job search learned from feed companies (learned-boards.json) join the configured ones.
+  const learned = loadLearnedBoards((env as Record<string, string | undefined>).ATELIER_CAREER_AGENT_LEARNED_BOARDS_FILE?.trim() || DEFAULT_LEARNED_BOARDS_FILE);
+  const merge = (a: readonly string[], b: readonly string[]) => [...new Map([...a, ...b].map((board) => [board.toLowerCase(), board])).values()];
+  const discovery = {
+    ...configured,
+    employerBoards: {
+      greenhouse: merge(configured.employerBoards.greenhouse, learned.greenhouse),
+      lever: merge(configured.employerBoards.lever, learned.lever),
+      ashby: merge(configured.employerBoards.ashby, learned.ashby),
+    },
+  };
   // Boards from discovery.json join any listed in the older env variables.
   const leverSites = parseLeverSites([env.VITE_LEVER_SITES ?? "", ...discovery.employerBoards.lever].join(","));
   const greenhouseBoards = parseGreenhouseBoards([env.VITE_GREENHOUSE_BOARDS ?? "", ...discovery.employerBoards.greenhouse].join(","));

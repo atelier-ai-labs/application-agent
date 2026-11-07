@@ -9,7 +9,8 @@ import type { CreateCampaignInput } from "../src/domain/campaignTypes";
 import { resolveDirectPostingLink } from "./directLinkResolver";
 import { queueDestinationPreflightReason } from "./standaloneJobQueueWorker";
 import { createConfiguredGoogleSheetsTransport, type GoogleSheetsApiTransport, type GoogleSheetsEnvironment } from "./googleSheetsJobTracker";
-import { createRuntimeSources, loadBackgroundSearchIntent } from "./runtime/careerAgentRuntime";
+import { createRuntimeSources, loadBackgroundDiscoveryConfig, loadBackgroundSearchIntent } from "./runtime/careerAgentRuntime";
+import { DEFAULT_LEARNED_BOARDS_FILE, learnBoardsFromFeeds, loadLearnedBoards, saveLearnedBoards } from "./boardLearning";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { postingLinkKey } from "./postingLink";
@@ -63,7 +64,7 @@ export interface DiscoverJobsOptions {
   now?: () => string;
 }
 
-export async function discoverJobsToTracker(options: DiscoverJobsOptions): Promise<{ decisions: DiscoveryDecision[]; written: number; failures: readonly string[] }> {
+export async function discoverJobsToTracker(options: DiscoverJobsOptions): Promise<{ decisions: DiscoveryDecision[]; written: number; failures: readonly string[]; jobs: readonly ScoutedJob[] }> {
   const now = options.now ?? (() => new Date().toISOString());
   const resolveLink = options.resolveLink ?? resolveDirectPostingLink;
   const maxNewRows = options.maxNewRows ?? 15;
@@ -143,6 +144,7 @@ export async function discoverJobsToTracker(options: DiscoverJobsOptions): Promi
     decisions,
     written: options.apply ? additions.length : 0,
     failures: result.failures.map((failure) => `${failure.sourceId}: ${failure.reason}`),
+    jobs: result.jobs as readonly ScoutedJob[],
   };
 }
 
@@ -158,7 +160,7 @@ export async function runDiscoverJobsCommand(argv: readonly string[] = process.a
   const profile = parseCandidateProfile(JSON.parse(readFileSync(resolve(env.ATELIER_CAREER_AGENT_PROFILE_FILE?.trim() || ".local/career-agent/profile.json"), "utf8")));
   const { scout, campaignInput } = createRuntimeSources(env as never);
   const apply = argv.includes("--apply");
-  const { decisions, written, failures } = await discoverJobsToTracker({
+  const { decisions, written, failures, jobs } = await discoverJobsToTracker({
     scout, campaignInput, intent, profile, apply, spreadsheetId,
     transport: createConfiguredGoogleSheetsTransport(env),
     trackerTab: env.ATELIER_GOOGLE_SHEET_TAB?.trim() || "Job Tracker",
@@ -172,4 +174,14 @@ export async function runDiscoverJobsCommand(argv: readonly string[] = process.a
   console.log(`[career-agent-discover] ${decisions.length} jobs found; ${additions.length} new${apply ? `, ${written} added to the tracker` : " (dry run; pass --apply to add them)"}.`);
   console.log(`[career-agent-discover] skipped: ${[...skipped].map(([reason, count]) => `${reason} ${count}`).join(", ") || "none"}`);
   for (const failure of failures) console.warn(`[career-agent-discover] source problem: ${failure}`);
+
+  // Learn the boards of companies the feeds mentioned, so tomorrow's search reads them directly.
+  const learnedFile = env.ATELIER_CAREER_AGENT_LEARNED_BOARDS_FILE?.trim() || DEFAULT_LEARNED_BOARDS_FILE;
+  const learnedBoards = loadLearnedBoards(learnedFile);
+  const configured = loadBackgroundDiscoveryConfig(env as never).employerBoards;
+  const known = new Set((["greenhouse", "lever", "ashby"] as const).flatMap((provider) => [...configured[provider], ...learnedBoards[provider]].map((slug) => `${provider}:${slug}`)));
+  const learning = await learnBoardsFromFeeds({ jobs, known, learned: learnedBoards, maxProbes: Number(env.ATELIER_BOARD_LEARNING_MAX_PROBES ?? 25) });
+  if (apply) saveLearnedBoards(learnedBoards, learnedFile);
+  for (const board of learning.learned) console.log(`* learned ${board.provider} board "${board.slug}" for ${board.company}`);
+  console.log(`[career-agent-discover] looked up ${learning.probed} feed compan${learning.probed === 1 ? "y" : "ies"}; learned ${learning.learned.length} new board${learning.learned.length === 1 ? "" : "s"}${apply ? "" : " (dry run; not saved)"}.`);
 }
