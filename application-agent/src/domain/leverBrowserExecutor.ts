@@ -2285,6 +2285,18 @@ export function isTrustedAutomaticConfirmation(
       vaiaPostingId(observed.toString()) === target.postingId &&
       result.evidence.includes("submit:clicked; confirmation:vaia-done");
   }
+  // Ashby renders its success panel in place: the URL stays on this posting's
+  // /<org>/<posting>/application route, so the session proves it from that
+  // route plus Ashby's own success state (panel, or submission wording with
+  // the form's Submit control gone). Outmarket, 2026-11-06, asked for DONE
+  // although the page said the application was submitted.
+  if (target.provider === "ashby" && /confirmation:ashby-(?:success|form-replaced)\b/.test(result.evidence)) {
+    const segments = observed.pathname.split("/").filter(Boolean).map((segment) => segment.toLowerCase());
+    return observed.origin === expected.origin && result.confirmationOrigin === observed.origin &&
+      observed.hostname.toLowerCase() === "jobs.ashbyhq.com" &&
+      segments.includes(target.postingId.toLowerCase()) && segments.at(-1) === "application" &&
+      result.evidence.startsWith("submit:clicked;");
+  }
   if (observed.origin !== expected.origin || result.confirmationOrigin !== observed.origin || !/confirmation|success|thank[-_]?you/i.test(observed.pathname)) return false;
   const decodedSegments = observed.pathname.split("/").filter(Boolean).map((segment) => {
     try { return decodeURIComponent(segment); } catch { return ""; }

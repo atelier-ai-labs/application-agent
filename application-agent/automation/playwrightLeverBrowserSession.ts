@@ -3387,6 +3387,8 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
     let afterUrl = this.page.url();
     let confirmed = false;
     let confirmationUrl = false;
+    // Ashby shows its success panel in place: the URL stays on /application.
+    let ashbyInPlace: "ashby-success" | "ashby-form-replaced" | undefined;
     let securityCode: "entered" | "not-received" | undefined;
     const clickedAt = Date.now();
     let deadline = clickedAt + (clicked ? SUBMIT_CONFIRMATION_WAIT_MS : 0);
@@ -3416,6 +3418,11 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       confirmationUrl = /\/(?:confirmation|success|thank[-_]?you)(?:\/|$)/i.test(new URL(afterUrl).pathname);
       const ashbySuccess = await this.page.locator(".ashby-application-form-success-container").count().catch(() => 0) > 0;
       confirmed = clicked && (confirmationText || confirmationUrl || ashbySuccess);
+      if (confirmed && !confirmationUrl && /(^|\.)ashbyhq\.com$/i.test(new URL(afterUrl).hostname)) {
+        // The rendered success panel, or the submission wording with the form's
+        // Submit control gone, is Ashby's own confirmation for this posting.
+        ashbyInPlace = ashbySuccess ? "ashby-success" : confirmationText && !(await this.submitControl().catch(() => null)) ? "ashby-form-replaced" : undefined;
+      }
       // A CAPTCHA raised on Submit expires in about two minutes; stop waiting
       // and hand it to the user now rather than at the end of the wait.
       // Greenhouse's emailed-code page reads as a login wall ("verification
@@ -3487,7 +3494,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       confirmationUrl: parsed.toString(),
       // The path and parameter names (never values) show why a confirmation
       // was or was not tied to the posting.
-      evidence: `${confirmationUrl ? "submit:clicked; confirmation:url" : "submit:clicked; confirmation:text"}${securityCode ? `; security-code:${securityCode}` : ""}; confirmation-path:${parsed.pathname.slice(0, 120)}${[...parsed.searchParams.keys()].length > 0 ? `?${[...new Set(parsed.searchParams.keys())].slice(0, 8).join("&")}` : ""}`,
+      evidence: `${confirmationUrl ? "submit:clicked; confirmation:url" : ashbyInPlace ? `submit:clicked; confirmation:${ashbyInPlace}` : "submit:clicked; confirmation:text"}${securityCode ? `; security-code:${securityCode}` : ""}; confirmation-path:${parsed.pathname.slice(0, 120)}${[...parsed.searchParams.keys()].length > 0 ? `?${[...new Set(parsed.searchParams.keys())].slice(0, 8).join("&")}` : ""}`,
     };
   }
 
