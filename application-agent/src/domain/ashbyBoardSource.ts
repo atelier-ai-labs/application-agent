@@ -78,7 +78,13 @@ export function parseAshbyBoardResponse(
     const sourceUrl = text(value.jobUrl) ?? `https://jobs.ashbyhq.com/${board}/${id}`;
     const applicationUrl = text(value.applyUrl) ?? `${sourceUrl.replace(/\/$/, "")}/application`;
     const locations = locationsOf(value);
-    const remote = value.isRemote === true || /\bremote\b/i.test(text(value.workplaceType) ?? "");
+    // Ashby sets isRemote on hybrid jobs too (Notion, Replit: "Hybrid", office
+    // only). A job is remote when its workplace type is Remote or one of its
+    // listed locations is a remote one ("Remote (US)" beside an HQ).
+    const workplace = text(value.workplaceType)?.toLowerCase() ?? "";
+    const remote = /\bremote\b/.test(workplace) || locations.some((location) => /\bremote\b/i.test(location)) ||
+      (!workplace && value.isRemote === true);
+    const hybrid = !remote && /\bhybrid\b/.test(workplace);
     const employmentType = text(value.employmentType);
     const description = text(value.descriptionPlain) ?? "";
     const matched = queries.filter((query) => searchQueryMatches(query, [title, text(value.department), text(value.team), locations.join(" "), description].filter(Boolean).join(" ").toLowerCase()));
@@ -86,7 +92,7 @@ export function parseAshbyBoardResponse(
     const rawText = [
       company,
       title,
-      locations.length > 0 ? `Location: ${locations.join("; ")}${remote ? " (Remote)" : ""}` : remote ? "Location: Remote" : undefined,
+      locations.length > 0 ? `Location: ${locations.join("; ")}${remote ? " (Remote)" : hybrid ? " (Hybrid)" : workplace === "onsite" ? " (On-site)" : ""}` : remote ? "Location: Remote" : undefined,
       employmentType ? `Employment type: ${employmentType}` : undefined,
       "",
       description,
