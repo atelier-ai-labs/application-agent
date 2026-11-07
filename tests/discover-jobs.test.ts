@@ -1,7 +1,7 @@
 /** @vitest-environment node */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { discoverJobsToTracker, postingLinkKey } from "../application-agent/automation/discoverJobs";
+import { discoverJobsToTracker, postingLinkKey, rankAdditions } from "../application-agent/automation/discoverJobs";
 import { normalizeJobPosting } from "../application-agent/src/domain/job";
 import { normalizeJobSearchIntent, type JobSearchIntent } from "../application-agent/src/domain/searchIntent";
 import { exampleCandidateProfile } from "../application-agent/src";
@@ -48,6 +48,18 @@ function run(tracker: Tracker, apply: boolean) {
 }
 
 describe("career-agent discover", () => {
+  it("adds the best fits first and spreads a big board's roles out", () => {
+    const add = (company: string, fit: string) => ({ company, fit });
+    const ranked = rankAdditions([
+      add("Chime", "Stretch"), add("Chime", "Good"), add("Chime", "Stretch"), add("Chime", "Stretch"),
+      add("Ramp", "Excellent"), add("Ramp", "Excellent"), add("Hex", "Stretch"), add("Mercury", "Good"),
+    ]);
+    expect(ranked.map((item) => `${item.company} ${item.fit}`)).toEqual([
+      "Ramp Excellent", "Mercury Good", "Ramp Excellent", "Chime Stretch", "Hex Stretch", "Chime Good", "Chime Stretch", "Chime Stretch",
+    ]);
+  });
+
+
   it("treats another spelling of a tracked link as the same posting", async () => {
     // Span was added twice: the tracker had /span.app/<id>, the board returned /Span.app/<id>/application.
     expect(postingLinkKey("https://jobs.ashbyhq.com/Span.app/0709/application")).toBe(postingLinkKey("https://jobs.ashbyhq.com/span.app/0709"));

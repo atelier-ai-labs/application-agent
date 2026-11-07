@@ -64,6 +64,28 @@ export interface DiscoverJobsOptions {
   now?: () => string;
 }
 
+const FIT_ORDER: Record<string, number> = { Excellent: 0, Good: 1, Stretch: 2, Weak: 3 };
+
+/**
+ * Which new jobs go in first when there are more than one run adds: best fit
+ * first, and each extra role at the same company ranks a step lower, so one big
+ * board (six Chime roles) can't crowd out an Excellent match elsewhere.
+ * Nothing is dropped; the rest are added on later runs.
+ */
+export function rankAdditions<T extends { company: string; fit: string }>(additions: readonly T[]): T[] {
+  const perCompany = new Map<string, number>();
+  return additions
+    .map((addition, index) => {
+      const company = key(addition.company);
+      const nth = perCompany.get(company) ?? 0;
+      perCompany.set(company, nth + 1);
+      return { addition, index, nth, fit: FIT_ORDER[addition.fit] ?? 9 };
+    })
+    // Each earlier role at the same company counts like one step down in fit.
+    .sort((a, b) => (a.fit + a.nth) - (b.fit + b.nth) || a.nth - b.nth || a.fit - b.fit || a.index - b.index)
+    .map(({ addition }) => addition);
+}
+
 export async function discoverJobsToTracker(options: DiscoverJobsOptions): Promise<{ decisions: DiscoveryDecision[]; written: number; failures: readonly string[]; jobs: readonly ScoutedJob[] }> {
   const now = options.now ?? (() => new Date().toISOString());
   const resolveLink = options.resolveLink ?? resolveDirectPostingLink;
@@ -116,7 +138,7 @@ export async function discoverJobsToTracker(options: DiscoverJobsOptions): Promi
     });
   }
 
-  const additions = decisions.filter((decision): decision is Extract<DiscoveryDecision, { action: "add" }> => decision.action === "add").slice(0, maxNewRows);
+  const additions = rankAdditions(decisions.filter((decision): decision is Extract<DiscoveryDecision, { action: "add" }> => decision.action === "add")).slice(0, maxNewRows);
   if (options.apply && additions.length > 0) {
     const found = usDate(now());
     const firstRow = rows.length + 1;
