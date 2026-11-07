@@ -174,8 +174,16 @@ function selectResumeFamily(job: JobPosting, profile: CandidateProfile, preferre
   // Automation" listing React) does not make it a frontend posting; the
   // title decides when it names other work.
   const otherLaneTitle = /\b(?:ai|ml|llm|agentic|agents?|machine learning|devops|cloud|infrastructure|platform|sre|site reliability|data)\b/i.test(job.title);
+  const frontendMatch = (candidate: (typeof ranked)[number]) =>
+    candidate.matches.some((match) => /frontend|react|typescript|javascript|web|software/i.test(match));
+  // A React skill on a neutral title ("Software Engineer" listing React as a
+  // bonus) only makes it a frontend posting when the frontend résumé is also
+  // the strongest match. Outmarket's RAG/agents role was forced onto the
+  // frontend résumé because React was in its skill list.
+  const bestFrontend = Math.max(-1, ...ranked.filter(frontendMatch).map((candidate) => candidate.score));
+  const bestOther = Math.max(-1, ...ranked.filter((candidate) => !frontendMatch(candidate)).map((candidate) => candidate.score));
   const frontendPosting = /\b(frontend|front[- ]end|ui|web|react)\b/i.test(job.title) ||
-    (!otherLaneTitle && job.requiredSkills.concat(job.preferredSkills).some((skill) => /\b(frontend|react|web)\b/i.test(skill)));
+    (!otherLaneTitle && job.requiredSkills.concat(job.preferredSkills).some((skill) => /\b(frontend|react|web)\b/i.test(skill)) && bestFrontend >= bestOther);
   if (frontendPosting && !ranked.some((candidate) => candidate.matches.some((match) =>
     /frontend|react|typescript|javascript|web|software/i.test(match)))) {
     throw new Error("No verified frontend/software resume family is available for this frontend posting.");

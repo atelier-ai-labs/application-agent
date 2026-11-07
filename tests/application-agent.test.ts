@@ -189,6 +189,25 @@ describe("Application Agent job intake and grounding", () => {
     expect(fit.recommendedResumeFamily).toBe("ai-platform-agentic");
   });
 
+  it("does not let a bonus React skill force the frontend résumé onto an AI-heavy Software Engineer role", () => {
+    // Outmarket AI, 2026-11-06: RAG, embeddings and tool-using agents, with React listed as a bonus.
+    const ai = assessFit(canonicalPosting({
+      company: "Outmarket AI",
+      title: "Software Engineer",
+      description: "1–3 years software engineering; Python and/or TypeScript, SQL, RAG, embeddings, semantic search, tool-using agents and model-output evaluation for our AI agent. React, Postgres and cloud experience are bonuses.",
+      requiredSkills: ["Agentic systems", "Python", "React", "TypeScript", "PostgreSQL", "SQL"],
+      preferredSkills: [],
+    }), exampleCandidateProfile);
+    expect(ai.recommendedResumeFamily).toBe("ai-platform-agentic");
+    // A plain React role with the same neutral title still gets the frontend résumé.
+    const web = assessFit(canonicalPosting({
+      company: "Acme", title: "Software Engineer",
+      description: "Build our customer web app in React and TypeScript.",
+      requiredSkills: ["React", "TypeScript", "JavaScript"], preferredSkills: [],
+    }), exampleCandidateProfile);
+    expect(web.recommendedResumeFamily).toBe("frontend-software");
+  });
+
   it("routes an AI platform posting by dominant role signals, not supporting cloud keywords", () => {
     const fit = assessFit(canonicalPosting({
       title: "AI Platform Engineer",
