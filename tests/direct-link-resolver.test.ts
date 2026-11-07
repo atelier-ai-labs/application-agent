@@ -1,6 +1,7 @@
 /** @vitest-environment node */
 import { describe, expect, it } from "vitest";
 import {
+  boardLinksInPage,
   companySlugCandidates,
   sameCompany,
   resolveDirectPostingLink,
@@ -21,6 +22,33 @@ function boards(responses: Record<string, unknown>): DirectLinkFetcher {
 const GH = "https://boards-api.greenhouse.io/v1/boards";
 
 describe("direct posting link resolver", () => {
+  it("reads the employer's posting off a job-board page and trusts it only when the board confirms the role", async () => {
+    const page = `<a href="https://job-boards.greenhouse.io/defenseunicorns/jobs/5227539007?gh_src=nogig">Apply</a>
+      <script>{"similar":"https:\\/\\/jobs.ashbyhq.com\\/othercorp\\/0f6b7a70-0000-4000-8000-000000000001"}</script>`;
+    expect(boardLinksInPage(page)).toEqual([
+      { provider: "greenhouse", slug: "defenseunicorns", id: "5227539007" },
+      { provider: "ashby", slug: "othercorp", id: "0f6b7a70-0000-4000-8000-000000000001" },
+    ]);
+    // Six "Platform Engineer" listings make the name guess ambiguous; the page names the exact one.
+    const listings = Array.from({ length: 6 }, (_, index) => ({ id: 5227539000 + index, title: "Platform Engineer", location: { name: "Remote, US" } }));
+    listings[5] = { id: 5227539007, title: "Platform Engineer", location: { name: "Remote - US" } };
+    const fetcher = boards({ [`${GH}/defenseunicorns`]: { name: "Defense Unicorns" }, [`${GH}/defenseunicorns/jobs`]: { jobs: listings } });
+    const fromPage = await resolveDirectPostingLink({ company: "Defense Unicorns", role: "Platform Engineer", listingUrl: "https://www.nogigiddy.com/jobs/x" }, fetcher, async () => page);
+    expect(fromPage).toMatchObject({ status: "resolved", url: "https://job-boards.greenhouse.io/defenseunicorns/jobs/5227539007" });
+    expect(await resolveDirectPostingLink({ company: "Defense Unicorns", role: "Platform Engineer" }, fetcher, async () => page)).toMatchObject({ status: "ambiguous" });
+    // A link on the page to some other company's board, or to a different role, is not used.
+    const other = await resolveDirectPostingLink({ company: "Sourcegraph", role: "Agent Engineer", listingUrl: "https://www.remoteworkusa.com/job/x" }, boards({
+      "https://api.ashbyhq.com/posting-api/job-board/othercorp": { jobs: [{ id: "0f6b7a70-0000-4000-8000-000000000001", title: "Agent Engineer" }] },
+    }), async () => page);
+    expect(other.status).toBe("not_found");
+    const onSite = await resolveDirectPostingLink({ company: "Defense Unicorns", role: "Platform Engineer", listingUrl: "https://x.invalid" }, boards({
+      [`${GH}/defenseunicorns`]: { name: "Defense Unicorns" }, [`${GH}/defenseunicorns/jobs`]: { jobs: [{ ...listings[5], location: { name: "San Antonio, Texas" } }] },
+    }), async () => page);
+    expect(onSite).toMatchObject({ status: "not_found", reason: expect.stringMatching(/on-site in San Antonio/) });
+    const wrongRole = await resolveDirectPostingLink({ company: "Defense Unicorns", role: "Site Reliability Engineer", listingUrl: "https://x.invalid" }, fetcher, async () => page);
+    expect(wrongRole.status).toBe("not_found");
+  });
+
   it("derives a few deterministic board slugs from a company name", () => {
     expect(companySlugCandidates("Defense Unicorns")).toEqual(["defenseunicorns", "defense-unicorns"]);
     expect(companySlugCandidates("Sidekick Solutions LLC")).toEqual(["sidekicksolutions", "sidekick-solutions"]);

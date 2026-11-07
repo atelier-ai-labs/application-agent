@@ -52,6 +52,8 @@ export interface DailyRunRecord {
   startedAt: string;
   finishedAt: string;
   discovered?: { added: number; jobs: string[] } | { error: string };
+  /** Job-board links swapped for the employer's own posting. */
+  links?: { fixed: number } | { error: string };
   queueImport?: { promoted: number } | { error: string };
   inbox?: { updates: string[]; notices: number } | { error: string };
   apply?: { started: StartedApplication[]; waiting: number; skippedReason?: string } | { error: string };
@@ -104,6 +106,14 @@ export async function runDailyCycle(deps: DailyCycleDependencies, options: Daily
     const jobs = result.stdout.split("\n").filter((line) => line.startsWith("+ ")).map((line) => line.slice(2).split(" | ").slice(0, 2).join(" — "));
     const added = Number(/(\d+) added to the tracker/.exec(result.stdout)?.[1] ?? 0);
     record.discovered = result.code === 0 ? { added, jobs: jobs.slice(0, added) } : { error: failure(result, "Job search") };
+  }
+
+  // Tracker rows that only link to a job board (Remotive, nogigiddy, ...) get
+  // the employer's own posting when the board page or the company's board names it.
+  if (phases.has("apply") || phases.has("discover")) {
+    const result = await deps.run("career-agent:resolve-links", ["--apply"], 10 * 60_000);
+    const fixed = Number(/(\d+) direct links? found/.exec(result.stdout)?.[1] ?? 0);
+    record.links = result.code === 0 ? { fixed } : { error: failure(result, "Link check") };
   }
 
   if (phases.has("apply") || phases.has("discover")) {
@@ -170,6 +180,10 @@ export function formatDailySummary(record: DailyRunRecord): string {
   const lines = [`*Daily run* (${new Date(record.startedAt).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })})`];
   const d = record.discovered;
   if (d) lines.push("error" in d ? `• Job search failed: ${d.error}` : d.added === 0 ? "• No new jobs found." : `• Found ${d.added} new job${d.added === 1 ? "" : "s"}: ${d.jobs.join("; ")}`);
+  if (record.links) {
+    if ("error" in record.links) lines.push(`• ${record.links.error}`);
+    else if (record.links.fixed > 0) lines.push(`• Found the employer's own posting for ${record.links.fixed} job${record.links.fixed === 1 ? "" : "s"} that only had a job-board link.`);
+  }
   if (record.queueImport && "error" in record.queueImport) lines.push(`• ${record.queueImport.error}`);
   const i = record.inbox;
   if (i) lines.push("error" in i ? `• Inbox check failed: ${i.error}` : i.updates.length === 0 ? `• Inbox: no rejections or callbacks${i.notices ? ` (${i.notices} email${i.notices === 1 ? "" : "s"} sent to you above)` : ""}.` : `• Inbox: ${i.updates.join("; ")}`);

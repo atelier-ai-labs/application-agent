@@ -64,7 +64,7 @@ export async function resolveTrackerLinks(options: {
     const attemptKey = `${key(company)}|${key(role)}|${oldLink}`;
     if (options.attempted?.has(attemptKey)) continue;
     options.attempted?.add(attemptKey);
-    const resolution = await resolve({ company, role });
+    const resolution = await resolve({ company, role, listingUrl: oldLink });
     const report: TrackerLinkReport = { row: index + 1, company, role, oldLink, resolution };
     reports.push(report);
     if (!options.apply || resolution.status !== "resolved") continue;

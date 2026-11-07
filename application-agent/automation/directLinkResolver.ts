@@ -16,6 +16,60 @@ export type DirectLinkResolution =
   | { status: "not_found" | "ambiguous"; reason: string };
 
 export type DirectLinkFetcher = (url: string) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+/** Fetches a listing page's HTML; undefined when it is blocked, missing or not HTML. */
+export type ListingPageFetcher = (url: string) => Promise<string | undefined>;
+
+/** A Greenhouse, Lever or Ashby posting (or board) named by a link on a listing page. */
+export interface PageBoardLink {
+  provider: DirectLinkProvider;
+  slug: string;
+  id?: string;
+}
+
+/**
+ * Job boards and aggregators (Remotive, nogigiddy, remotera, ...) usually link
+ * to the employer's own posting as "Apply". Pull Greenhouse, Lever and Ashby
+ * links out of the page; each is verified against the board's API before use.
+ */
+export function boardLinksInPage(html: string): PageBoardLink[] {
+  const page = html.replace(/\\\//g, "/").replace(/&amp;/g, "&");
+  const links: PageBoardLink[] = [];
+  const add = (link: PageBoardLink) => {
+    if (!/^[a-z0-9][a-z0-9._-]{0,80}$/i.test(link.slug) || ["embed", "v1", "boards", "jobs"].includes(link.slug.toLowerCase())) return;
+    if (!links.some((seen) => seen.provider === link.provider && seen.slug.toLowerCase() === link.slug.toLowerCase() && seen.id === link.id)) links.push(link);
+  };
+  for (const match of page.matchAll(/https?:\/\/(?:job-boards|boards)(?:\.eu)?\.greenhouse\.io\/([A-Za-z0-9_-]+)(?:\/jobs\/(\d+))?/g)) add({ provider: "greenhouse", slug: match[1]!, ...(match[2] ? { id: match[2] } : {}) });
+  for (const match of page.matchAll(/https?:\/\/boards\.greenhouse\.io\/embed\/job_app\?(?:[^"'\s<>]*&)?for=([A-Za-z0-9_-]+)(?:[^"'\s<>]*&token=(\d+))?/g)) add({ provider: "greenhouse", slug: match[1]!, ...(match[2] ? { id: match[2] } : {}) });
+  for (const match of page.matchAll(/https?:\/\/jobs\.(?:eu\.)?lever\.co\/([A-Za-z0-9._-]+)(?:\/([0-9a-f-]{36}))?/g)) add({ provider: "lever", slug: match[1]!, ...(match[2] ? { id: match[2] } : {}) });
+  for (const match of page.matchAll(/https?:\/\/jobs\.ashbyhq\.com\/([A-Za-z0-9._%-]+)(?:\/([0-9a-f-]{36}))?/g)) add({ provider: "ashby", slug: safeDecode(match[1]!), ...(match[2] ? { id: match[2] } : {}) });
+  return links.slice(0, 12);
+}
+
+function safeDecode(value: string): string {
+  try { return decodeURIComponent(value); } catch { return value; }
+}
+
+/** True when a board slug read off a page plausibly belongs to the company ("defenseunicorns", "span.app"). */
+function slugNamesCompany(slug: string, company: string): boolean {
+  const compactSlug = slug.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const compactCompany = companyKey(company).replace(/\s+/g, "");
+  if (compactSlug.length < 3 || compactCompany.length < 3) return false;
+  return compactSlug.startsWith(compactCompany) || compactCompany.startsWith(compactSlug) || companySlugCandidates(company).includes(slug.toLowerCase());
+}
+
+const defaultPageFetcher: ListingPageFetcher = async (url) => {
+  try {
+    const response = await fetch(url, {
+      headers: { accept: "text/html", "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36" },
+      redirect: "follow",
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok || !/html/i.test(response.headers.get("content-type") ?? "")) return undefined;
+    return (await response.text()).slice(0, 3_000_000);
+  } catch {
+    return undefined;
+  }
+};
 
 interface BoardPosting {
   id: string;
@@ -133,6 +187,10 @@ async function ashbyBoard(fetcher: DirectLinkFetcher, slug: string): Promise<Boa
   });
 }
 
+function boardPostings(fetcher: DirectLinkFetcher, provider: DirectLinkProvider, slug: string, company: string): Promise<BoardPosting[] | undefined> {
+  return provider === "greenhouse" ? greenhouseBoard(fetcher, slug, company) : provider === "lever" ? leverBoard(fetcher, slug) : ashbyBoard(fetcher, slug);
+}
+
 function postingUrl(provider: DirectLinkProvider, slug: string, id: string): string {
   if (provider === "greenhouse") return `https://job-boards.greenhouse.io/${slug}/jobs/${id}`;
   if (provider === "lever") return `https://jobs.lever.co/${slug}/${id}`;
@@ -144,14 +202,33 @@ function prefersUsRemote(location: string | undefined): boolean {
 }
 
 export async function resolveDirectPostingLink(
-  input: { company: string; role: string },
+  input: { company: string; role: string; /** The tracker's current (job-board) link, read for an employer link first. */ listingUrl?: string },
   fetcher: DirectLinkFetcher = (url) => fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(10_000) }),
+  pageFetcher: ListingPageFetcher = defaultPageFetcher,
 ): Promise<DirectLinkResolution> {
-  const slugs = companySlugCandidates(input.company);
-  if (slugs.length === 0) return { status: "not_found", reason: "The company name has no usable job-board identifier." };
   const found: { provider: DirectLinkProvider; slug: string; posting: BoardPosting }[] = [];
   let boardsSeen = 0;
-  for (const slug of slugs) {
+
+  // 1. The listing page's own Apply link, when it points at a supported board.
+  const html = input.listingUrl && /^https?:\/\//i.test(input.listingUrl) ? await pageFetcher(input.listingUrl) : undefined;
+  const pageLinks = html ? boardLinksInPage(html) : [];
+  for (const link of pageLinks) {
+    // Greenhouse checks the board's company name itself; Lever and Ashby slugs must name the company.
+    if (link.provider !== "greenhouse" && !slugNamesCompany(link.slug, input.company)) continue;
+    const postings = await boardPostings(fetcher, link.provider, link.slug, input.company);
+    if (!postings) continue;
+    boardsSeen += 1;
+    const named = link.id ? postings.filter((posting) => posting.id === link.id) : postings;
+    for (const posting of named) if (titleMatchesRole(posting.title, input.role)) found.push({ provider: link.provider, slug: link.slug, posting });
+  }
+  // The page named one exact posting and it is this role: that is the answer, even on a board with many similar roles.
+  const pinned = found.filter(({ provider, slug, posting }) => pageLinks.some((link) => link.provider === provider && link.slug === slug && link.id === posting.id));
+  if (pinned.length === 1) return resolvedLink(pinned[0]!);
+
+  // 2. Guess the company's board from its name.
+  const slugs = companySlugCandidates(input.company);
+  if (slugs.length === 0 && found.length === 0) return { status: "not_found", reason: "The company name has no usable job-board identifier." };
+  for (const slug of found.length > 0 ? [] : slugs) {
     for (const provider of ["greenhouse", "lever", "ashby"] as const) {
       const postings = provider === "greenhouse" ? await greenhouseBoard(fetcher, slug, input.company)
         : provider === "lever" ? await leverBoard(fetcher, slug)
@@ -175,6 +252,16 @@ export async function resolveDirectPostingLink(
   const usRemote = pool.filter(({ posting }) => prefersUsRemote(posting.location));
   const chosen = pool.length === 1 ? pool[0] : usRemote.length === 1 ? usRemote[0] : undefined;
   if (!chosen) return { status: "ambiguous", reason: `${pool.length} postings on the company's board match this role; pick the right one manually.` };
+  return resolvedLink(chosen);
+}
+
+function resolvedLink(chosen: { provider: DirectLinkProvider; slug: string; posting: BoardPosting }): DirectLinkResolution {
+  // The candidate applies to remote roles (or on-site in Pittsburgh); a board
+  // that lists this posting on-site elsewhere is not the remote job that was tracked.
+  const location = chosen.posting.location ?? "";
+  if (location && !/\b(?:remote|anywhere|distributed|pittsburgh)\b/i.test(location)) {
+    return { status: "not_found", reason: `The employer's posting is on-site in ${location.slice(0, 80)}, not remote.` };
+  }
   const url = postingUrl(chosen.provider, chosen.slug, chosen.posting.id);
   if (queueDestinationPreflightReason({ jobLink: url })) {
     return { status: "not_found", reason: "The matching posting's link is not a route the queue can open." };

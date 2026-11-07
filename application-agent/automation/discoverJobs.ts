@@ -103,7 +103,7 @@ export async function discoverJobsToTracker(options: DiscoverJobsOptions): Promi
     // and aggregators must be resolved to one before the queue can use it.
     let link = scouted.actionability === "actionable" ? job.applicationUrl ?? job.sourceUrl : undefined;
     if (!link || queueDestinationPreflightReason({ jobLink: link })) {
-      const resolved = await resolveLink({ company, role }).catch(() => undefined);
+      const resolved = await resolveLink({ company, role, ...(job.sourceUrl ? { listingUrl: job.sourceUrl } : {}) }).catch(() => undefined);
       link = resolved?.status === "resolved" ? resolved.url : undefined;
     }
     if (!link || existingLinks.has(postingLinkKey(link))) { skip(link ? "in tracker" : "no direct link"); continue; }
