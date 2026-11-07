@@ -279,11 +279,55 @@ describe("local ATS answer drafting", () => {
     expect(String(requests[0].body)).not.toContain("fullName");
     expect(JSON.parse(String(requests[0].body))).toMatchObject({
       system: expect.stringContaining("Never combine facts from different employers or projects"),
-      options: { temperature: 0.1, num_predict: 160 },
+      options: { temperature: 0.1, num_predict: 200 },
       format: {
       required: ["status", "answer", "evidenceIds"],
       },
     });
+  });
+
+  it("answers a 'why this company' question from what the posting emphasizes and the project that proves it", async () => {
+    const requests: RequestInit[] = [];
+    const replies = [
+      "I'm excited about Outmarket because it offers impactful work in a collaborative environment.",
+      "Outmarket's focus on tool-using AI agents and evaluating model output matches what I built at PuckPulse: a tool-calling agent with an eval suite.",
+    ];
+    const generator = new OllamaApplicationAnswerDraftGenerator({
+      baseUrl: "http://ollama.test",
+      model: "qwen2.5:7b",
+      fetcher: async (_input, init) => {
+        requests.push(init ?? {});
+        const answer = replies[Math.min(requests.length - 1, replies.length - 1)];
+        return { ok: true, json: async () => ({ response: JSON.stringify({ status: "drafted", answer, evidenceIds: ["evidence-1"] }) }) } as Response;
+      },
+    });
+    const profile = privateProfile();
+    profile.projects = [
+      { id: "web-shop", name: "Storefront", description: "A React storefront.", bullets: ["Built product pages in React."], verifiedSkills: ["React"] },
+      { id: "puck", name: "PuckPulse", description: "A live NHL analytics app.", bullets: ["Built PuckPulse AI, a tool-calling agent that answers only from the app's data, with an eval suite."], verifiedSkills: ["Python"] },
+    ] as unknown as CandidateProfile["projects"];
+    const result = await generator.generate({
+      question: "What interests you about Outmarket?",
+      job: {
+        company: "Outmarket AI", title: "Software Engineer", capturedAt,
+        description: "Software Engineer at Outmarket AI\nLocation: Remote\nResume Version: agentic-ai\nPython, SQL, RAG, embeddings, semantic search, tool-using agents and model-output evaluation. React is a bonus.",
+        requiredSkills: ["Python", "React"], preferredSkills: [],
+      },
+      profile,
+      resume: null,
+    });
+    // The first draft was filler; one retry asked for something specific, and that one is kept.
+    expect(requests).toHaveLength(2);
+    expect(result?.answer).toContain("eval suite");
+    const first = JSON.parse(String(requests[0].body)) as { prompt: string };
+    expect(first.prompt).toContain("<company>Outmarket AI</company>");
+    expect(first.prompt).toContain("<what-the-posting-emphasizes>retrieval-augmented generation (RAG); embeddings; semantic search; tool-using AI agents; evaluating model output</what-the-posting-emphasizes>");
+    expect(first.prompt).toContain("<where-the-candidate-evidence-matches>tool-using AI agents; evaluating model output</where-the-candidate-evidence-matches>");
+    expect(first.prompt).toContain("<source>Project — PuckPulse</source>");
+    expect(first.prompt).not.toContain("Resume Version");
+    expect(first.prompt).not.toContain("contribute to meaningful technical work, and take on");
+    const second = JSON.parse(String(requests[1].body)) as { prompt: string };
+    expect(second.prompt).toContain('An earlier draft used generic filler ("impactful", "collaborative environment")');
   });
 
   it("honors an explicit phrase requirement in the inspected application question", async () => {
