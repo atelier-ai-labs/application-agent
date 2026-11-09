@@ -51,7 +51,7 @@ class RecordingTracker implements JobTracker {
   }
 }
 
-async function readyFixture(tracker: JobTracker = new RecordingTracker()) {
+async function readyFixture(tracker: JobTracker = new RecordingTracker(), notices?: string[]) {
   const profile = privateProfile();
   const applicationRepository = new InMemoryApplicationRepository();
   const careerRepository = new InMemoryCareerRepository();
@@ -63,6 +63,10 @@ async function readyFixture(tracker: JobTracker = new RecordingTracker()) {
     applicationService,
     careerRepository,
     tracker,
+    ...(notices ? { notificationAdapter: {
+      publishAttentionEvent: async () => ({ status: "delivered" as const }),
+      publishInfoNotice: async (text: string) => { notices.push(text); },
+    } as never } : {}),
   }, {
     now: () => at,
     createId: (prefix) => `${prefix}-test`,
@@ -112,6 +116,21 @@ describe("manual applied state and tracker sync", () => {
     expect(fixture.applicationService.getApplication(fixture.careerJob.applicationId!).status).toBe("ready_for_review");
     expect(tracker.calls).toHaveLength(0);
     expect(fixture.service.getJob(fixture.careerJob.id).status).toBe("ready_to_submit");
+  });
+
+  it("tells Slack once when an application stops, so it never just goes quiet (Ramp)", async () => {
+    const notices: string[] = [];
+    const fixture = await readyFixture(new RecordingTracker(), notices);
+    const failed: ExecutionHostSnapshot = {
+      id: "host-ramp", mode: "real_local", campaignId: fixture.campaign.id, jobId: fixture.careerJob.id,
+      applicationId: fixture.careerJob.applicationId!, status: "failed", startedAt: at, updatedAt: at,
+      result: { state: "failed", reason: "Could not fill Where do you plan on working from?: The select option Pittsburgh, PA was not found", retryable: false },
+    };
+    await fixture.service.recordExecutionHostSnapshot(fixture.campaign.id, fixture.careerJob.id, failed);
+    await fixture.service.recordExecutionHostSnapshot(fixture.campaign.id, fixture.careerJob.id, failed);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain("the application stopped and nothing was submitted");
+    expect(notices[0]).toContain("Pittsburgh, PA was not found");
   });
 
   it("does not let a stale host snapshot downgrade an Applied packet", async () => {

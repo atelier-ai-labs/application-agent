@@ -677,6 +677,34 @@ export function greenhouseOptionMatches(
     );
 }
 
+const US_STATES: Record<string, string> = {
+  al: "alabama", ak: "alaska", az: "arizona", ar: "arkansas", ca: "california", co: "colorado", ct: "connecticut", de: "delaware",
+  dc: "district of columbia", fl: "florida", ga: "georgia", hi: "hawaii", id: "idaho", il: "illinois", in: "indiana", ia: "iowa",
+  ks: "kansas", ky: "kentucky", la: "louisiana", me: "maine", md: "maryland", ma: "massachusetts", mi: "michigan", mn: "minnesota",
+  ms: "mississippi", mo: "missouri", mt: "montana", ne: "nebraska", nv: "nevada", nh: "new hampshire", nj: "new jersey",
+  nm: "new mexico", ny: "new york", nc: "north carolina", nd: "north dakota", oh: "ohio", ok: "oklahoma", or: "oregon",
+  pa: "pennsylvania", ri: "rhode island", sc: "south carolina", sd: "south dakota", tn: "tennessee", tx: "texas", ut: "utah",
+  vt: "vermont", va: "virginia", wa: "washington", wv: "west virginia", wi: "wisconsin", wy: "wyoming",
+};
+/** A place part and the other ways forms write it: "pa" ~ "pennsylvania", "usa" ~ "united states". */
+const PLACE_ALIASES: Record<string, string[]> = (() => {
+  const aliases: Record<string, string[]> = {};
+  for (const [code, name] of Object.entries(US_STATES)) aliases[code] = aliases[name] = [name, code];
+  for (const name of ["united states", "us", "usa", "united states of america", "u.s."]) aliases[name] = ["united states", "us", "usa", "united states of america", "u.s."];
+  return aliases;
+})();
+
+/**
+ * A typed place ("Pittsburgh, PA") and a rendered typeahead option
+ * ("Pittsburgh, Pennsylvania, United States") name the same place when the
+ * city is the same and every other typed part matches a part of the option.
+ * Ramp's payroll-location box (2026-11-09) failed on exactly this.
+ */
+export function typedPlaceMatchesOption(optionLabel: string, typed: string): boolean {
+  if (!/^[^,]{2,60},\s*[^,]{2,40}(?:,\s*[^,]{2,40})?$/.test(typed.trim())) return false;
+  return greenhouseLocationOptionMatches(optionLabel, typed, typed);
+}
+
 export function greenhouseLocationOptionMatches(optionLabel: string, desiredCity: string, groundedLocation?: string): boolean {
   const normalize = (part: string) => part.trim().toLowerCase().replace(/\s+/g, " ");
   const optionParts = optionLabel.split(",").map(normalize).filter(Boolean);
@@ -685,11 +713,7 @@ export function greenhouseLocationOptionMatches(optionLabel: string, desiredCity
   const normalizedCity = normalize(desiredCity.split(",")[0] ?? "");
   if (!normalizedCity || optionParts[0] !== normalizedCity) return false;
   if (!groundedLocation) return true;
-  const aliases: Record<string, string[]> = {
-    pennsylvania: ["pennsylvania", "pa"], pa: ["pennsylvania", "pa"],
-    tennessee: ["tennessee", "tn"], tn: ["tennessee", "tn"],
-    "united states": ["united states", "us", "usa"], us: ["united states", "us", "usa"], usa: ["united states", "us", "usa"],
-  };
+  const aliases = PLACE_ALIASES;
   // A country-level question ("United States" among country options) matches
   // when that country is the grounded location's country.
   // Phone-country lists append the dialing code ("United States +1").
@@ -1089,7 +1113,7 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
             if (label) lastRenderedLabels.push(label);
             if (!label || !(locationSelection
               ? greenhouseLocationOptionMatches(label, value, context?.groundedLocation)
-              : greenhouseOptionMatches(label, label, value))) continue;
+              : greenhouseOptionMatches(label, label, value) || typedPlaceMatchesOption(label, value))) continue;
             candidates.push({ label, value: label });
           }
           if (candidates.length === 1) {

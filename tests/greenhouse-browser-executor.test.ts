@@ -5,6 +5,7 @@ import { OPTIONAL_ANSWER_SKIPPED } from "../application-agent/src/domain/executo
 import {
   greenhouseLocationOptionMatches,
   greenhouseOptionMatches,
+  typedPlaceMatchesOption,
 } from "../application-agent/automation/playwrightLeverBrowserSession";
 
 import {
@@ -207,6 +208,15 @@ function request(session: FakeSession): ApplicationExecutionRequest {
 }
 
 describe("Greenhouse destination execution through the existing browser policy", () => {
+  it("matches a typed place to the full typeahead option (Ramp's payroll location)", () => {
+    expect(typedPlaceMatchesOption("Pittsburgh, Pennsylvania, United States", "Pittsburgh, PA")).toBe(true);
+    expect(typedPlaceMatchesOption("Palo Alto, California, United States", "Pittsburgh, PA")).toBe(false);
+    expect(typedPlaceMatchesOption("Pittsburgh, Kansas, United States", "Pittsburgh, PA")).toBe(false);
+    expect(typedPlaceMatchesOption("Austin, Texas, United States", "Austin, TX, USA")).toBe(true);
+    // Not a place: plain answers keep exact matching only.
+    expect(typedPlaceMatchesOption("Yes, I consent", "Yes")).toBe(false);
+  });
+
   it("maps a grounded US location to the Greenhouse country option without guessing a candidate fact", async () => {
     expect(greenhouseOptionMatches("United States+1", null, "United States")).toBe(true);
     expect(greenhouseOptionMatches("Male", "male", "Male")).toBe(true);

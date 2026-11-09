@@ -4074,10 +4074,20 @@ export class CareerAgentService {
         });
       }
       if (snapshot.result.state === "failed") {
+        const alreadyFailed = job.status === "failed" && job.execution?.hostExecutionId === snapshot.id;
         this.appendEvent(campaign.id, "application.execution_failed", {
           ...careerEventMetadata(marked),
           executionId: snapshot.id,
         });
+        // Ramp (2026-11-09) stopped right after an answer was sent, and Slack
+        // just went quiet. Say so once, with the reason, so it never looks
+        // like the application is still waiting.
+        if (!alreadyFailed) {
+          const reason = snapshot.result.reason.replace(/\s+/g, " ").slice(0, 300);
+          await this.notificationAdapter?.publishInfoNotice?.(
+            `⚠️ ${marked.job.company} — ${marked.job.title}: the application stopped and nothing was submitted.\nReason: ${reason}`,
+          ).catch(() => undefined);
+        }
       }
       return marked;
     }
