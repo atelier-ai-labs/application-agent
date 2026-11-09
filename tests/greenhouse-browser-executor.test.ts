@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { greenhouseEmbedApplicationUrl, isVerifiedGreenhouseEmbedUrl } from "../application-agent/src/domain/greenhouseJobSource";
-import { isGreenhouseClosedPostingRedirect, isTrustedAutomaticConfirmation, isTruthfulnessCertification } from "../application-agent/src/domain/leverBrowserExecutor";
+import { classifyLeverApplicationField, isGreenhouseClosedPostingRedirect, isTrustedAutomaticConfirmation, isTruthfulnessCertification } from "../application-agent/src/domain/leverBrowserExecutor";
 import { OPTIONAL_ANSWER_SKIPPED } from "../application-agent/src/domain/executor";
 import {
   greenhouseLocationOptionMatches,
@@ -1060,6 +1060,17 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(skipped.state).toBe("ready_to_submit");
     expect(second.current).toBeNull();
     expect(second.fillCalls).toBe(0);
+  });
+
+  it("treats a question that mentions résumés as a question, not the résumé upload", () => {
+    // Temporal (2026-11-09): the file path was typed into this essay box.
+    const prompt = "We know resumes only tell part of the story. Choose one to share with us (150 words max) Tell us something we won't learn from your resume.";
+    expect(classifyLeverApplicationField({ id: "q1", label: prompt, type: "textarea", questionDescriptor: { promptText: prompt, sourceStrategy: "question_container", confidence: "high" } }))
+      .toBe("free_text");
+    expect(classifyLeverApplicationField({ id: "q2", label: "Anything not on your resume you'd like us to know?", type: "text" })).not.toBe("resume_upload");
+    // The real upload controls still are.
+    expect(classifyLeverApplicationField({ id: "resume", label: "Resume/CV", type: "file" })).toBe("resume_upload");
+    expect(classifyLeverApplicationField({ id: "resume_text", label: "Resume", type: "text" })).toBe("resume_upload");
   });
 
   it("asks short optional essay prompts too, but not follow-ups or short facts", async () => {

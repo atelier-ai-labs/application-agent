@@ -817,6 +817,13 @@ function isAmbiguousYesNoControl(
   return label === "yes" || label === "no";
 }
 
+function isResumeMentioningQuestion(field: Pick<LeverBrowserField, "label" | "type"> & { questionDescriptor?: LeverBrowserField["questionDescriptor"] }): boolean {
+  if (field.type === "file") return false;
+  if (field.type === "textarea") return true;
+  const prompt = (field.questionDescriptor?.promptText ?? field.label ?? "").replace(/\s+/g, " ").trim();
+  return prompt.length > 40 || /\?/.test(prompt);
+}
+
 function binaryQuestionClassification(
   field: Pick<LeverBrowserField, "id" | "label" | "section" | "type"> & {
     questionDescriptor?: LeverBrowserField["questionDescriptor"];
@@ -860,7 +867,10 @@ export function classifyLeverApplicationField(
   // "Legal First Name" is the candidate's name, not a legal statement to attest.
   if (/^legal (?:first |last |full |given |family )?name\s*\*?$/.test(normalized(field.questionDescriptor?.promptText ?? field.label))) return "contact";
   if (isPhoneCountrySelector(field)) return "location";
-  if (hasPhrase(text, /resume|résumé|cv|curriculum vitae/)) return "resume_upload";
+  // A text box that mentions résumés ("We know resumes only tell part of the
+  // story...") is a question, not the upload; only a file control or a short
+  // "Resume/CV" field is the upload.
+  if (hasPhrase(text, /resume|résumé|cv|curriculum vitae/) && !isResumeMentioningQuestion(field)) return "resume_upload";
   // Rippling's native resume dropzone exposes only its accepted extensions
   // ("Drop or select (.doc / .docx / .pdf)") and no Resume/CV text.
   if (field.type === "file" && hasPhrase(text, /drop\s+or\s+select|\.docx?|\.pdf/)) return "resume_upload";
@@ -1932,7 +1942,7 @@ function isOptionalEssayQuestion(field: ApplicationFieldDescriptor): boolean {
   if (prompt.length < 15) return false;
   if (/\b(?:anything else|additional (?:information|comments)|other comments|cover letter|website|portfolio|linkedin|github|twitter|referr)/i.test(prompt)) return false;
   // Follow-ups to another answer ("If other, please specify") and short facts are not essays.
-  if (/^if\b|please specify|pronoun|pronunciation|preferred name|nickname|hear about|heard about/i.test(prompt)) return false;
+  if (/^if (?:other|so|yes|no|applicable|selected)\b|please specify|pronoun|pronunciation|preferred name|nickname|hear about|heard about/i.test(prompt)) return false;
   // Short essay prompts ("What made you decide to apply?", "Why Mercury?") name what they want.
   if (/\b(?:why|what (?:made|makes|excites|draws|drew|interests|motivates)|tell us|describe|explain|walk us through|hard(?:est)? problem|proud|excited|mission|interest(?:s|ed)? you)\b/i.test(prompt)) return true;
   if (prompt.length < 60) return false;
