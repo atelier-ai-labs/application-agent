@@ -508,8 +508,12 @@ describe("Slack human-attention adapter", () => {
     expect(requests[0]).toContain("Tell us about a difficult technical problem you solved.");
     expect(requests[0]).toContain("Suggested answer generated locally for your review (not submitted):");
     expect(requests[0]).toContain("I improved service observability by adding runbooks and operational checks.");
-    expect(requests[0]).toContain("Reply APPROVE to use this draft, or reply with your edited answer.");
+    expect(requests[0]).toContain("Tap *Approve draft* (or reply APPROVE) to use this draft, or reply with your edited answer.");
     expect(requests[0]).not.toContain("Your answer is");
+    // The word it asks for is a button too.
+    const blocks = JSON.parse(requests[0]!).blocks as { type: string; elements?: { action_id: string; value: string; text: { text: string } }[] }[];
+    const actions = blocks.find((block) => block.type === "actions");
+    expect(actions?.elements?.map((element) => [element.action_id, element.text.text])).toEqual([["career_agent_quick_reply_APPROVE", "Approve draft"]]);
   });
 
   it("updates an existing Slack attention message in place when a draft is backfilled", async () => {
@@ -549,7 +553,7 @@ describe("Slack human-attention adapter", () => {
     expect(requests[0].input).toContain("chat.postMessage");
     expect(requests[1].input).toContain("chat.update");
     expect(requests[1].body).toContain("I am looking for a role where I can keep growing as an engineer.");
-    expect(requests[1].body).toContain("Reply APPROVE to use this draft, or reply with your edited answer.");
+    expect(requests[1].body).toContain("Tap *Approve draft* (or reply APPROVE) to use this draft, or reply with your edited answer.");
     expect(requests[1].body).not.toContain("chat.postMessage");
   });
 
@@ -747,6 +751,47 @@ describe("Slack human-attention adapter", () => {
       text: "DONE",
     })));
     expect(responses).toEqual(["DONE"]);
+  });
+
+  it("offers Done / Skip as buttons where the message asks for the word, and shows the tap right away", async () => {
+    const requests: { url: string; body: Record<string, unknown> }[] = [];
+    const responses: string[] = [];
+    const captchaEvent: AttentionEvent = {
+      ...freeTextEvent(), id: "attention-captcha-2", blockerType: "captcha",
+      question: { prompt: "Verify you are human", kind: "free_text", options: [] },
+    };
+    const optionalEvent: AttentionEvent = {
+      ...freeTextEvent(), id: "attention-optional-2", blockerType: "subjective_answer",
+      question: { prompt: "What made you decide to apply?", kind: "free_text", options: [], required: false },
+    };
+    const events = new Map([captchaEvent, optionalEvent].map((event) => [event.id, event]));
+    const adapter = new SlackNotificationAdapter({
+      config,
+      eventLookup: (eventId) => events.get(eventId),
+      responseHandler: async ({ selectedOption }) => { responses.push(selectedOption); return { status: "resolved" }; },
+      fetcher: async (input, init) => {
+        requests.push({ url: String(input), body: JSON.parse(typeof init?.body === "string" ? init.body : "{}") });
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: `1710000000.0001${requests.length}` }) } as Response;
+      },
+      handoffUrlForApplication: async () => "https://sample.trycloudflare.com/handoff#token=redacted",
+    });
+    const buttons = (body: Record<string, unknown>) => ((body.blocks as { type: string; elements?: { action_id: string }[] }[])
+      .find((block) => block.type === "actions")?.elements ?? []).map((element) => element.action_id);
+
+    await adapter.publishAttentionEvent(captchaEvent);
+    expect(buttons(requests[0]!.body)).toEqual(["career_agent_quick_reply_DONE"]);
+    await adapter.publishAttentionEvent(optionalEvent);
+    expect(buttons(requests[1]!.body)).toEqual(["career_agent_quick_reply_SKIP"]);
+
+    // A word the message didn't offer is refused; the offered one goes through like a typed reply.
+    expect(await adapter.handleInteraction(slackResponse("attention-captcha-2|APPROVE", { actions: [{ action_id: "career_agent_quick_reply_APPROVE", value: "attention-captcha-2|APPROVE" }] })))
+      .toEqual({ status: "rejected", reason: "invalid_option" });
+    expect(await adapter.handleInteraction(slackResponse("", { actions: [{ action_id: "career_agent_quick_reply_DONE", value: "attention-captcha-2|DONE" }] })))
+      .toEqual({ status: "resolved" });
+    expect(responses).toEqual(["DONE"]);
+    const update = requests.find((request) => request.url.endsWith("chat.update"));
+    expect(JSON.stringify(update?.body)).toContain("You chose *Done*");
+    expect(buttons(update!.body)).toEqual([]);
   });
 
   it("does not post a human-verification alert when its configured handoff URL is unavailable", async () => {

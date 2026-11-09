@@ -109,7 +109,62 @@ function responseData(value: unknown): string {
   return "";
 }
 
+const QUICK_REPLY_ACTION_ID = "career_agent_quick_reply";
+const QUICK_REPLY_ACTION_PATTERN = new RegExp(`^${QUICK_REPLY_ACTION_ID}_(APPROVE|SKIP|DONE)$`);
+type QuickReply = "APPROVE" | "SKIP" | "DONE";
+const QUICK_REPLY_LABELS: Record<QuickReply, string> = { APPROVE: "Approve draft", SKIP: "Skip", DONE: "Done" };
+
+function isHumanVerificationHandoff(event: AttentionEvent): boolean {
+  return event.submissionAlreadyClicked === true || event.blockerType === "captcha" ||
+    (event.blockerType === "external_verification" && /verify whether the application was submitted/i.test(event.question?.prompt ?? ""));
+}
+
+/**
+ * The one-word replies a message asks for (APPROVE, SKIP, DONE), offered as
+ * buttons too. A tap sends exactly what typing the word in the thread sends.
+ */
+export function quickRepliesForEvent(event: AttentionEvent): readonly QuickReply[] {
+  if (event.type !== "needs_input" || !event.question || event.status !== "open") return [];
+  if (event.batch && event.batch.length > 1) return [];
+  if (isHumanVerificationHandoff(event)) return ["DONE"];
+  if (event.blockerType === "resume_missing" || event.blockerType === "required_file_missing") {
+    return event.question.required === false ? ["DONE", "SKIP"] : ["DONE"];
+  }
+  const replies: QuickReply[] = [];
+  if (event.draft) replies.push("APPROVE");
+  if (event.question.required === false && event.question.kind === "free_text") replies.push("SKIP");
+  return replies;
+}
+
 function eventMessage(
+  event: AttentionEvent,
+  renderOptions: { threadReply?: boolean; handoffUrl?: string } = {},
+): {
+  text: string;
+  blocks: readonly Record<string, unknown>[];
+} {
+  const message = eventMessageBody(event, renderOptions);
+  const replies = quickRepliesForEvent(event);
+  if (replies.length === 0) return message;
+  return {
+    text: message.text,
+    blocks: [
+      ...message.blocks,
+      {
+        type: "actions",
+        elements: replies.map((reply) => ({
+          type: "button",
+          action_id: `${QUICK_REPLY_ACTION_ID}_${reply}`,
+          text: { type: "plain_text", text: QUICK_REPLY_LABELS[reply] },
+          value: `${event.id}|${reply}`,
+          ...(reply === "APPROVE" || reply === "DONE" ? { style: "primary" } : {}),
+        })),
+      },
+    ],
+  };
+}
+
+function eventMessageBody(
   event: AttentionEvent,
   renderOptions: { threadReply?: boolean; handoffUrl?: string } = {},
 ): {
@@ -138,9 +193,7 @@ function eventMessage(
     };
   }
   if (!event.question) throw new Error("An interactive attention event requires a question.");
-  const humanVerificationHandoff = event.submissionAlreadyClicked === true || event.blockerType === "captcha" ||
-    (event.blockerType === "external_verification" && /verify whether the application was submitted/i.test(event.question.prompt));
-  if (humanVerificationHandoff) {
+  if (isHumanVerificationHandoff(event)) {
     const postSubmit = event.submissionAlreadyClicked === true || event.blockerType === "external_verification";
     const handoffText = postSubmit
       ? "I clicked Submit, but I couldn't confirm that the employer received the application, so I won't click Submit again."
@@ -257,7 +310,7 @@ function eventMessage(
     ? " This question is optional: reply SKIP to leave it blank."
     : "";
   const replyInstruction = (event.draft
-    ? "\n\nReply APPROVE to use this draft, or reply with your edited answer. The draft is never used without your explicit approval."
+    ? "\n\nTap *Approve draft* (or reply APPROVE) to use this draft, or reply with your edited answer. The draft is never used without your explicit approval."
     : event.question.kind === "free_text"
       ? "\n\nReply in this Slack thread with one grounded answer."
       : "") + (optionalNote && (event.draft || event.question.kind === "free_text") ? optionalNote : "");
@@ -1042,6 +1095,8 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     if (!action) return { status: "rejected", reason: "unexpected_action" };
     const actionId = typeof action.action_id === "string" && action.action_id.length <= 255 ? action.action_id : undefined;
     if (!actionId) return { status: "rejected", reason: "unexpected_action" };
+    const quickReply = actionId.match(QUICK_REPLY_ACTION_PATTERN)?.[1] as QuickReply | undefined;
+    if (quickReply) return this.handleQuickReply(action, quickReply, { provider: "slack", userId, ...(teamId ? { workspaceId: teamId } : {}) });
     const generatedAction = actionId.match(GENERATED_ACTION_ID_PATTERN);
     if (actionId !== ACTION_ID && !generatedAction) return { status: "rejected", reason: "unexpected_action" };
     const optionIndex = generatedAction ? Number(generatedAction[1]) : undefined;
@@ -1076,6 +1131,7 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     if (optionIndex !== undefined && event?.question?.options[optionIndex]?.id !== selectedOption) {
       return { status: "rejected", reason: "invalid_option" };
     }
+    await this.acknowledgeTap(event, event.question?.options.find((option) => option.id === selectedOption)?.label ?? selectedOption);
     try {
       const result = await this.responseHandler({
         eventId,
@@ -1088,6 +1144,51 @@ export class SlackNotificationAdapter implements NotificationAdapter {
         respondedAt: new Date().toISOString(),
       });
       // A button press is never a numbered reply, so "partial" cannot come back here.
+      return { status: result.status === "partial" ? "ignored" : result.status };
+    } catch {
+      return { status: "rejected", reason: "attention_response_rejected" };
+    }
+  }
+
+  /**
+   * Resuming the browser after a tap takes a while (often 20+ seconds), and
+   * until the message changes Slack keeps showing the old buttons, which looks
+   * like nothing happened. Replace them right away with what was chosen.
+   */
+  private async acknowledgeTap(event: AttentionEvent, choice: string): Promise<void> {
+    const timestamp = this.messageTimestamps.get(event.id);
+    if (!timestamp) return;
+    const prompt = event.question ? `"${markdownText(event.question.prompt, 240)}"\n\n` : "";
+    const body = `*${markdownText(event.context.company, 160)}* — ${markdownText(event.context.role, 200)}\n\n${prompt}✅ You chose *${markdownText(choice, 120)}*. Filling the form now…`;
+    try {
+      await this.callApi("chat.update", this.config.botToken, {
+        channel: this.config.channelId,
+        ts: timestamp,
+        text: `${safeText(event.title, 150)}: ${safeText(choice, 120)}`,
+        blocks: [{ type: "section", text: { type: "mrkdwn", text: body } }],
+      });
+    } catch {
+      // The acknowledgement is cosmetic; the answer itself still goes through.
+    }
+  }
+
+  /** An Approve / Skip / Done button: the same as typing that word in the thread. */
+  private async handleQuickReply(
+    action: Record<string, unknown>,
+    reply: QuickReply,
+    actorIdentity: { provider: "slack"; userId: string; workspaceId?: string },
+  ): Promise<SlackInteractionResult> {
+    const rawValue = stringValue(action.value, 256);
+    const separator = rawValue?.lastIndexOf("|") ?? -1;
+    if (!rawValue || separator <= 0 || rawValue.slice(separator + 1) !== reply) return { status: "rejected", reason: "malformed_action_value" };
+    const eventId = rawValue.slice(0, separator);
+    await this.refreshPublishedAttentionEvents();
+    const event = this.eventLookup?.(eventId) ?? this.publishedAttentionEvents.get(eventId);
+    if (!event || event.status !== "open") return { status: "rejected", reason: "unknown_or_closed_event" };
+    if (!quickRepliesForEvent(event).includes(reply)) return { status: "rejected", reason: "invalid_option" };
+    await this.acknowledgeTap(event, reply === "APPROVE" ? "Approve draft" : reply === "SKIP" ? "Skip" : "Done");
+    try {
+      const result = await this.responseHandler!({ eventId, selectedOption: reply, actorIdentity, respondedAt: new Date().toISOString() });
       return { status: result.status === "partial" ? "ignored" : result.status };
     } catch {
       return { status: "rejected", reason: "attention_response_rejected" };
