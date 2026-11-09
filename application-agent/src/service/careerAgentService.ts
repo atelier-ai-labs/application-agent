@@ -222,6 +222,9 @@ function typedAnswerForQuestion(question: AttentionQuestion, text: string): stri
   return question.kind === "single_choice" ? optionIdForTypedAnswer(question.options, text) : text.trim() || undefined;
 }
 
+/** Generic preparation placeholders that the real form's questions replace for queue jobs. */
+const GENERIC_PREPARATION_FIELDS: ReadonlySet<string> = new Set(["salary_expectations", "relocation", "travel", "demographic_disclosure", "legal_attestations"]);
+
 /** Questions that need their own message: essays to review, browser handoffs, files. */
 const UNBATCHED_BLOCKER_KINDS: ReadonlySet<string> = new Set([
   "subjective_answer", "captcha", "external_login", "external_verification", "resume_missing", "required_file_missing",
@@ -852,7 +855,7 @@ export class CareerAgentService {
     if (job.campaignId !== campaign.id || !job.applicationId) return job;
     const application = this.applicationService.getApplication(job.applicationId);
     if (application.status === "needs_input") this.applicationService.deferGenericPreparationBlockersForInspection(application.id);
-    const genericFields = new Set(["salary_expectations", "relocation", "travel", "demographic_disclosure", "legal_attestations"]);
+    const genericFields = GENERIC_PREPARATION_FIELDS;
     const blockers = job.blockers.filter((blocker) => blocker.status !== "open" || !genericFields.has(blocker.field ?? ""));
     const updated = this.saveJob({
       ...job,
@@ -4834,7 +4837,12 @@ export class CareerAgentService {
           careerEventMetadata(careerJob, undefined, String(preparationDrafts.length)),
         );
         this.appendEvent(campaign.id, "campaign.review_needed", careerEventMetadata(careerJob, undefined, "application_preparation"));
-        await this.publishAttentionForJob(campaign, careerJob);
+        // A queue job's generic placeholders (pay, relocation, travel,
+        // demographics, legal) are dropped a moment later, once the browser
+        // reads the real form and asks its actual questions. Posting them
+        // first left a stray five-question Slack message on every application.
+        const placeholdersOnly = careerJob.queueSelected === true && preparationDrafts.every((draft) => GENERIC_PREPARATION_FIELDS.has(draft.field ?? ""));
+        if (!placeholdersOnly) await this.publishAttentionForJob(campaign, careerJob);
         return { blocked: true };
       }
 
