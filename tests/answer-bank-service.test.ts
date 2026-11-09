@@ -139,7 +139,8 @@ describe("answer bank in the career service", () => {
       const slug = title.toLowerCase().replace(/[^a-z]+/g, "-");
       return { sourceRecordId: `sparksoft-${slug}`, input: { isExample: true, companyHint: "Sparksoft", titleHint: title,
         sourceUrl: `https://jobs.example.invalid/sparksoft/${slug}`, applicationUrl: `https://jobs.example.invalid/sparksoft/${slug}/apply`,
-        rawText: `Sparksoft\n${title}\nLocation: Remote - United States\n\nRequired qualifications\n- AWS` } };
+        // "Backend" keeps these full-stack roles on one résumé; a bare "full stack" + AWS ties two and asks in Slack.
+        rawText: `Sparksoft\n${title}\nLocation: Remote - United States\n\nRequired qualifications\n- AWS\n- Backend services` } };
     };
 
     /** Each form asks one text question; it records the answer it is resumed with. */
