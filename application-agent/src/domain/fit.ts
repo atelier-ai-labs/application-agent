@@ -152,9 +152,24 @@ function selectResumeFamily(job: JobPosting, profile: CandidateProfile, preferre
   // clearly about agents, models, or AI platforms.
   const title = job.title.toLowerCase();
   const descriptionAndSkills = `${description} ${job.requiredSkills.join(" ")} ${job.preferredSkills.join(" ")}`.toLowerCase();
+  // The kind of engineer the posting asks for, in its own words. Mercury's
+  // "1-4 years of backend or full-stack development experience" counted for
+  // nothing, so its React/TypeScript skill list sent it to the frontend résumé.
+  // With no backend résumé, backend work goes to the cloud/platform résumé,
+  // which leads with the FastAPI backend.
+  // An AI title ("Backend Engineer, AI (Agent Systems)") stays an AI role; the
+  // role words only sort out titles that don't name the lane.
+  const aiTitle = /\b(?:ai|ml|llm|agentic|agents?|machine learning|genai|generative ai)\b/.test(title);
+  const count = (pattern: RegExp) => aiTitle ? 0 : (descriptionAndSkills.match(pattern) ?? []).length + (title.match(pattern) ?? []).length * 2;
+  const backendWords = count(/\bback[- ]?end\b|\bserver[- ]side\b|\bdistributed systems?\b/g);
+  const fullStackWords = count(/\bfull[- ]?stack\b/g);
+  const frontendWords = count(/\bfront[- ]?end\b|\buser interfaces?\b|\bui\b|\bcss\b|\bdesign systems?\b/g);
   const familyScore = (family: ResumeFamily): number => {
     const id = family.id;
     const configured = family.focusKeywords.filter((keyword) => containsKeyword(jobText, keyword)).length;
+    // "Full stack" alone leans frontend (it usually means a React UI on top);
+    // naming backend work tips it to the backend-leaning résumé.
+    if (id === "frontend-software") return configured + frontendWords * 2 + fullStackWords * 2;
     if (id === "ai-platform-agentic") {
       const titleSignals = (title.match(/\b(?:ai|ml|machine learning|llm|agentic|agents?|genai|generative ai)\b/g) ?? []).length;
       const roleSignals = (title.match(/\b(?:ai|ml|agentic|llm)\s+platform\b/g) ?? []).length * 2;
@@ -164,7 +179,7 @@ function selectResumeFamily(job: JobPosting, profile: CandidateProfile, preferre
     if (id === "cloud-platform") {
       const titleSignals = (title.match(/\b(?:cloud|infrastructure|devops|platform)\b/g) ?? []).length;
       const bodySignals = (descriptionAndSkills.match(/\b(?:aws|azure|gcp|kubernetes|terraform|cloudformation|infrastructure|devops|observability|ci\/cd)\b/g) ?? []).length;
-      return configured + titleSignals * 3 + bodySignals;
+      return configured + titleSignals * 3 + bodySignals + backendWords * 3 + fullStackWords;
     }
     return configured;
   };
