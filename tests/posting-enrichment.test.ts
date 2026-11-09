@@ -15,6 +15,12 @@ describe("posting enrichment", () => {
     expect(urls).toEqual(["https://boards-api.greenhouse.io/v1/boards/mercury/jobs/6101145004"]);
     expect(enriched.rawText).toMatch(/^Software Engineer - Product\nLocation: Remote - US\n\nAt Mercury, we are crafting an exceptional banking experience/);
     expect(enriched.rawText).toContain("Queue context:\n" + thin);
+
+    // Mercury's pay range uses &mdash;, which hid the top of the range.
+    const pay = await enrichJobIntake({ sourceUrl: "https://job-boards.greenhouse.io/mercury/jobs/6101145004", rawText: thin }, {
+      fetchImpl: async () => json({ title: "Engineer", content: "&lt;p&gt;Build product features for startups end to end, with care.&lt;/p&gt;&lt;p&gt;US employees: $122,400 &amp;mdash; $158,400 USD&lt;/p&gt;" }),
+    });
+    expect(pay.rawText).toContain("$122,400 — $158,400 USD");
   });
 
   it("fetches a Lever posting, and leaves the input alone on failure or when it already has the posting", async () => {

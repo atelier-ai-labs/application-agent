@@ -37,8 +37,17 @@ async function fetchJson(fetchImpl: Fetch, url: string, timeoutMs: number): Prom
   }
 }
 
+const NAMED_ENTITIES: Record<string, string> = {
+  mdash: "—", ndash: "–", nbsp: " ", rsquo: "’", lsquo: "‘", rdquo: "”", ldquo: "“", hellip: "…", bull: "•", middot: "·", trade: "™", reg: "®", copy: "©",
+};
+
+/** Greenhouse content can keep named entities the HTML cleaner doesn't know ("$122,400 &mdash; $158,400"), which hides pay ranges. */
+function decodeNamedEntities(text: string): string {
+  return text.replace(/&([a-z]+);/gi, (match, name: string) => NAMED_ENTITIES[name.toLowerCase()] ?? match);
+}
+
 function withDescription(input: JobIntakeInput, description: string | undefined): JobIntakeInput {
-  const text = description?.trim();
+  const text = description ? decodeNamedEntities(description).trim() : undefined;
   if (!text || text.length < 80) return input;
   return { ...input, rawText: `${text}\n\nQueue context:\n${input.rawText.trim()}` };
 }
