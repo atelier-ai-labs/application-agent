@@ -857,6 +857,8 @@ export function classifyLeverApplicationField(
   // the candidate's full name.
   if (field.id.trim().toLowerCase() === "_systemfield_name") return "contact";
   if (compactId.includes("firstname") || compactId.includes("lastname")) return "contact";
+  // "Legal First Name" is the candidate's name, not a legal statement to attest.
+  if (/^legal (?:first |last |full |given |family )?name\s*\*?$/.test(normalized(field.questionDescriptor?.promptText ?? field.label))) return "contact";
   if (isPhoneCountrySelector(field)) return "location";
   if (hasPhrase(text, /resume|résumé|cv|curriculum vitae/)) return "resume_upload";
   // Rippling's native resume dropzone exposes only its accepted extensions
@@ -1304,7 +1306,11 @@ function groundedWorkAuthorizationValue(
   const prompt = inspectedPromptText(field);
   const isUnitedStates = (value: string): boolean =>
     /\bunited states(?: of america)?\b|\bu\.s\.?\b|\busa\b|\bus\b/.test(normalized(value));
-  const workCountry = prompt.match(/\bwork in (?:the )?([a-z][a-z .'-]*?)(?:\?|$)/)?.[1]?.trim();
+  const named = prompt.match(/\bwork in (?:the )?([a-z][a-z .'-]*?)(?:\?|$)/)?.[1]?.trim();
+  // "in this location" / "in this country" means the posting's location. The
+  // agent only applies to postings open where the candidate may work, so it
+  // names no other country.
+  const workCountry = named && /^(?:this|that|the) (?:location|country|role'?s? location|job'?s? location)$/.test(named) ? undefined : named;
   if (workCountry && !profile.workAuthorization.countries.some((country) =>
     isUnitedStates(workCountry) ? isUnitedStates(country) : normalized(country) === normalized(workCountry))) {
     return undefined;
@@ -1317,6 +1323,16 @@ function groundedWorkAuthorizationValue(
   const isAffirmative = /^(?:yes|true|authorized|eligible|permitted|lawfully authorized)$/.test(normalizedStatus) ||
     /(?:authorized|eligible|permitted) to work/.test(normalizedStatus);
   if ((field.type === "select" || field.type === "radio" || field.type === "checkbox") && isAffirmative) {
+    // Some forms fold sponsorship into the choice: "Yes, and I will not require
+    // sponsorship..." vs "Yes, but I will require sponsorship...".
+    const sponsorshipChoices = (field.options ?? []).filter((option) => /^yes\b/.test(normalized(option.label)) && /sponsor/.test(normalized(option.label)));
+    if (sponsorshipChoices.length > 0) {
+      const needs = profile.workAuthorization.sponsorshipRequired;
+      if (needs === null || needs === undefined) return undefined;
+      const declines = (label: string) => /\b(?:not|no|never|without)\b[^.]*\bsponsor|\bsponsor\w*\b[^.]*\bnot (?:be )?(?:required|needed)/.test(normalized(label));
+      const match = sponsorshipChoices.filter((option) => declines(option.label) === !needs);
+      return match.length === 1 ? match[0]!.label : undefined;
+    }
     return field.type === "checkbox" ? true : "Yes";
   }
   return status;
@@ -1913,8 +1929,13 @@ function booleanAnswer(value: AnswerValue | undefined): boolean | undefined {
 function isOptionalEssayQuestion(field: ApplicationFieldDescriptor): boolean {
   if (field.required || field.classification !== "free_text" || (field.type !== "textarea" && field.type !== "text")) return false;
   const prompt = (field.questionDescriptor?.promptText ?? field.label ?? "").replace(/\s+/g, " ").trim();
-  if (prompt.length < 60) return false;
+  if (prompt.length < 15) return false;
   if (/\b(?:anything else|additional (?:information|comments)|other comments|cover letter|website|portfolio|linkedin|github|twitter|referr)/i.test(prompt)) return false;
+  // Follow-ups to another answer ("If other, please specify") and short facts are not essays.
+  if (/^if\b|please specify|pronoun|pronunciation|preferred name|nickname|hear about|heard about/i.test(prompt)) return false;
+  // Short essay prompts ("What made you decide to apply?", "Why Mercury?") name what they want.
+  if (/\b(?:why|what (?:made|makes|excites|draws|drew|interests|motivates)|tell us|describe|explain|walk us through|hard(?:est)? problem|proud|excited|mission|interest(?:s|ed)? you)\b/i.test(prompt)) return true;
+  if (prompt.length < 60) return false;
   return /\?|\b(?:please|tell us|describe|share|highlight|explain|walk us through)\b/i.test(prompt);
 }
 

@@ -562,6 +562,46 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(session.submitChecks).toBe(1);
   });
 
+  it("answers Temporal's 'in this location' question with the choice that folds in sponsorship, and fills legal names", async () => {
+    // Temporal (2026-11-08): both were asked in Slack.
+    const profile = {
+      ...exampleCandidateProfile,
+      identity: { ...exampleCandidateProfile.identity, fullName: "Nathaniel Magera" },
+      workAuthorization: { status: "authorized", countries: ["United States"], sponsorshipRequired: false },
+    } satisfies CandidateProfile;
+    const choices = [
+      { label: "Yes, and I will not require sponsorship now or in the future", value: "a" },
+      { label: "Yes, but I will require sponsorship now or in the future to maintain work authorization", value: "b" },
+      { label: "No, I am not currently authorized to work in this location", value: "c" },
+    ];
+    const authorization = new FakeField({
+      id: "authorized-here", label: "Are you legally authorized to work in this location?", type: "select", required: true, options: choices,
+      questionDescriptor: { promptText: "Are you legally authorized to work in this location?", sourceStrategy: "question_container", confidence: "high" },
+    });
+    const legal = (id: string, label: string) => new FakeField({ id, label, type: "text", required: true,
+      questionDescriptor: { promptText: label, sectionTitle: "Application Information", sourceStrategy: "question_container", confidence: "high" } });
+    const first = legal("a1529799-27e4", "Legal First Name");
+    const last = legal("9b5a508c-09ca", "Legal Last Name");
+    const session = new FakeSession([first, last, authorization]);
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse", now: () => capturedAt })
+      .execute({ ...request(session), profile });
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(authorization.current).toBe("a");
+    expect(first.current).toBe("Nathaniel");
+    expect(last.current).toBe("Magera");
+
+    // Someone who needs sponsorship gets the other Yes.
+    const needs = new FakeField({
+      id: "authorized-here-2", label: "Are you legally authorized to work in this location?", type: "select", required: true, options: choices,
+      questionDescriptor: { promptText: "Are you legally authorized to work in this location?", sourceStrategy: "question_container", confidence: "high" },
+    });
+    const second = new FakeSession([needs]);
+    await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(second), provider: "greenhouse", now: () => capturedAt })
+      .execute({ ...request(second), profile: { ...profile, workAuthorization: { ...profile.workAuthorization, sponsorshipRequired: true } } });
+    expect(needs.current).toBe("b");
+  });
+
   it("does not reuse United States authorization for a different country", async () => {
     const profile = {
       ...exampleCandidateProfile,
@@ -1020,6 +1060,28 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(skipped.state).toBe("ready_to_submit");
     expect(second.current).toBeNull();
     expect(second.fillCalls).toBe(0);
+  });
+
+  it("asks short optional essay prompts too, but not follow-ups or short facts", async () => {
+    // Temporal and ElevenLabs (2026-11-08): these were left blank because they were under 60 characters.
+    const asks = ["What made you decide to apply?", "What makes you excited about the ElevenLabs mission?", "Finally, tell us about a hard problem in your past!"];
+    for (const prompt of asks) {
+      const field = new FakeField({ id: "question_short", label: prompt, type: "textarea", required: false,
+        questionDescriptor: { promptText: prompt, sourceStrategy: "question_container", confidence: "high" } });
+      const session = new FakeSession([field]);
+      const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute(request(session));
+      expect(result.state, prompt).toBe("requires_human");
+      expect(result.state === "requires_human" && result.blocker.kind, prompt).toBe("subjective_answer");
+    }
+    const leaves = ["If other, please specify below", "Name Pronunciation", "Preferred Pronouns", "How did you hear about us?"];
+    for (const prompt of leaves) {
+      const field = new FakeField({ id: "question_short", label: prompt, type: "textarea", required: false,
+        questionDescriptor: { promptText: prompt, sourceStrategy: "question_container", confidence: "high" } });
+      const session = new FakeSession([field]);
+      const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute(request(session));
+      expect(result.state, prompt).toBe("ready_to_submit");
+      expect(field.fillCalls, prompt).toBe(0);
+    }
   });
 
   it("answers a location-preference checkbox group with Remote only", async () => {
