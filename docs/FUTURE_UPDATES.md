@@ -15,6 +15,11 @@ These are ideas we've parked for later. None of them are scheduled; Nate picks w
 
 ## Agent behavior
 
+- **Bigger free model for essays (Groq).** Draft essays with Llama 3.3 70B on Groq's free tier instead of local qwen2.5:7b. The 7B model writes stiffly, copies the posting's slogans and sometimes borrows the posting's claims as the candidate's experience (Mercury and Temporal, 2026-11-09). Groq is already used free in PuckPulse.
+  - Tradeoff: the profile, résumé evidence and the question leave the machine.
+  - Make it opt-in, keep Ollama as the default, and fall back to Ollama when Groq is down or rate-limited.
+  - Not urgent: Nate writes or edits the important essays himself, and other users can do the same.
+
 - **Headless browser.** Set `ATELIER_EXECUTION_HEADLESS=true` and restart the host; review still happens through the handoff link. Planned for about 2026-11-14, after a week more of tuning.
 - **Answer-length check.** Hold drafts to a form's word or character limit, e.g. "150 words max".
 - **Redo command.** A Slack command to restart an application from scratch.
