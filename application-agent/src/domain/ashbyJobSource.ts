@@ -96,7 +96,7 @@ function extractDescription(html: string): string | undefined {
   return description.length >= 80 ? description : undefined;
 }
 
-function containsPostingContent(rawText: string): boolean {
+export function containsPostingContent(rawText: string): boolean {
   const normalized = rawText.replace(/https?:\/\/\S+/gi, " ").trim();
   if (/\b(?:required qualifications?|responsibilities|what you(?:'|’)ll do|nice to have)\b/i.test(normalized) &&
     /\b(?:build|operate|own|design|develop|support)\b/i.test(normalized)) return true;

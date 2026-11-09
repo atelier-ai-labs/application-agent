@@ -58,6 +58,7 @@ import { SlackNotificationAdapter } from "../slack/slackNotificationAdapter";
 import { resolveSlackConfig, type SlackEnvironment } from "../slack/config";
 import { createPlaywrightLeverBrowserExecutor } from "../createLeverBrowserExecutor";
 import { OllamaApplicationAnswerDraftGenerator } from "../answerDraft/ollamaApplicationAnswerDraftGenerator";
+import { enrichJobIntake } from "../../src/domain/postingEnrichment";
 import { FileAnswerBankStore } from "../answerBank/fileAnswerBankStore";
 import { isAwaitingReceipt, matchReceiptToJob } from "../../src/domain/applicationReceipt";
 import { renderWaitingBoard, waitingBoardItems, waitingBoardSignature, WAITING_BOARD_RECENT_MS } from "../../src/domain/waitingBoard";
@@ -150,6 +151,7 @@ export interface BackgroundCareerAgentRuntimeOptions {
   hostPollTimeoutMs?: number;
   resumeArtifactAvailable?: (familyId: ResumeFamilyId) => boolean;
   applicationAnswerDraftGenerator?: import("../../src/domain/applicationAnswerDraft").ApplicationAnswerDraftGenerator;
+  postingEnricher?: (input: import("../../src/domain/types").JobIntakeInput) => Promise<import("../../src/domain/types").JobIntakeInput>;
   answerBank?: import("../../src/domain/answerBank").AnswerBankStore;
   answerBankMatcher?: import("../../src/domain/answerBank").AnswerBankSemanticMatcher;
   /** Read-only inbox checked for "thanks for applying" emails while a job waits on DONE. */
@@ -526,6 +528,7 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
               applicationAnswerDraftGenerator: options.applicationAnswerDraftGenerator,
             }
           : {}),
+        ...(options.postingEnricher ? { postingEnricher: options.postingEnricher } : {}),
         ...(options.answerBank ? { answerBank: options.answerBank } : {}),
         ...(options.answerBankMatcher ? { answerBankMatcher: options.answerBankMatcher } : {}),
         ...(this.executionHost
@@ -1282,6 +1285,7 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
     officialDestinationCandidates: sources.officialDestinationCandidates,
     executor: configuredExecutor,
     tracker,
+    postingEnricher: (input) => enrichJobIntake(input),
     resumeArtifactAvailable: (familyId) => {
       const path = resumePaths[familyId];
       return Boolean(path && isUsableResumeArtifact(path));

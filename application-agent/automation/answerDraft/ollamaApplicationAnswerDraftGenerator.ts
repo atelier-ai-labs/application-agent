@@ -1,8 +1,8 @@
 import {
   isBroadMotivationQuestion,
   isCompanyInterestQuestion,
+  postingContextForInterest,
   emphasisIn,
-  postingBody,
   postingEmphasis,
   retrieveCandidateAnswerEvidence,
   type ApplicationAnswerDraftRequest,
@@ -108,7 +108,7 @@ function companyInterestContext(request: ApplicationAnswerDraftRequest, evidence
   // Lead with what the posting wants AND the evidence shows; topics the candidate can't back up come last or not at all.
   const proven = new Set(emphasisIn(evidence.map((item) => item.text).join("\n"), 20));
   const overlap = emphasis.filter((topic) => proven.has(topic));
-  const body = postingBody(request.job.description).replace(/\s+/g, " ").slice(0, 700);
+  const body = postingContextForInterest(request.job.description);
   return `<company>${request.job.company}</company>
 <job-title>${request.job.title}</job-title>
 <what-the-posting-emphasizes>${emphasis.join("; ") || "not stated"}</what-the-posting-emphasizes>
@@ -116,8 +116,12 @@ function companyInterestContext(request: ApplicationAnswerDraftRequest, evidence
 <posting-excerpt>${body}</posting-excerpt>
 
 This is a "why this company / role" question. Structure the answer as:
-1. One sentence naming what specifically draws the candidate to this role, using
-   the posting's own focus above, leading with ${(overlap.length ? overlap : emphasis).slice(0, 2).join(" and ") || "the work it describes"}.
+1. One sentence on what draws the candidate to this company: name what the
+   company actually makes or does, using the posting excerpt's own words for its
+   product or mission (for example "payroll software for restaurants" or
+   "satellite imagery for farmers"; never reuse these examples), then the part of this role that connects to it, leading with
+   ${(overlap.length ? overlap : emphasis).slice(0, 2).join(" and ") || "the work it describes"}.
+   Never open with a generic technology phrase; the company's product comes first.
    Describe it as the company's work, never as the candidate's experience.
    Do not imply the candidate has done a posting topic that their evidence does not show.
 2. One or two sentences on the single most relevant project or job in the

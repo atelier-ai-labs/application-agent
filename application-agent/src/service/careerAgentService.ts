@@ -148,6 +148,8 @@ export interface CareerAgentDependencies {
   officialDestinationCandidates?: readonly DestinationCandidate[];
   /** Optional server-only generator for reviewable answers to exact ATS free-text questions. */
   applicationAnswerDraftGenerator?: ApplicationAnswerDraftGenerator;
+  /** Fetches a thin queue row's posting text (default: Ashby pages only). */
+  postingEnricher?: (input: JobIntakeInput) => Promise<JobIntakeInput>;
   /**
    * Records a user's DONE after an unconfirmed Submit as a manual Applied
    * confirmation (through the durable submission fence). Without it, DONE
@@ -786,6 +788,7 @@ export class CareerAgentService {
   private readonly destinationResolver?: ApplicationDestinationResolver;
   private readonly officialDestinationCandidates: readonly DestinationCandidate[];
   private readonly applicationAnswerDraftGenerator?: ApplicationAnswerDraftGenerator;
+  private readonly postingEnricher: (input: JobIntakeInput) => Promise<JobIntakeInput>;
   private readonly confirmPostSubmitDone?: (campaignId: string, jobId: string) => Promise<CareerJob>;
   private readonly answerBank?: AnswerBankStore;
   private readonly answerBankMatcher?: AnswerBankSemanticMatcher;
@@ -815,6 +818,7 @@ export class CareerAgentService {
     this.destinationResolver = dependencies.destinationResolver;
     this.officialDestinationCandidates = dependencies.officialDestinationCandidates ?? [];
     this.applicationAnswerDraftGenerator = dependencies.applicationAnswerDraftGenerator;
+    this.postingEnricher = dependencies.postingEnricher ?? ((input) => enrichAshbyJobIntake(input));
     this.confirmPostSubmitDone = dependencies.confirmPostSubmitDone;
     this.answerBank = dependencies.answerBank;
     this.answerBankMatcher = dependencies.answerBankMatcher;
@@ -943,7 +947,7 @@ export class CareerAgentService {
     const campaign = this.getCampaign(campaignId);
     if (campaign.status !== "active") throw new Error("Start the campaign before evaluating a selected posting.");
 
-    const normalizedPosting = normalizeJobPosting(await enrichAshbyJobIntake(input), this.now());
+    const normalizedPosting = normalizeJobPosting(await this.postingEnricher(input), this.now());
     if (!normalizedPosting.sourceUrl || !normalizedPosting.applicationUrl) {
       throw new Error("A selected posting needs both its public source URL and application URL.");
     }

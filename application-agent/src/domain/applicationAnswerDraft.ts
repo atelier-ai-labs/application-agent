@@ -74,7 +74,13 @@ const MAX_EVIDENCE_SOURCE_LENGTH = 160;
 
 /** "What interests you about Outmarket?", "Why do you want to join us?", "Why this role?" */
 export function isCompanyInterestQuestion(question: string): boolean {
-  return /\b(?:what (?:interests|excites|draws|attracts|appeals to) you|why (?:are you|you're) (?:interested|excited|applying)|why (?:do you want to|would you like to|did you apply to) (?:work|join|apply)|why (?:this|our) (?:company|role|team|position)|why (?:do you want|would you like) (?:this|the) (?:role|job|position)|what makes you want to (?:work|join))\b/i.test(question);
+  const text = question.replace(/\s+/g, " ").replace(/\*+\s*$/, "").trim();
+  if (/\b(?:what (?:interests|excites|draws|attracts|appeals to) you|why (?:are you|you're) (?:interested|excited|applying)|why (?:do you want to|would you like to|did you apply to) (?:work|join|apply)|why (?:this|our) (?:company|role|team|position)|why (?:do you want|would you like) (?:this|the) (?:role|job|position)|what makes you want to (?:work|join))\b/i.test(text)) return true;
+  // "What makes you excited about the ElevenLabs mission?", "What made you decide to apply?"
+  if (/\bwhat (?:makes|made|gets|got) you (?:so )?(?:excited|interested|want|decide to apply|apply)\b|\b(?:excited|passionate) (?:about|by) (?:the |our |this |[A-Z][\w&.-]*'?s? )/i.test(text)) return true;
+  if (/\b(?:about|for|of) (?:the |our |this )?(?:[A-Z][\w&.-]* )?(?:company'?s? )?mission\b|\bwhy did you (?:decide to )?apply\b/i.test(text)) return true;
+  // A short "Why Mercury?" names the company and nothing else.
+  return /^why (?!do\b|did\b|are\b|would\b|is\b|should\b|not\b|now\b)[A-Za-z0-9][\w&.' -]{0,40}\?$/i.test(text);
 }
 
 /**
@@ -125,6 +131,37 @@ export function postingBody(description: string): string {
     .join("\n")
     .replace(/^[^\n]* at [^\n]*\n/, "")
     .trim();
+}
+
+const ROLE_HEADING = /^(?:what you(?:'| wi)ll (?:do|work on|be doing)|what you'?ll own|the role|about the (?:role|job|team|position)|in this role|your role|responsibilities|key responsibilities|what we(?:'re| are) looking for|you will|the opportunity|role overview)\b/i;
+const BOILERPLATE_HEADING = /^(?:benefits|perks|compensation|salary|pay|equal (?:employment )?opportunity|eeo|our (?:benefits|perks)|location|how we work|life at|why join|what we offer)\b/i;
+
+/**
+ * The parts of a posting that answer "why us": the company's own intro or
+ * mission (it usually opens the posting) and what the role does. Benefits,
+ * pay and legal text are left out. The first 700 characters alone often stop
+ * before the role is even described.
+ */
+export function postingContextForInterest(description: string, maximum = 2_400): string {
+  const lines = postingBody(description).split("\n").map((line) => line.trim()).filter(Boolean);
+  const heading = (line: string) => line.length <= 60 && !/[.!?]$/.test(line);
+  const intro: string[] = [];
+  for (const line of lines) {
+    if (intro.length > 0 && heading(line) && (ROLE_HEADING.test(line) || BOILERPLATE_HEADING.test(line))) break;
+    intro.push(line);
+    if (intro.join(" ").length > 1_100) break;
+  }
+  const roleStart = lines.findIndex((line) => heading(line) && ROLE_HEADING.test(line));
+  const role: string[] = [];
+  if (roleStart >= 0) {
+    for (const line of lines.slice(roleStart)) {
+      if (role.length > 0 && heading(line) && BOILERPLATE_HEADING.test(line)) break;
+      role.push(line);
+      if (role.join(" ").length > 1_200) break;
+    }
+  }
+  const joined = [intro.join(" ").slice(0, 1_100), role.join(" ").slice(0, 1_250)].filter(Boolean).join(" … ");
+  return (joined || lines.join(" ")).replace(/\s+/g, " ").slice(0, maximum);
 }
 
 /** Same idea, different word: "tool-calling" ~ "tool-using", "eval" ~ "evaluation", "agents" ~ "agent". */
