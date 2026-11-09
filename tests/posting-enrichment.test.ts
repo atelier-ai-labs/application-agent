@@ -73,4 +73,13 @@ describe("why-us questions", () => {
     expect(context).not.toContain("snacks");
     expect(context).not.toContain("$150k");
   });
+
+  it("skip an opening story that comes before the company talks about itself", () => {
+    const mercury = "Since the dawn of aviation, pilots have faced air resistance. The trim tab simplifies flight.\nAt Mercury, we are committed to an exceptional banking experience for startups.\nAbout the role\nBuild product features.";
+    const context = postingContextForInterest(mercury, 2_400, "Mercury");
+    expect(context.startsWith("At Mercury, we are committed")).toBe(true);
+    expect(context).not.toContain("trim tab");
+    // A posting that opens by naming itself keeps its opening.
+    expect(postingContextForInterest("ElevenLabs builds AI voice models.\nElevenAgents runs voice agents.", 2_400, "ElevenLabs")).toContain("ElevenAgents runs voice agents");
+  });
 });

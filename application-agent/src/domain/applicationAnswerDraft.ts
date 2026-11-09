@@ -133,6 +133,26 @@ export function postingBody(description: string): string {
     .trim();
 }
 
+/**
+ * Some postings open with a story or analogy before the company says anything
+ * about itself (Mercury's starts with the trim tab on an airplane). A small
+ * model copies whatever it reads, so start the excerpt at the first sentence
+ * where the company talks about itself: its name, or "we"/"our".
+ */
+function withoutLeadingStory(lines: readonly string[], company?: string): string[] {
+  const name = company?.trim().split(/\s+/)[0]?.replace(/[^\w&-]/g, "");
+  const aboutItself = (sentence: string) =>
+    /\b(?:we|our|us)\b/i.test(sentence) || (name ? new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(sentence) : false);
+  const text = lines.join("\n");
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  const first = sentences.findIndex(aboutItself);
+  if (first <= 0) return [...lines];
+  const skipped = sentences.slice(0, first).join(" ").length;
+  // Only drop a short opening; a posting that never names itself keeps everything.
+  if (skipped > 1_200) return [...lines];
+  return sentences.slice(first).join(" ").split("\n").map((line) => line.trim()).filter(Boolean);
+}
+
 const ROLE_HEADING = /^(?:what you(?:'| wi)ll (?:do|work on|be doing)|what you'?ll own|the role|about the (?:role|job|team|position)|in this role|your role|responsibilities|key responsibilities|what we(?:'re| are) looking for|you will|the opportunity|role overview)\b/i;
 const BOILERPLATE_HEADING = /^(?:benefits|perks|compensation|salary|pay|equal (?:employment )?opportunity|eeo|our (?:benefits|perks)|location|how we work|life at|why join|what we offer)\b/i;
 
@@ -142,8 +162,8 @@ const BOILERPLATE_HEADING = /^(?:benefits|perks|compensation|salary|pay|equal (?
  * pay and legal text are left out. The first 700 characters alone often stop
  * before the role is even described.
  */
-export function postingContextForInterest(description: string, maximum = 2_400): string {
-  const lines = postingBody(description).split("\n").map((line) => line.trim()).filter(Boolean);
+export function postingContextForInterest(description: string, maximum = 2_400, company?: string): string {
+  const lines = withoutLeadingStory(postingBody(description).split("\n").map((line) => line.trim()).filter(Boolean), company);
   const heading = (line: string) => line.length <= 60 && !/[.!?]$/.test(line);
   const intro: string[] = [];
   for (const line of lines) {

@@ -97,10 +97,37 @@ function parseModelPayload(value: unknown): OllamaDraftPayload | undefined {
  * uses one is sent back once with a note; Outmarket's draft ended on
  * "meaningful technical work in a collaborative environment".
  */
-const FILLER = /\b(?:meaningful(?: (?:technical )?(?:work|content))?|collaborative environment|impactful|strong team|dynamic (?:team|environment)|fast[- ]paced|cutting[- ]edge|passionate about|excited about the opportunity|great opportunity|i look forward to contributing|make a (?:real )?difference|team player|synerg\w*|honed my (?:skills|abilities)|at scale|pioneer(?:ing|s)?|intelligent (?:tools|systems|solutions)|aligns? (?:closely )?with my (?:passion|values)|the (?:job )?posting(?:'s)?|job description)\b/gi;
+const FILLER = /\b(?:meaningful(?: (?:technical )?(?:work|content))?|collaborative environment|impactful|strong team|dynamic (?:team|environment)|fast[- ]paced|cutting[- ]edge|passionate about|excited about the opportunity|great opportunity|i look forward to contributing|make a (?:real )?difference|team player|synerg\w*|honed my (?:skills|abilities)|at scale|pioneer(?:ing|s)?|intelligent (?:tools|systems|solutions)|aligns? (?:closely )?with my (?:passion|values)|the (?:job )?posting(?:'s)?|job description|aligns? (?:perfectly|closely|seamlessly|well|nicely)|perfect (?:fit|match)|much like|commitment to|robust|seamless(?:ly)?|leverag(?:e|ed|ing)|thrilled|resonates? with)\b/gi;
 
 export function fillerPhrases(answer: string): readonly string[] {
   return [...new Set([...answer.matchAll(FILLER)].map((match) => match[0].toLowerCase()))];
+}
+
+const words = (text: string) => text.toLowerCase().replace(/[^a-z0-9' ]+/g, " ").split(/\s+/).filter(Boolean);
+
+/**
+ * Runs of six or more words lifted straight from the posting, such as its
+ * slogans and metaphors ("simplifying financial navigation much like the trim
+ * tab eases flight"). Read back to the company, they sound like the post
+ * pasted back at them.
+ */
+export function phrasesCopiedFromPosting(answer: string, posting: string, run = 6): readonly string[] {
+  const source = ` ${words(posting).join(" ")} `;
+  const tokens = words(answer);
+  const copied: string[] = [];
+  for (let start = 0; start + run <= tokens.length; start += 1) {
+    if (!source.includes(` ${tokens.slice(start, start + run).join(" ")} `)) continue;
+    let end = start + run;
+    while (end < tokens.length && source.includes(` ${tokens.slice(start, end + 1).join(" ")} `)) end += 1;
+    copied.push(tokens.slice(start, end).join(" "));
+    start = end - 1;
+  }
+  return copied;
+}
+
+/** Everything a retry should avoid: stock filler plus lines copied from the posting. */
+function draftProblems(answer: string, posting: string): readonly string[] {
+  return [...fillerPhrases(answer), ...phrasesCopiedFromPosting(answer, posting)];
 }
 
 function companyInterestContext(request: ApplicationAnswerDraftRequest, evidence: readonly { text: string }[]): string {
@@ -108,7 +135,7 @@ function companyInterestContext(request: ApplicationAnswerDraftRequest, evidence
   // Lead with what the posting wants AND the evidence shows; topics the candidate can't back up come last or not at all.
   const proven = new Set(emphasisIn(evidence.map((item) => item.text).join("\n"), 20));
   const overlap = emphasis.filter((topic) => proven.has(topic));
-  const body = postingContextForInterest(request.job.description);
+  const body = postingContextForInterest(request.job.description, 2_400, request.job.company);
   return `<company>${request.job.company}</company>
 <job-title>${request.job.title}</job-title>
 <what-the-posting-emphasizes>${emphasis.join("; ") || "not stated"}</what-the-posting-emphasizes>
@@ -116,18 +143,24 @@ function companyInterestContext(request: ApplicationAnswerDraftRequest, evidence
 <posting-excerpt>${body}</posting-excerpt>
 
 This is a "why this company / role" question. Structure the answer as:
-1. One sentence on what draws the candidate to this company: name what the
-   company actually makes or does, using the posting excerpt's own words for its
-   product or mission (for example "payroll software for restaurants" or
-   "satellite imagery for farmers"; never reuse these examples), then the part of this role that connects to it, leading with
-   ${(overlap.length ? overlap : emphasis).slice(0, 2).join(" and ") || "the work it describes"}.
+1. One sentence on what draws the candidate to this company: name, in a few
+   plain words, what the company actually makes or does (its product or
+   mission, for example "payroll software for restaurants" or "satellite
+   imagery for farmers"; never reuse these examples), then the part of this
+   role that connects to it
+   (topics to draw on: ${(overlap.length ? overlap : emphasis).slice(0, 2).join(", ") || "the work it describes"}; never just list them).
    Never open with a generic technology phrase; the company's product comes first.
+   Say it in plain words of your own: never copy the excerpt's slogans,
+   metaphors, analogies or marketing lines.
    Describe it as the company's work, never as the candidate's experience.
    Do not imply the candidate has done a posting topic that their evidence does not show.
 2. One or two sentences on the single most relevant project or job in the
-   evidence, stating what the candidate built in that record's own terms, and
-   how it matches that focus.
-3. Optionally a short closing clause tying the two together.
+   evidence: the reason it connects, shown with one concrete detail from that
+   record (something the candidate owned, built or fixed), in the record's own
+   terms. This is a reason, not a list: name at most two technologies.
+3. Optionally a short closing clause tying the two together, said plainly
+   (no "aligns perfectly", no "commitment to").
+Write the way a person talks in an interview: plain, specific, no hype.
 When the evidence names a concrete artifact that matches a posting topic (an
 eval suite, a test suite, a pipeline, a model), name that artifact: it is the
 proof. Never add scale, autonomy, users, or outcomes the evidence does not state.
@@ -148,7 +181,7 @@ function promptFor(request: ApplicationAnswerDraftRequest, evidence: readonly { 
       ? "For this broad motivation question, do not use the job title or job requirements as candidate experience or as a reason for the answer."
       : `<job-title>${request.job.title}</job-title>\n<what-the-posting-emphasizes>${postingEmphasis(request.job).join("; ") || "not stated"}</what-the-posting-emphasizes>`;
   const avoidNote = avoid.length > 0
-    ? `\nAn earlier draft used generic filler (${avoid.map((phrase) => `"${phrase}"`).join(", ")}). Do not use those or similar stock phrases; say something only this candidate could say.\n`
+    ? `\nAn earlier draft used generic filler or copied the company's own wording (${avoid.map((phrase) => `"${phrase}"`).join(", ")}). Do not use those, similar stock phrases, or the company's slogans; say it in plain words only this candidate could say.\n`
     : "";
   return bounded(
     `
@@ -325,11 +358,11 @@ export class OllamaApplicationAnswerDraftGenerator {
     const evidence = retrieveCandidateAnswerEvidence(request);
     if (evidence.length === 0) return undefined;
     const first = await this.generateOnce(request, evidence);
-    const filler = first ? fillerPhrases(first.answer) : [];
+    const filler = first ? draftProblems(first.answer, request.job.description) : [];
     if (!first || filler.length === 0) return first;
     // One retry without the filler; keep the first grounded draft if the retry fails or is no better.
     const second = await this.generateOnce(request, evidence, filler);
-    return second && fillerPhrases(second.answer).length < filler.length ? second : first;
+    return second && draftProblems(second.answer, request.job.description).length < filler.length ? second : first;
   }
 
   private async generateOnce(

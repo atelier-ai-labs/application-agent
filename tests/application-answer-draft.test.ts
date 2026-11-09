@@ -21,7 +21,7 @@ import {
   type ExecutionInspection,
   type JobSourceListing,
 } from "../application-agent/src";
-import { OllamaApplicationAnswerDraftGenerator } from "../application-agent/automation/answerDraft/ollamaApplicationAnswerDraftGenerator";
+import { OllamaApplicationAnswerDraftGenerator, fillerPhrases, phrasesCopiedFromPosting } from "../application-agent/automation/answerDraft/ollamaApplicationAnswerDraftGenerator";
 
 const capturedAt = "2026-09-10T12:00:00.000Z";
 
@@ -327,7 +327,7 @@ describe("local ATS answer drafting", () => {
     expect(first.prompt).not.toContain("Resume Version");
     expect(first.prompt).not.toContain("contribute to meaningful technical work, and take on");
     const second = JSON.parse(String(requests[1].body)) as { prompt: string };
-    expect(second.prompt).toContain('An earlier draft used generic filler ("impactful", "collaborative environment")');
+    expect(second.prompt).toContain(`An earlier draft used generic filler or copied the company's own wording ("impactful", "collaborative environment")`);
   });
 
   it("honors an explicit phrase requirement in the inspected application question", async () => {
@@ -874,5 +874,20 @@ describe("local ATS answer drafting", () => {
     expect(event.questionProvenance).toBe("APPLICATION_PREPARATION");
     expect(event.draft).toBeUndefined();
     expect(draftRequests).toBe(0);
+  });
+});
+
+describe("over-the-top drafts (Mercury, 2026-11-09)", () => {
+  const draft = "Mercury is crafting an exceptional banking experience for startups, simplifying financial navigation much like the trim tab eases flight. I built PuckPulse. This aligns perfectly with Mercury's commitment to creating lovable products.";
+  const posting = "Since the dawn of aviation, pilots have faced air resistance. The trim tab simplifies flight. At Mercury, we are committed to crafting an exceptional banking experience for startups. Our team is passionately focused on our product.";
+
+  it("flags stock phrases", () => {
+    expect(fillerPhrases(draft)).toEqual(expect.arrayContaining(["much like", "aligns perfectly", "commitment to"]));
+    expect(fillerPhrases("I built a nightly ingest job that grades every prediction against closing lines.")).toEqual([]);
+  });
+
+  it("flags lines lifted from the posting, but not short shared words", () => {
+    expect(phrasesCopiedFromPosting(draft, posting)).toEqual(["crafting an exceptional banking experience for startups"]);
+    expect(phrasesCopiedFromPosting("Mercury builds banking for startups, and I like product work.", posting)).toEqual([]);
   });
 });
