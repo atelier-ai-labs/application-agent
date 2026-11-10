@@ -11,6 +11,10 @@ These are ideas we've parked for later. None of them are scheduled; Nate picks w
 - **Setup that works on a stranger's machine.** One guided setup for Slack, Google Sheets, Gmail and Ollama.
   - Personal data stays out of the repo.
   - Each user creates their own Google OAuth app.
+- **Texting interface.** iMessage, SMS or WhatsApp as an alternative to Slack, since most job seekers don't use Slack. The same questions, drafts and Approve/Skip/Done replies would arrive as texts. Inspired by the Pally/Monid iMessage agent (2026-11-10).
+- **Reaching out to the hiring contact.** After applying, draft a short note to the recruiter or hiring manager for the user to send, and later help schedule a call.
+  - Harder than demos make it look: finding the right person and their email, avoiding spam, and the user's reputation.
+  - Draft-only, and the user sends it, like the Submit tap.
 - **Docs, license and limits.** Document what it does, what it never does, the supported ATSs and a fixed daily cap.
 
 ## Agent behavior
