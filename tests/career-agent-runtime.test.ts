@@ -594,6 +594,11 @@ describe("background Career Agent runtime", () => {
       expect(await runtime.refreshWaitingBoard(new Date(at.getTime() + 120_000))).toBe("posted");
       expect(boards[1]).toMatchObject({ previous: "board-1" });
       expect(boards[1]!.text).toContain("ready, tap *Submit application* on its “Application ready to submit” card");
+
+      // The Submit card's ts is saved in shared state, so the board links to it.
+      (runtime as unknown as { rememberReviewCard(jobId: string, ts: string): void }).rememberReviewCard(waiting.id, "333.3");
+      expect(await runtime.refreshWaitingBoard(new Date(at.getTime() + 180_000))).toBe("posted");
+      expect(boards[2]!.text).toContain("card · <https://example.slack.com/archives/C1/p3333|open>");
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

@@ -48,6 +48,8 @@ export function waitingBoardItems(
   events: readonly WaitingBoardEvent[],
   isAskable: (blocker: CareerBlocker, job: CareerJob) => boolean,
   now: Date,
+  /** jobId → Slack ts of its "Application ready to submit" card. */
+  reviewCards: ReadonlyMap<string, string> = new Map(),
 ): WaitingBoard {
   const cutoff = now.getTime() - WAITING_BOARD_RECENT_MS;
   const items: WaitingBoardItem[] = [];
@@ -61,7 +63,7 @@ export function waitingBoardItems(
     if (!state) continue;
     if (Date.parse(job.updatedAt) < cutoff) { olderCount += 1; continue; }
     const delivery = events.find((event) => event.jobId === job.id && event.status === "open" && event.providerDelivery?.messageTs)?.providerDelivery;
-    const ts = delivery?.threadTs ?? delivery?.messageTs;
+    const ts = state === "submit" ? reviewCards.get(job.id) ?? delivery?.threadTs ?? delivery?.messageTs : delivery?.threadTs ?? delivery?.messageTs;
     items.push({
       jobId: job.id, company: job.job.company, role: job.job.title, state, questions: state === "questions" ? questions : [],
       ...(ts ? { link: ts } : {}), since: job.updatedAt,

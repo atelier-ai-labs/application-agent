@@ -148,7 +148,8 @@ export interface NotificationAdapter {
   /** A plain one-line notice with no buttons (for example, "marked Applied"). */
   publishInfoNotice?(text: string): Promise<void>;
   /** Pre-submit review of one prepared application with an explicit Submit action. */
-  publishSubmissionReview?(notice: SubmissionReviewNotice): Promise<void>;
+  /** Resolves to the posted card's message timestamp when the provider has one. */
+  publishSubmissionReview?(notice: SubmissionReviewNotice): Promise<string | undefined | void>;
 }
 
 /**

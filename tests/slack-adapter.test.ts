@@ -318,11 +318,12 @@ describe("Slack human-attention adapter", () => {
         return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000010" }) } as Response;
       },
     });
-    await adapter.publishSubmissionReview({
+    // The card's ts lets the Waiting on you board link to it.
+    await expect(adapter.publishSubmissionReview({
       campaignId: SUBMIT_IDS.campaign, jobId: SUBMIT_IDS.job, applicationId: SUBMIT_IDS.application,
       company: "Changeis, Inc.", role: "Junior Cloud Engineer", resumeFamily: "cloud-platform",
       filled: [{ label: "ZIP code", value: "15057" }], leftBlank: ["Street (optional)"],
-    });
+    })).resolves.toBe("1710000000.000010");
     const body = JSON.parse(requests[0]!);
     expect(JSON.stringify(body)).toContain("ZIP code");
     expect(JSON.stringify(body)).toContain("15057");

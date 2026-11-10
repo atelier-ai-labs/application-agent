@@ -62,6 +62,8 @@ import { enrichJobIntake } from "../../src/domain/postingEnrichment";
 import { FileAnswerBankStore } from "../answerBank/fileAnswerBankStore";
 import { isAwaitingReceipt, matchReceiptToJob } from "../../src/domain/applicationReceipt";
 import { renderWaitingBoard, waitingBoardItems, waitingBoardSignature, WAITING_BOARD_RECENT_MS } from "../../src/domain/waitingBoard";
+
+const SUBMISSION_REVIEW_CARDS_KEY = "atelier.application-agent.submission-review-cards.v0";
 import { gmailInbox, type InboxSource } from "../gmailInbox";
 import { createGoogleOAuthAccessTokenProvider, gmailSecurityCodesEnabled, resolveGoogleAuthMode } from "../googleOAuth";
 import { createOllamaAnswerBankMatcher } from "../answerBank/ollamaAnswerBankMatcher";
@@ -722,7 +724,7 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
     storage?.reload?.();
     const events = this.careerRepository.listCampaigns().flatMap((campaign) => campaign.attentionEvents ?? []);
     const board = waitingBoardItems(this.service.listJobs(), events,
-      (blocker, job) => attentionDescriptorSignature(blocker, job.job.compensation) !== undefined, now);
+      (blocker, job) => attentionDescriptorSignature(blocker, job.job.compensation) !== undefined, now, this.readReviewCards());
     const signature = waitingBoardSignature(board);
     const saved = this.readWaitingBoardState();
     if (saved?.ts && saved.signature === signature) return "unchanged";
@@ -1085,6 +1087,30 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
 
   private readonly announcedSubmissionReviews = new Set<string>();
 
+  /**
+   * jobId → Slack ts of the latest "Application ready to submit" card, kept in
+   * shared state because the card may be posted by a maintenance command
+   * while the long-lived listener draws the board.
+   */
+  private readReviewCards(): Map<string, string> {
+    try {
+      const raw = this.stateStorage?.getItem(SUBMISSION_REVIEW_CARDS_KEY);
+      const parsed = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+      return new Map(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+    } catch {
+      return new Map();
+    }
+  }
+
+  private rememberReviewCard(jobId: string, ts: string): void {
+    if (!this.stateStorage) return;
+    const cards = this.readReviewCards();
+    const liveJobs = new Set(this.service.listJobs().filter((job) => job.status === "ready_to_submit").map((job) => job.id));
+    for (const id of cards.keys()) if (!liveJobs.has(id)) cards.delete(id);
+    cards.set(jobId, ts);
+    this.stateStorage.setItem(SUBMISSION_REVIEW_CARDS_KEY, JSON.stringify(Object.fromEntries(cards)));
+  }
+
   private async reconcileHostExecution(campaignId: string, jobId: string, initial: ExecutionHostSnapshot): Promise<ExecutionHostSnapshot> {
     const final = await this.pollHostExecution(campaignId, jobId, initial);
     await this.announceSubmissionReview(campaignId, jobId, final).catch(() => {
@@ -1104,7 +1130,7 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
     const inspection = snapshot.result.inspection;
     const labels = new Map(inspection.fields.map((field) => [field.id, field.label]));
     this.announcedSubmissionReviews.add(snapshot.id);
-    await publish.call(this.notification!.adapter, {
+    const cardTs = await publish.call(this.notification!.adapter, {
       campaignId,
       jobId,
       applicationId: job.applicationId,
@@ -1114,6 +1140,7 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
       filled: inspection.reviewSummary ?? inspection.fieldsFilled.map((id) => ({ label: labels.get(id) ?? id, value: "" })),
       leftBlank: inspection.unresolvedFields,
     });
+    if (typeof cardTs === "string") this.rememberReviewCard(jobId, cardTs);
   }
 
   private async pollHostExecution(campaignId: string, jobId: string, initial: ExecutionHostSnapshot): Promise<ExecutionHostSnapshot> {

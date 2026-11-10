@@ -48,6 +48,15 @@ describe("Waiting on you board", () => {
     expect(text).toContain("1 older application stalled");
   });
 
+  it("links a ready application to its Submit card", () => {
+    const jobs = [job("ready", "Ramp", "Software Engineer, Frontend", "ready_to_submit", [])];
+    const board = waitingBoardItems(jobs, [], askable, now, new Map([["ready", "222.2"]]));
+    expect(board.items[0]).toMatchObject({ state: "submit", link: "222.2" });
+    const text = renderWaitingBoard(board, now, (ts) => ts === "222.2" ? "https://example.slack.com/archives/C1/p2222" : undefined).text;
+    expect(text).toContain("ready, tap *Submit application* on its “Application ready to submit” card · <https://example.slack.com/archives/C1/p2222|open>");
+    expect(waitingBoardSignature(board)).not.toBe(waitingBoardSignature(waitingBoardItems(jobs, [], askable, now)));
+  });
+
   it("marks a question that never reached Slack, and says when nothing is waiting", () => {
     const board = waitingBoardItems([job("mid", "Sparksoft", "Mid", "needs_input", [question("salary", "Salary?")])], [], askable, now);
     expect(renderWaitingBoard(board, now, () => undefined).text).toContain("1 question (posting it now)");

@@ -689,7 +689,7 @@ export class SlackNotificationAdapter implements NotificationAdapter {
   }
 
   /** Posts what the agent filled and one explicit Submit button for that exact application. */
-  async publishSubmissionReview(notice: SubmissionReviewNotice): Promise<void> {
+  async publishSubmissionReview(notice: SubmissionReviewNotice): Promise<string | undefined> {
     const value = `${notice.campaignId}|${notice.jobId}|${notice.applicationId}`;
     if (!SUBMIT_ACTION_VALUE.test(value)) throw new Error("Submission review requires exact campaign, job, and application IDs.");
     const job = `${markdownText(notice.company, 160)} — ${markdownText(notice.role, 200)}`;
@@ -701,7 +701,7 @@ export class SlackNotificationAdapter implements NotificationAdapter {
       : "Nothing was left blank.";
     const resume = notice.resumeFamily ? `Résumé: *${markdownText(notice.resumeFamily, 60)}*` : "";
     const text = `Ready to submit: ${job}\n\n${filled}\n\n${blank}`;
-    await this.callApi("chat.postMessage", this.config.botToken, {
+    const posted = await this.callApi("chat.postMessage", this.config.botToken, {
       channel: this.config.channelId,
       text,
       blocks: [
@@ -727,6 +727,7 @@ export class SlackNotificationAdapter implements NotificationAdapter {
         },
       ],
     });
+    return typeof posted.ts === "string" && posted.ts.trim() ? posted.ts.trim() : undefined;
   }
 
   private async handleSubmissionApproval(
