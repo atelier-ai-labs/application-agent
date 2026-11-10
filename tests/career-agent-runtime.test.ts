@@ -593,7 +593,7 @@ describe("background Career Agent runtime", () => {
       runtime.careerRepository.saveJob({ ...runtime.service.getJob(waiting.id), status: "ready_to_submit", blockers: [] });
       expect(await runtime.refreshWaitingBoard(new Date(at.getTime() + 120_000))).toBe("posted");
       expect(boards[1]).toMatchObject({ previous: "board-1" });
-      expect(boards[1]!.text).toContain("ready, tap Submit");
+      expect(boards[1]!.text).toContain("ready, click Submit on the form in its browser window");
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
