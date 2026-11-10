@@ -43,7 +43,7 @@ describe("Waiting on you board", () => {
     expect(text).toContain("*Waiting on you* (3)");
     expect(text).toContain("*Sparksoft Corporation — Full Stack Developer - Mid-Level*: 1 question · <https://example.slack.com/archives/C1/p1001|open>");
     expect(text).toContain("– What is your target salary range for this role?");
-    expect(text).toContain("*Phantom — AI Engineer*: ready, click Submit on the form in its browser window");
+    expect(text).toContain("*Phantom — AI Engineer*: ready, tap *Submit application* on its “Application ready to submit” card");
     expect(text).toContain("submitted, needs your check");
     expect(text).toContain("1 older application stalled");
   });

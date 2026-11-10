@@ -92,7 +92,7 @@ export function renderWaitingBoard(
     const name = `*${item.company} — ${item.role}*`;
     const open = url ? ` · <${url}|open>` : "";
     if (item.state === "verify") return `• ${name}: submitted, needs your check (code or DONE)${open}`;
-    if (item.state === "submit") return `• ${name}: ready, click Submit on the form in its browser window${open}`;
+    if (item.state === "submit") return `• ${name}: ready, tap *Submit application* on its “Application ready to submit” card${open}`;
     const count = item.questions.length === 1 ? "1 question" : `${item.questions.length} questions`;
     const posted = url ? "" : " (posting it now)";
     return `• ${name}: ${count}${posted}${open}\n${item.questions.map((question) => `      – ${question}`).join("\n")}`;

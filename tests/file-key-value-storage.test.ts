@@ -74,3 +74,27 @@ describe("durable local state failures", () => {
     expect(new DurableSubmissionAuthority("nested-lock-worker", { storage: persisted }).get("application-nested", "job-nested")?.state).toBe("unknown");
   });
 });
+
+describe("two processes sharing the state file", () => {
+  it("keeps a key another process wrote when this one saves a different key", () => {
+    const { path } = location();
+    const host = new FileKeyValueStorage(path);
+    const listener = new FileKeyValueStorage(path);
+    host.setItem("fence", "claimed");
+    listener.setItem("jobs", "[]");
+    expect(new FileKeyValueStorage(path).getItem("fence")).toBe("claimed");
+    expect(listener.getItem("fence")).toBe("claimed");
+    host.removeItem("missing");
+    expect(new FileKeyValueStorage(path).getItem("jobs")).toBe("[]");
+  });
+
+  it("keeps a fence claimed in another process while a submission is approved", () => {
+    const { path } = location();
+    const hostAuthority = new DurableSubmissionAuthority("host", { storage: new FileKeyValueStorage(path) });
+    const listener = new FileKeyValueStorage(path);
+    listener.getItem("anything");
+    const fence = hostAuthority.claim("application-1", "job-1", new Date().toISOString());
+    listener.setItem("atelier.application-agent.career-jobs.v0", "[]");
+    expect(() => hostAuthority.beforeClick(fence, new Date().toISOString())).not.toThrow();
+  });
+});
