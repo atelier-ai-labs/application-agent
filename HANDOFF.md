@@ -1,4 +1,4 @@
-# Application agent handoff (updated 2026-11-10 night)
+# Application agent handoff (updated 2026-11-10 late night)
 
 Read this first in a new session. PuckPulse has its own handoff in `nhl-dashboard/HANDOFF.md`;
 this one is only the application agent (`application-agent/`). Parked ideas live in
@@ -14,6 +14,19 @@ this one is only the application agent (`application-agent/`). Parked ideas live
 - Host restarted after the last fix; every 11-10 fix is live in the host and the Slack listener.
 
 ## What changed 2026-11-10 (all pushed to `feature/application-agent`)
+
+**State is in SQLite now (4fa9a2a, d18a0f0, migrated 21:37).** `.local/career-agent/state.db`
+replaced `state.json` (kept as `state.json.pre-sqlite-1794364633988.backup`). Built-in `node:sqlite`,
+WAL mode; each write touches one key, and repositories change job/campaign/application/event lists
+inside one short `BEGIN IMMEDIATE` transaction (`updateStoredArray`), so processes can't erase each
+other's saves. `openStateStorage()` (runtime/stateStorage.ts) is the only way to open state: a
+`.json` path with a `.db` beside it uses the database, and a missing db next to an old state.json
+refuses to start. Keys and values are stored as bytes because fence keys contain a NUL (the import
+check caught SQLite text cutting them short). Tests now use a temporary state db (tests/setup.ts):
+the host's default fence store used to be the **real** state.json during tests. To inspect state by
+hand, use `sqlite3` or a vite-node script through the runtime, not `python json.load(state.json)`.
+Lists are still stored one JSON array per key (atomic, not one row per job); splitting into tables
+is optional later.
 
 **Submitting from Slack.** The "Application ready to submit" card's **Submit application** button
 already existed (two Upstart roles went in that way). The waiting board now says to tap it
@@ -75,7 +88,6 @@ listener for about a minute until `contract-to-hire` was dropped ("contract" alr
 - Done 11-10 late (bac524c): "select all that apply" groups are one question with the box labels as
   choices; the answer checks only that box, and an answer that names no box asks again. Profile now
   has `identity.preferredName: "Nate"` and `approvedReusableAnswers.pronouns: "He/him"`.
-- SQLite state move (see FUTURE_UPDATES).
 - Headless browser around 11-14 (FUTURE_UPDATES); the Slack Submit button is what makes it work.
 
 ## How to operate (learned the hard way)

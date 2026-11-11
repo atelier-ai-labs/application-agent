@@ -19,10 +19,7 @@ These are ideas we've parked for later. None of them are scheduled; Nate picks w
 
 ## Agent behavior
 
-- **Move the agent's state from `state.json` to SQLite (next infrastructure job).** The Slack listener, the browser host and one-off commands share one 17 MB JSON file, and every save rewrites the whole file from that program's own copy. Two saves close together wipe each other out. On 2026-11-10 this lost Upstart Delivery's submission fence, put back Affirm's old status, and helped make Latitude's question post every minute. Reads and writes were patched to re-read the file when it changes (f8cee38, 4c1caa7), but two programs changing the same list at the same moment can still collide.
-  - SQLite is a free, serverless database in one local file. It saves one job or question at a time, and several programs can use it at once safely.
-  - Google Sheets stays as the tracker and queue; nothing the user sees changes.
-  - Do it in a quiet session, not during live applications. Keep a one-time import from `state.json` and a backup.
+- **Done 2026-11-10: state moved from `state.json` to SQLite** (see HANDOFF.md). Possible follow-up: one table row per job instead of one JSON list per key, if the lists get slow.
 
 - **Bigger free model for essays (Groq).** Draft essays with Llama 3.3 70B on Groq's free tier instead of local qwen2.5:7b. The 7B model writes stiffly, copies the posting's slogans and sometimes borrows the posting's claims as the candidate's experience (Mercury and Temporal, 2026-11-09). Groq is already used free in PuckPulse.
   - Tradeoff: the profile, résumé evidence and the question leave the machine.
