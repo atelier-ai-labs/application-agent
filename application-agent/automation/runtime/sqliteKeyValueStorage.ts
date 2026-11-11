@@ -7,6 +7,12 @@ import type { KeyValueStorage } from "../../src/persistence/storage";
 export const DEFAULT_CAREER_AGENT_STATE_DB = ".local/career-agent/state.db";
 
 const lockWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
+
+// Keys and values are stored as UTF-8 bytes, not TEXT: submission-fence keys
+// contain a NUL separator ("application-…\0career-job-…"), and SQLite text cut
+// them short at it (caught by the import check, 2026-11-10).
+const bytes = (value: string): Uint8Array => Buffer.from(value, "utf8");
+const text = (value: Uint8Array): string => Buffer.from(value).toString("utf8");
 const exclusiveLockContext = new AsyncLocalStorage<SqliteKeyValueStorage>();
 
 /**
@@ -48,7 +54,7 @@ export class SqliteKeyValueStorage implements KeyValueStorage {
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = NORMAL;
       PRAGMA busy_timeout = 15000;
-      CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS kv (key BLOB PRIMARY KEY, value BLOB NOT NULL);
     `);
     this.select = this.db.prepare("SELECT value FROM kv WHERE key = ?");
     this.upsert = this.db.prepare("INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
@@ -66,8 +72,8 @@ export class SqliteKeyValueStorage implements KeyValueStorage {
   }
 
   private read(key: string): string | null {
-    const row = this.select.get(key) as { value?: unknown } | undefined;
-    return typeof row?.value === "string" ? row.value : null;
+    const row = this.select.get(bytes(key)) as { value?: unknown } | undefined;
+    return row?.value instanceof Uint8Array ? text(row.value) : null;
   }
 
   getItem(key: string): string | null {
@@ -79,12 +85,12 @@ export class SqliteKeyValueStorage implements KeyValueStorage {
   }
 
   setItem(key: string, value: string): void {
-    this.upsert.run(key, value);
+    this.upsert.run(bytes(key), bytes(value));
     this.cache.set(key, value);
   }
 
   removeItem(key: string): void {
-    this.remove.run(key);
+    this.remove.run(bytes(key));
     this.cache.set(key, null);
   }
 
@@ -93,7 +99,7 @@ export class SqliteKeyValueStorage implements KeyValueStorage {
     let next: string;
     try {
       next = change(this.read(key));
-      this.upsert.run(key, next);
+      this.upsert.run(bytes(key), bytes(next));
       this.db.exec("COMMIT");
     } catch (error) {
       try { this.db.exec("ROLLBACK"); } catch { /* already rolled back */ }
@@ -105,15 +111,15 @@ export class SqliteKeyValueStorage implements KeyValueStorage {
 
   /** Every key and value, for backups and the one-time import check. */
   entries(): [string, string][] {
-    return (this.db.prepare("SELECT key, value FROM kv ORDER BY key").all() as { key: string; value: string }[])
-      .map((row) => [row.key, row.value]);
+    return (this.db.prepare("SELECT key, value FROM kv ORDER BY key").all() as { key: Uint8Array; value: Uint8Array }[])
+      .map((row) => [text(row.key), text(row.value)]);
   }
 
   /** Write many keys in one transaction (the one-time import). */
   importEntries(entries: Iterable<[string, string]>): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      for (const [key, value] of entries) this.upsert.run(key, value);
+      for (const [key, value] of entries) this.upsert.run(bytes(key), bytes(value));
       this.db.exec("COMMIT");
     } catch (error) {
       try { this.db.exec("ROLLBACK"); } catch { /* already rolled back */ }

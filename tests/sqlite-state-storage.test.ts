@@ -24,6 +24,10 @@ describe("SQLite state storage", () => {
     const first = new SqliteKeyValueStorage(db);
     first.setItem("jobs", "[1]");
     first.setItem("__proto__", "safe");
+    // Submission-fence keys hold a NUL separator; SQLite text would cut them short.
+    first.setItem("fence:application-1\u0000career-job-1", "claimed\u0000x");
+    expect(new SqliteKeyValueStorage(db).getItem("fence:application-1\u0000career-job-1")).toBe("claimed\u0000x");
+    expect(new SqliteKeyValueStorage(db).entries().map(([key]) => key)).toContain("fence:application-1\u0000career-job-1");
     expect(new SqliteKeyValueStorage(db).getItem("jobs")).toBe("[1]");
     expect(new SqliteKeyValueStorage(db).getItem("__proto__")).toBe("safe");
     first.removeItem("jobs");
@@ -77,13 +81,14 @@ describe("SQLite state storage", () => {
       import { DatabaseSync } from "node:sqlite";
       const db = new DatabaseSync(process.argv[2]);
       db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 15000;");
-      const read = db.prepare("SELECT value FROM kv WHERE key = 'list'");
-      const write = db.prepare("UPDATE kv SET value = ? WHERE key = 'list'");
+      const key = Buffer.from("list", "utf8");
+      const read = db.prepare("SELECT value FROM kv WHERE key = ?");
+      const write = db.prepare("UPDATE kv SET value = ? WHERE key = ?");
       for (let i = 0; i < 200; i += 1) {
         db.exec("BEGIN IMMEDIATE");
-        const list = JSON.parse(read.get().value);
+        const list = JSON.parse(Buffer.from(read.get(key).value).toString("utf8"));
         list.push(process.argv[3] + i);
-        write.run(JSON.stringify(list));
+        write.run(Buffer.from(JSON.stringify(list), "utf8"), key);
         db.exec("COMMIT");
       }
     `);
