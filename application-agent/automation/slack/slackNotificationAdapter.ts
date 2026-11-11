@@ -7,7 +7,7 @@ import type {
   QueueHandoffNotice,
   SubmissionReviewNotice,
 } from "../../src/domain/attention";
-import { formatPostedCompensation } from "../../src/domain/attention";
+import { isPostingUrl, formatPostedCompensation } from "../../src/domain/attention";
 import type { SlackNotificationConfig } from "./config";
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -143,7 +143,20 @@ function eventMessage(
   text: string;
   blocks: readonly Record<string, unknown>[];
 } {
-  const message = eventMessageBody(event, renderOptions);
+  const body = eventMessageBody(event, renderOptions);
+  // The posting link sits under the title, so the job can be read before
+  // answering (ElevenLabs, 2026-11-10). Thread replies already have it above.
+  const url = event.context.postingUrl;
+  const message = url && !renderOptions.threadReply && isPostingUrl(url)
+    ? {
+        text: `${body.text}\n\nJob posting: ${url}`,
+        blocks: [
+          ...body.blocks.slice(0, 1),
+          { type: "context", elements: [{ type: "mrkdwn", text: `<${url}|View the job posting>` }] },
+          ...body.blocks.slice(1),
+        ],
+      }
+    : body;
   const replies = quickRepliesForEvent(event);
   if (replies.length === 0) return message;
   return {
@@ -699,7 +712,10 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     const blank = notice.leftBlank.length > 0
       ? `Left blank: ${notice.leftBlank.slice(0, 12).map((label) => markdownText(label, 60)).join(", ")}`
       : "Nothing was left blank.";
-    const resume = notice.resumeFamily ? `Résumé: *${markdownText(notice.resumeFamily, 60)}*` : "";
+    const resume = [
+      notice.resumeFamily ? `Résumé: *${markdownText(notice.resumeFamily, 60)}*` : "",
+      notice.postingUrl && isPostingUrl(notice.postingUrl) ? `<${notice.postingUrl}|View the job posting>` : "",
+    ].filter(Boolean).join(" · ");
     const text = `Ready to submit: ${job}\n\n${filled}\n\n${blank}`;
     const posted = await this.callApi("chat.postMessage", this.config.botToken, {
       channel: this.config.channelId,

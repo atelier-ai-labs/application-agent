@@ -1137,6 +1137,7 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
       company: job.job.company,
       role: job.job.title,
       ...(application.resume?.familyId ? { resumeFamily: application.resume.familyId } : {}),
+      ...(job.job.sourceUrl ?? job.job.applicationUrl ? { postingUrl: (job.job.sourceUrl ?? job.job.applicationUrl)! } : {}),
       filled: inspection.reviewSummary ?? inspection.fieldsFilled.map((id) => ({ label: labels.get(id) ?? id, value: "" })),
       leftBlank: inspection.unresolvedFields,
     });

@@ -1628,6 +1628,7 @@ export class CareerAgentService {
         jobId: job.id,
         blocker,
         postingCompensation: job.job.compensation,
+        postingUrl: job.job.sourceUrl ?? job.job.applicationUrl,
         createdAt: blocker.createdAt,
         createId: this.createId,
       });
@@ -3653,6 +3654,7 @@ export class CareerAgentService {
           jobId: current.id,
           blocker,
           postingCompensation: current.job.compensation,
+          postingUrl: current.job.sourceUrl ?? current.job.applicationUrl,
           draft: generated,
           createdAt: blocker.createdAt,
           createId: this.createId,
@@ -3712,6 +3714,7 @@ export class CareerAgentService {
       jobId: job.id,
       blocker,
       postingCompensation: job.job.compensation,
+      postingUrl: job.job.sourceUrl ?? job.job.applicationUrl,
       ...(draft ? { draft } : {}),
       createdAt: blocker.createdAt,
       createId: this.createId,
@@ -3962,6 +3965,7 @@ export class CareerAgentService {
       jobId: job.id,
       blocker,
       postingCompensation: job.job.compensation,
+      postingUrl: job.job.sourceUrl ?? job.job.applicationUrl,
       createdAt: blocker.createdAt,
       createId: this.createId,
     });

@@ -205,6 +205,24 @@ describe("Slack human-attention adapter", () => {
     expect(requests[0].body).not.toContain("blocker-1");
   });
 
+  it("links the job posting under the title, and only a safe https link", async () => {
+    // ElevenLabs (2026-11-10): the questions came with no way to read the job.
+    const bodies: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        bodies.push(typeof init?.body === "string" ? init.body : "");
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000002" }) } as Response;
+      },
+    });
+    const base = event();
+    await adapter.publishAttentionEvent({ ...base, context: { ...base.context, postingUrl: "https://jobs.ashbyhq.com/elevenlabs/123" } });
+    const blocks = JSON.parse(bodies[0]!).blocks as { type: string; elements?: { text: string }[] }[];
+    expect(blocks[1]).toEqual({ type: "context", elements: [{ type: "mrkdwn", text: "<https://jobs.ashbyhq.com/elevenlabs/123|View the job posting>" }] });
+    await adapter.publishAttentionEvent({ ...base, id: "attention-2", context: { ...base.context, postingUrl: "javascript:alert(1)" } });
+    expect(bodies[1]).not.toContain("View the job posting");
+  });
+
   it("renders unique option-scoped action IDs and accepts each matching option", async () => {
     const requests: string[] = [];
     const responses: string[] = [];

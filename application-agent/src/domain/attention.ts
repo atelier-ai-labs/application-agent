@@ -50,6 +50,8 @@ export interface AttentionEventContext {
   section?: string;
   /** Structured compensation copied from the job posting, never a candidate answer. */
   postingCompensation?: JobCompensation;
+  /** The public job posting, so the person answering can read what the job is. */
+  postingUrl?: string;
 }
 
 export interface AttentionDescriptorMetadata {
@@ -164,6 +166,7 @@ export interface SubmissionReviewNotice {
   company: string;
   role: string;
   resumeFamily?: string;
+  postingUrl?: string;
   filled: readonly { label: string; value: string }[];
   leftBlank: readonly string[];
 }
@@ -539,6 +542,7 @@ export function attentionEventForCareerBlocker(input: {
   jobId: string;
   blocker: CareerBlocker;
   postingCompensation?: JobCompensation;
+  postingUrl?: string;
   draft?: AttentionDraft;
   createdAt: string;
   createId: (prefix: string) => string;
@@ -568,6 +572,7 @@ export function attentionEventForCareerBlocker(input: {
       role: safeString(blocker.context.role, MAX_CONTEXT_LENGTH) ?? "Application",
       ...(section ? { section } : {}),
       ...(postingCompensation ? { postingCompensation } : {}),
+      ...(isPostingUrl(input.postingUrl) ? { postingUrl: input.postingUrl } : {}),
     },
     question,
     questionProvenance: questionProvenanceForBlocker(blocker),
@@ -717,6 +722,12 @@ function isPostingCompensation(value: unknown): value is JobCompensation {
   );
 }
 
+/** An https link short enough to render; anything else is left off the message. */
+export function isPostingUrl(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 500) return false;
+  try { return new URL(value).protocol === "https:"; } catch { return false; }
+}
+
 function isAttentionDraft(value: unknown): value is AttentionDraft {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const candidate = value as Partial<AttentionDraft>;
@@ -765,7 +776,8 @@ export function isAttentionEvent(value: unknown): value is AttentionEvent {
       boundedText(context.company, MAX_CONTEXT_LENGTH) &&
       boundedText(context.role, MAX_CONTEXT_LENGTH) &&
       (context.section === undefined || boundedText(context.section, MAX_CONTEXT_LENGTH)) &&
-      (context.postingCompensation === undefined || isPostingCompensation(context.postingCompensation)),
+      (context.postingCompensation === undefined || isPostingCompensation(context.postingCompensation)) &&
+      (context.postingUrl === undefined || isPostingUrl(context.postingUrl)),
     ) &&
     (candidate.descriptor === undefined ||
       (candidate.descriptor !== null &&

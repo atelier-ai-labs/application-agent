@@ -1,5 +1,6 @@
 import type { CareerBlocker, CareerJob } from "./campaignTypes";
 import { isPostSubmitHumanCheck } from "./applicationReceipt";
+import { isPostingUrl } from "./attention";
 
 /**
  * The "Waiting on you" board: one Slack message listing every recent
@@ -17,6 +18,8 @@ export interface WaitingBoardItem {
   questions: readonly string[];
   /** Slack message the candidate replies to, when one was posted. */
   link?: string;
+  /** The public job posting. */
+  postingUrl?: string;
   since: string;
 }
 
@@ -66,7 +69,9 @@ export function waitingBoardItems(
     const ts = state === "submit" ? reviewCards.get(job.id) ?? delivery?.threadTs ?? delivery?.messageTs : delivery?.threadTs ?? delivery?.messageTs;
     items.push({
       jobId: job.id, company: job.job.company, role: job.job.title, state, questions: state === "questions" ? questions : [],
-      ...(ts ? { link: ts } : {}), since: job.updatedAt,
+      ...(ts ? { link: ts } : {}),
+      ...(isPostingUrl(job.job.sourceUrl ?? job.job.applicationUrl) ? { postingUrl: (job.job.sourceUrl ?? job.job.applicationUrl)! } : {}),
+      since: job.updatedAt,
     });
   }
   const order: Record<WaitingState, number> = { verify: 0, submit: 1, questions: 2 };
@@ -91,7 +96,8 @@ export function renderWaitingBoard(
     : `*Waiting on you* (${board.items.length}) · updated ${time}`;
   const lines = board.items.map((item) => {
     const url = item.link ? permalink(item.link) : undefined;
-    const name = `*${item.company} — ${item.role}*`;
+    // The job name links to the posting, so the job can be read before answering.
+    const name = item.postingUrl ? `*<${item.postingUrl}|${item.company} — ${item.role}>*` : `*${item.company} — ${item.role}*`;
     const open = url ? ` · <${url}|open>` : "";
     if (item.state === "verify") return `• ${name}: submitted, needs your check (code or DONE)${open}`;
     if (item.state === "submit") return `• ${name}: ready, tap *Submit application* on its “Application ready to submit” card${open}`;

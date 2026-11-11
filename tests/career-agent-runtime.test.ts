@@ -585,7 +585,8 @@ describe("background Career Agent runtime", () => {
       expect(await runtime.refreshWaitingBoard(at)).toBe("posted");
       expect(adapter.publishedEvents.length).toBe(postedBefore + 1);
       expect(boards).toHaveLength(1);
-      expect(boards[0]!.text).toContain(`*${waiting.job.company} — ${waiting.job.title}*: 1 question`);
+      // The job name links to its posting (ElevenLabs, 2026-11-10).
+      expect(boards[0]!.text).toContain(`*<${waiting.job.sourceUrl ?? waiting.job.applicationUrl}|${waiting.job.company} — ${waiting.job.title}>*: 1 question`);
 
       expect(await runtime.refreshWaitingBoard(new Date(at.getTime() + 60_000))).toBe("unchanged");
       expect(boards).toHaveLength(1);
