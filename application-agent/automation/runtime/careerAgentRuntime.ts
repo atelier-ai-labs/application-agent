@@ -62,6 +62,7 @@ import { enrichJobIntake } from "../../src/domain/postingEnrichment";
 import { FileAnswerBankStore } from "../answerBank/fileAnswerBankStore";
 import { isAwaitingReceipt, matchReceiptToJob } from "../../src/domain/applicationReceipt";
 import { renderWaitingBoard, waitingBoardItems, waitingBoardSignature, WAITING_BOARD_RECENT_MS } from "../../src/domain/waitingBoard";
+import { slackMessagesToTidy } from "../../src/domain/slackTidy";
 
 const SUBMISSION_REVIEW_CARDS_KEY = "atelier.application-agent.submission-review-cards.v0";
 import { gmailInbox, type InboxSource } from "../gmailInbox";
@@ -125,6 +126,13 @@ interface WaitingBoardPort {
   replaceWaitingBoard(board: { text: string; blocks: unknown[] }, previousTs?: string): Promise<string>;
 }
 
+interface SlackTidyPort {
+  listTidyCandidates(beforeTs: string, limit?: number): Promise<import("../../src/domain/slackTidy").TidyCandidate[]>;
+  deleteOwnMessage(messageTs: string): Promise<boolean>;
+}
+
+const SLACK_TIDY_MIN_AGE_MS = 24 * 60 * 60 * 1_000;
+
 /** The existing execution-host HTTP seam, kept as a narrow runtime port. */
 export interface CareerAgentExecutionHostPort {
   start(request: ExecutionHostRequest): Promise<ExecutionHostSnapshot>;
@@ -181,6 +189,8 @@ export interface BackgroundCareerAgentRuntime {
   start(): Promise<void>;
   /** Rebuild the Slack "Waiting on you" board; see the implementation. */
   refreshWaitingBoard(now?: Date): Promise<"posted" | "unchanged" | "unavailable">;
+  /** Deletes the bot's finished Slack messages older than a day; returns how many. */
+  tidySlack(now?: Date, options?: { maxDeletes?: number; pauseMs?: number }): Promise<number>;
   stop(): Promise<void>;
   createCampaign(input: CreateCampaignInput): Campaign;
   runCampaign(campaignId: string): Promise<CampaignRunResult>;
@@ -737,6 +747,38 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
     const ts = await adapter.replaceWaitingBoard(renderWaitingBoard(board, now, (messageTs) => this.boardPermalinks.get(messageTs)), saved?.ts);
     this.writeWaitingBoardState({ ts, signature });
     return "posted";
+  }
+
+  /**
+   * Keep Slack showing only what still needs the candidate: delete the bot's
+   * own messages more than a day old unless they are the current board, a
+   * question for a job still waiting, or the Submit card of a job still ready.
+   */
+  async tidySlack(now = new Date(), options: { maxDeletes?: number; pauseMs?: number } = {}): Promise<number> {
+    const adapter = this.notification?.adapter as Partial<SlackTidyPort> | undefined;
+    if (typeof adapter?.listTidyCandidates !== "function" || typeof adapter.deleteOwnMessage !== "function") return 0;
+    (this.stateStorage as { reload?: () => void } | undefined)?.reload?.();
+    const waiting = new Set(this.service.listJobs().filter((job) => job.status === "needs_input" || job.status === "ready_to_submit").map((job) => job.id));
+    const keep = new Set<string>();
+    const board = this.readWaitingBoardState()?.ts;
+    if (board) keep.add(board);
+    for (const campaign of this.careerRepository.listCampaigns()) {
+      for (const event of campaign.attentionEvents ?? []) {
+        if (event.status !== "open" || !event.providerDelivery || (event.jobId && !waiting.has(event.jobId))) continue;
+        keep.add(event.providerDelivery.messageTs);
+        if (event.providerDelivery.threadTs) keep.add(event.providerDelivery.threadTs);
+      }
+    }
+    for (const [jobId, ts] of this.readReviewCards()) if (waiting.has(jobId)) keep.add(ts);
+    const before = ((now.getTime() - SLACK_TIDY_MIN_AGE_MS) / 1_000).toFixed(6);
+    const doomed = slackMessagesToTidy(await adapter.listTidyCandidates(before), keep, now, SLACK_TIDY_MIN_AGE_MS)
+      .slice(0, options.maxDeletes ?? 40);
+    let deleted = 0;
+    for (const ts of doomed) {
+      if (await adapter.deleteOwnMessage(ts)) deleted += 1;
+      if (options.pauseMs !== 0) await new Promise((resolvePromise) => setTimeout(resolvePromise, options.pauseMs ?? 1_200));
+    }
+    return deleted;
   }
 
   private get waitingBoardStatePath(): string {

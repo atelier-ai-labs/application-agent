@@ -94,6 +94,27 @@ try {
     setInterval(() => { void refreshBoard(); }, 60_000).unref?.();
   }
 
+  // Delete the bot's finished Slack messages a day after they stop mattering.
+  // ATELIER_SLACK_TIDY=disabled turns it off.
+  if (process.env.ATELIER_SLACK_TIDY?.trim() !== "disabled") {
+    const activeRuntime = runtime;
+    let tidying = false;
+    const tidy = async () => {
+      if (tidying || shuttingDown) return;
+      tidying = true;
+      try {
+        const deleted = await activeRuntime.tidySlack();
+        if (deleted > 0) console.log(`[career-agent-runtime] tidied ${deleted} finished Slack message(s)`);
+      } catch (error) {
+        console.warn(`[career-agent-runtime] Slack tidy failed: ${error instanceof Error ? error.message.slice(0, 200) : "unknown error"}`);
+      } finally {
+        tidying = false;
+      }
+    };
+    setTimeout(() => { void tidy(); }, 5 * 60_000).unref?.();
+    setInterval(() => { void tidy(); }, 60 * 60_000).unref?.();
+  }
+
   console.log(`[career-agent-runtime] durable state: ${runtime.stateFilePath ?? "injected storage"}`);
   console.log("[career-agent-runtime] Slack attention listener is active; routine discovery activity remains quiet.");
   process.once("SIGINT", () => { void shutdown(0); });

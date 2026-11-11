@@ -605,6 +605,33 @@ describe("background Career Agent runtime", () => {
     }
   });
 
+  it("tidies the bot's finished Slack messages but keeps the board and waiting questions", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "atelier-career-tidy-"));
+    try {
+      const deleted: string[] = [];
+      const old = "1700000000.000100";
+      const adapter = Object.assign(new InMemoryNotificationAdapter(), {
+        permalink: async () => undefined,
+        replaceWaitingBoard: async () => "1700000000.000200",
+        listTidyCandidates: async () => [
+          { ts: old, fromBot: true, botReplyTs: ["1700000000.000101"] },
+          { ts: "1700000000.000200", fromBot: true, botReplyTs: [] },
+          { ts: "1700000000.000300", fromBot: false, botReplyTs: [] },
+        ],
+        deleteOwnMessage: async (ts: string) => { deleted.push(ts); return true; },
+      });
+      const runtime = new BackgroundCareerAgentRuntimeImpl(runtimeOptions(join(directory, "state.json"), new UnknownThenReadyExecutor(), adapter));
+      const campaign = runtime.createCampaign(campaignInput());
+      runtime.service.activateCampaign(campaign.id);
+      await runtime.runCampaign(campaign.id);
+      await runtime.refreshWaitingBoard(new Date("2026-11-10T12:00:00.000Z"));
+      expect(await runtime.tidySlack(new Date("2026-11-11T12:00:00.000Z"), { pauseMs: 0 })).toBe(2);
+      expect(deleted.sort()).toEqual([old, "1700000000.000101"]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("marks a job Applied from the employer's confirmation email, with no DONE reply", async () => {
     const directory = mkdtempSync(join(tmpdir(), "atelier-career-receipt-"));
     try {

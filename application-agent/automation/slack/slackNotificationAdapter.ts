@@ -635,6 +635,42 @@ export class SlackNotificationAdapter implements NotificationAdapter {
 
   /** Posts an informational message (inbox updates) that asks no question. */
   /** A link to one message in the configured channel, or undefined when Slack will not say. */
+  /** Top-level messages older than `beforeTs`, with the bot's own thread replies (read-only). */
+  async listTidyCandidates(beforeTs: string, limit = 200): Promise<import("../../src/domain/slackTidy").TidyCandidate[]> {
+    const read = async (method: string, params: Record<string, string>) => {
+      const query = new URLSearchParams({ channel: this.config.channelId, ...params });
+      const response = await this.fetcher(`${this.config.apiBaseUrl}/${method}?${query.toString()}`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${this.config.botToken}` },
+      });
+      const data = responsePayload(await response.json()) as { ok?: boolean; messages?: unknown[] } | undefined;
+      if (!data?.ok || !Array.isArray(data.messages)) throw new Error(`Slack ${method} was not accepted.`);
+      return data.messages.map((message) => responsePayload(message) ?? {}) as { ts?: unknown; bot_id?: unknown; reply_count?: unknown }[];
+    };
+    const ts = (value: unknown) => typeof value === "string" && /^\d+\.\d+$/.test(value) ? value : undefined;
+    const candidates: import("../../src/domain/slackTidy").TidyCandidate[] = [];
+    for (const message of await read("conversations.history", { latest: beforeTs, limit: String(Math.min(limit, 200)) })) {
+      const messageTs = ts(message.ts);
+      if (!messageTs) continue;
+      const botReplyTs = typeof message.reply_count === "number" && message.reply_count > 0
+        ? (await read("conversations.replies", { ts: messageTs, limit: "200" })).slice(1)
+            .filter((reply) => typeof reply.bot_id === "string").map((reply) => ts(reply.ts)).filter((value): value is string => Boolean(value))
+        : [];
+      candidates.push({ ts: messageTs, fromBot: typeof message.bot_id === "string", botReplyTs });
+    }
+    return candidates;
+  }
+
+  /** Deletes one of the bot's own messages; false when Slack refuses (e.g. rate limit). */
+  async deleteOwnMessage(messageTs: string): Promise<boolean> {
+    try {
+      await this.callApi("chat.delete", this.config.botToken, { channel: this.config.channelId, ts: messageTs });
+      return true;
+    } catch (error) {
+      return error instanceof Error && /message_not_found/.test(error.message);
+    }
+  }
+
   async permalink(messageTs: string): Promise<string | undefined> {
     try {
       const query = new URLSearchParams({ channel: this.config.channelId, message_ts: messageTs });
