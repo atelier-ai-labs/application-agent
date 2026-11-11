@@ -250,6 +250,7 @@ function isSearchCriteria(value: unknown): value is SearchCriteria {
     (value.minimumSalary === undefined || (typeof value.minimumSalary === "number" && Number.isFinite(value.minimumSalary) && value.minimumSalary >= 0)) &&
     isStringArray(value.excludedSeniorities) &&
     (value.excludedTitleTerms === undefined || isStringArray(value.excludedTitleTerms)) &&
+    (value.maxYearsExperience === undefined || (typeof value.maxYearsExperience === "number" && Number.isInteger(value.maxYearsExperience) && value.maxYearsExperience >= 0)) &&
     isStringArray(value.excludedCompanies)
   );
 }

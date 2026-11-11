@@ -9,6 +9,7 @@ import type {
   SubmissionPolicy,
 } from "./campaignTypes";
 import { locationAllowed } from "./discoveryFilter";
+import { requiredYearsOfExperience } from "./experienceYears";
 import type { FitAssessment, JobPosting, ResumeFamilyId } from "./types";
 
 export interface HardFilterResult {
@@ -157,6 +158,17 @@ export function applyHardFilters(job: JobPosting, criteria: SearchCriteria): Har
       reason: `Title contains a term excluded by campaign search intent: ${excludedTitleTerm}.`,
       evidence: [`title:${job.title}`, `excluded-title-term:${excludedTitleTerm}`],
     };
+  }
+
+  if (criteria.maxYearsExperience !== undefined) {
+    const required = requiredYearsOfExperience(job.description);
+    if (required !== undefined && required > criteria.maxYearsExperience) {
+      return {
+        decision: "reject",
+        reason: `Posting asks for ${required}+ years of experience; the search allows up to ${criteria.maxYearsExperience}.`,
+        evidence: [`required-years:${required}`, `max-years:${criteria.maxYearsExperience}`],
+      };
+    }
   }
 
   if (criteria.roleLanes.length > 0 && !matchingRoleLane(job.title, criteria.roleLanes)) {

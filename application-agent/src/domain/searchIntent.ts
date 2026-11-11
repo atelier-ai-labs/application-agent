@@ -27,6 +27,8 @@ export interface JobSearchIntent {
   remotePreference: SearchRemotePreference;
   employmentTypes?: readonly string[];
   minimumSalary?: number;
+  /** Skip postings whose stated minimum experience is more than this many years. */
+  maxYearsExperience?: number;
   breadth: SearchBreadth;
 }
 
@@ -96,6 +98,10 @@ export function normalizeJobSearchIntent(value: unknown): JobSearchIntent {
   }
 
   const minimumSalary = optionalSalary(candidate.minimumSalary);
+  const maxYearsExperience = candidate.maxYearsExperience;
+  if (maxYearsExperience !== undefined && (typeof maxYearsExperience !== "number" || !Number.isInteger(maxYearsExperience) || maxYearsExperience < 0)) {
+    throw new Error("Search intent maxYearsExperience must be a non-negative whole number.");
+  }
   const normalized: JobSearchIntent = {
     primaryLanes: cleanLaneList(candidate.primaryLanes, "Search intent primary lanes"),
     adjacentLanes: cleanLaneList(candidate.adjacentLanes, "Search intent adjacent lanes"),
@@ -110,6 +116,7 @@ export function normalizeJobSearchIntent(value: unknown): JobSearchIntent {
       ? []
       : cleanList(candidate.employmentTypes, "Search intent employment types"),
     ...(minimumSalary !== undefined ? { minimumSalary } : {}),
+    ...(maxYearsExperience !== undefined ? { maxYearsExperience } : {}),
     breadth: candidate.breadth as SearchBreadth,
   };
 
@@ -182,6 +189,7 @@ export function searchCriteriaFromJobSearchIntent(
     ...(normalized.minimumSalary !== undefined ? { minimumSalary: normalized.minimumSalary } : {}),
     excludedSeniorities: [...normalized.excludedSeniorities],
     excludedTitleTerms: [...normalized.excludedTitleTerms],
+    ...(normalized.maxYearsExperience !== undefined ? { maxYearsExperience: normalized.maxYearsExperience } : {}),
     excludedCompanies: [...excludedCompanies],
   };
 }

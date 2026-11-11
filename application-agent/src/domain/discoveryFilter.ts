@@ -1,5 +1,6 @@
 import type { JobSearchIntent } from "./searchIntent";
 import type { JobPosting } from "./types";
+import { requiredYearsOfExperience } from "./experienceYears";
 
 /**
  * Decides whether a discovered posting belongs in the user's tracker, using
@@ -7,7 +8,7 @@ import type { JobPosting } from "./types";
  * employment type, and locations. Every decision carries a short reason so a
  * dry run can explain what was dropped.
  */
-export type DiscoveryScreen = { keep: true } | { keep: false; reason: "seniority" | "employment" | "role" | "location" };
+export type DiscoveryScreen = { keep: true } | { keep: false; reason: "seniority" | "employment" | "role" | "location" | "experience" };
 
 const ROLE_WORD = /\b(?:engineer|engineering|developer|programmer|sre|devops|architect|scientist)\b/;
 const GENERIC_LANE_WORDS = new Set([
@@ -109,6 +110,10 @@ export function screenDiscoveredJob(job: Pick<JobPosting, "title" | "location" |
   const wantsFullTime = (intent.employmentTypes ?? []).some((type) => /full/.test(type.toLowerCase()));
   if (wantsFullTime && NOT_FULL_TIME.test(`${title} ${words(job.employmentType ?? "")} ${words((job.description ?? "").slice(0, 4_000))}`)) {
     return { keep: false, reason: "employment" };
+  }
+  if (intent.maxYearsExperience !== undefined) {
+    const required = requiredYearsOfExperience(job.description);
+    if (required !== undefined && required > intent.maxYearsExperience) return { keep: false, reason: "experience" };
   }
   if (!roleMatches(job.title, intent)) return { keep: false, reason: "role" };
   if (!locationAllowed(job, intent)) return { keep: false, reason: "location" };

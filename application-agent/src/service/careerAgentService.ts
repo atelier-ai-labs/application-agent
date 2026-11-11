@@ -1809,6 +1809,7 @@ export class CareerAgentService {
                 excludedTitleTerms: cleanList(input.searchCriteria.excludedTitleTerms),
               }
             : {}),
+          ...(input.searchCriteria?.maxYearsExperience !== undefined ? { maxYearsExperience: input.searchCriteria.maxYearsExperience } : {}),
           ...(input.searchCriteria?.excludedCompanies
             ? {
                 excludedCompanies: cleanList(input.searchCriteria.excludedCompanies),

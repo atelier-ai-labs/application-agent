@@ -109,6 +109,8 @@ export interface SearchCriteria {
   excludedSeniorities: readonly string[];
   /** Optional whole-word title exclusions materialized from search intent. */
   excludedTitleTerms?: readonly string[];
+  /** Skip postings whose stated minimum experience is more than this many years. */
+  maxYearsExperience?: number;
   excludedCompanies: readonly string[];
 }
 
