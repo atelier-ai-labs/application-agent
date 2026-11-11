@@ -92,7 +92,9 @@ export class FileKeyValueStorage implements KeyValueStorage {
 
   /** Re-read only when another process replaced the file since we last saw it (it is large). */
   private refreshIfChanged(): void {
-    if (this.fileVersion() !== this.loadedVersion) this.reload();
+    const version = this.fileVersion();
+    // A missing file is never read as "no jobs"; keep the last good copy.
+    if (version !== undefined && version !== this.loadedVersion) this.reload();
   }
 
   /**
@@ -112,7 +114,17 @@ export class FileKeyValueStorage implements KeyValueStorage {
     this.loadedVersion = this.fileVersion();
   }
 
+  /**
+   * Reads see the file as it is now. Repositories read a whole list, change
+   * one record and write the list back; reading a stale copy let the Slack
+   * listener put back a job the restart command had just marked failed
+   * (Affirm, 2026-11-10). The check is a file stat; the file is re-read only
+   * when another process replaced it.
+   */
   getItem(key: string): string | null {
+    // An unreadable or broken file keeps serving the last good copy; writes
+    // still fail loudly.
+    try { this.refreshIfChanged(); } catch { /* keep the cached values */ }
     return this.values.get(key) ?? null;
   }
 

@@ -88,6 +88,19 @@ describe("two processes sharing the state file", () => {
     expect(new FileKeyValueStorage(path).getItem("jobs")).toBe("[]");
   });
 
+  it("reads another process's change to the same list before changing one record in it", () => {
+    // Affirm (2026-11-10): the listener wrote back a stale job list.
+    const { path } = location();
+    const cli = new FileKeyValueStorage(path);
+    const listener = new FileKeyValueStorage(path);
+    cli.setItem("jobs", JSON.stringify({ affirm: "ready_to_submit", latitude: "executing" }));
+    listener.getItem("jobs");
+    cli.setItem("jobs", JSON.stringify({ affirm: "failed", latitude: "executing" }));
+    const jobs = JSON.parse(listener.getItem("jobs")!);
+    listener.setItem("jobs", JSON.stringify({ ...jobs, latitude: "needs_input" }));
+    expect(JSON.parse(new FileKeyValueStorage(path).getItem("jobs")!)).toEqual({ affirm: "failed", latitude: "needs_input" });
+  });
+
   it("keeps a fence claimed in another process while a submission is approved", () => {
     const { path } = location();
     const hostAuthority = new DurableSubmissionAuthority("host", { storage: new FileKeyValueStorage(path) });
