@@ -42,8 +42,8 @@ in-memory copy:
   file is missing or unreadable. Fixed Affirm's job going back to `ready_to_submit` after it failed.
 - Writes deliberately do not wait on the file lock: `restart-existing` holds it for minutes while
   a browser runs and the listener would freeze.
-- Still possible: two programs changing the same list at the same instant. Real fix = SQLite
-  (top of "Agent behavior" in FUTURE_UPDATES).
+- Closed by the SQLite move the same night (see the top of this list): same-list changes now run
+  in one transaction.
 - Interview write-up: `nhl-dashboard/docs/LEARNING.md`, "2026-11-10 — A lost update between two
   processes".
 
