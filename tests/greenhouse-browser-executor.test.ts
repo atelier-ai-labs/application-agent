@@ -1160,6 +1160,56 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(options.map((field) => field.current === true)).toEqual([false, false, true]);
   });
 
+  it("asks a 'select all that apply' group once, with its boxes as choices, and checks only the chosen box", async () => {
+    // Gusto (2026-11-10): every box was asked on its own with no choices, and a
+    // saved "Job Board" answer fit no box, so the question looped.
+    const prompt = "How did you hear about this opportunity? (select all that apply) *";
+    const descriptor = { promptText: prompt, sectionTitle: "Application questions", sourceStrategy: "question_container", confidence: "high" } as const;
+    const boxes = () => ["LinkedIn", "Indeed", "Company Website"].map((label, index) =>
+      new FakeField({ id: `question_70524493[]_${index}`, label, type: "checkbox", required: true, questionDescriptor: descriptor }));
+    const run = async (answer?: string) => {
+      const fields = boxes();
+      const session = new FakeSession(fields);
+      const base = request(session);
+      const answered = answer === undefined ? base : {
+        ...base,
+        careerJob: { ...base.careerJob, blockers: [{
+          id: "blocker-hear", kind: "unknown_form_field", unit: "submission", field: "question_70524493[]", question: prompt,
+          reason: "asked", evidence: [], resumeAfterHuman: true, status: "resolved", value: answer,
+          createdAt: capturedAt, resolvedAt: capturedAt, context: { jobId: base.careerJob.id, applicationId: base.application.id, company: "Gusto", role: "Engineer" },
+        } as never] },
+      };
+      const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute(answered);
+      return { result, fields };
+    };
+
+    const asked = await run();
+    expect(asked.result.state).toBe("requires_human");
+    const blockers = (asked.result as { blockers?: { field?: string; evidence: string[] }[] }).blockers ?? [];
+    expect(blockers.map((blocker) => blocker.field)).toEqual(["question_70524493[]"]);
+    expect(blockers[0]!.evidence).toContain("options:LinkedIn|Indeed|Company Website");
+
+    const chosen = await run("Company Website");
+    expect(chosen.result.state).toBe("ready_to_submit");
+    expect(chosen.fields.map((field) => field.current === true)).toEqual([false, false, true]);
+
+    const noFit = await run("Job Board (Indeed, Monster, etc)");
+    expect(noFit.result.state).toBe("requires_human");
+    expect(((noFit.result as { blockers?: { field?: string }[] }).blockers ?? []).map((blocker) => blocker.field)).toEqual(["question_70524493[]"]);
+    expect(noFit.fields.every((field) => field.current !== true)).toBe(true);
+  });
+
+  it("answers pronouns from the profile's saved pronouns", async () => {
+    const pronouns = new FakeField({ id: "question_33213610003", label: "Pronouns *", type: "select", required: true,
+      options: ["He/him/his", "She/her/hers", "They/them/theirs", "I prefer not to say"].map((label) => ({ label, value: label })),
+      questionDescriptor: { promptText: "Pronouns *", sourceStrategy: "aria_labelledby", confidence: "high" } });
+    const session = new FakeSession([pronouns]);
+    const profile = { ...exampleCandidateProfile, approvedReusableAnswers: { ...exampleCandidateProfile.approvedReusableAnswers, pronouns: "He/him" } } satisfies CandidateProfile;
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...request(session), profile });
+    expect(result.state).toBe("ready_to_submit");
+    expect(pronouns.current).toBe("He/him/his");
+  });
+
   it("opens the same posting's embed form when the hosted page redirects to the employer's site", async () => {
     const firstName = new FakeField({ id: "first_name", label: "First Name", type: "text", required: true });
     const session = new FakeSession([firstName]);

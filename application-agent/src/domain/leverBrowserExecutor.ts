@@ -332,6 +332,14 @@ function approvedDemographicValueForField(
   if (/\b(?:protected\s+)?veteran\b|\bmilitary service\b/.test(text)) return approved.veteran_status?.trim();
   // "I identify as a first-generation professional" (Gusto, 2026-11-10): Nate
   // declines it, so pick the form's own decline option instead of asking.
+  // "Pronouns" (Affirm, 2026-11-10): the option that starts with the saved
+  // pronouns ("He/him" matches "He/him/his"); ask when none or several match.
+  if (/\bpronouns?\b/.test(text) && approved.pronouns?.trim()) {
+    const squash = (value: string) => normalized(value).replace(/\s+/g, "");
+    const saved = squash(approved.pronouns);
+    const matches = (field.options ?? []).filter((option) => squash(option.label).startsWith(saved));
+    return field.options?.length ? (matches.length === 1 ? matches[0]!.label : undefined) : approved.pronouns.trim();
+  }
   if (/\bfirst[- ]generation\b/.test(text)) {
     const declines = (field.options ?? []).filter((option) => /\b(?:don'?t|do not) wish to (?:answer|disclose|say)|\bprefer not\b|\bdecline\b/.test(normalized(option.label)));
     return declines.length === 1 ? declines[0]!.label : undefined;
@@ -371,6 +379,35 @@ function approvedDemographicValueForField(
  * controls with an unambiguous demographic option label; unrelated optional
  * checkboxes remain untouched.
  */
+/**
+ * A "select all that apply" checkbox group asked as one question: the group's
+ * shared prompt, with each box's label as a choice (Gusto, 2026-11-10: each box
+ * was asked on its own with no choices, and a saved "Job Board" answer fit no
+ * box, so it looped).
+ */
+function checkboxGroupDescriptor(group: string, boxes: readonly ApplicationFieldDescriptor[]): ApplicationFieldDescriptor {
+  const first = boxes[0]!;
+  return {
+    ...first,
+    id: group,
+    label: first.questionDescriptor?.promptText ?? first.label,
+    type: "radio",
+    classification: "unknown",
+    required: boxes.some((box) => box.required),
+    options: boxes.map((box) => ({ label: box.label, value: box.label })),
+  };
+}
+
+/** The answered choice for a checkbox group, only when it names exactly one of its boxes. */
+function checkboxGroupChoice(group: string, boxes: readonly ApplicationFieldDescriptor[], request: ApplicationExecutionRequest): string | undefined {
+  const answered = request.careerJob.blockers
+    .filter((blocker) => blocker.status === "resolved" && blocker.field === group && typeof blocker.value === "string" && blocker.value !== OPTIONAL_ANSWER_SKIPPED)
+    .sort((left, right) => (right.resolvedAt ?? "").localeCompare(left.resolvedAt ?? ""))[0];
+  if (!answered) return undefined;
+  const matches = boxes.filter((box) => normalized(box.label) === normalized(String(answered.value)));
+  return matches.length === 1 ? matches[0]!.label : undefined;
+}
+
 /** The shared name of a multi-choice checkbox group ("question_1[]_42" → "question_1[]"). */
 function checkboxGroupKey(field: Pick<LeverBrowserField, "id" | "type">): string | undefined {
   if (field.type !== "checkbox") return undefined;
@@ -891,7 +928,7 @@ export function classifyLeverApplicationField(
   if (field.type === "file" && hasPhrase(text, /drop\s+or\s+select|\.docx?|\.pdf/)) return "resume_upload";
   if (field.type === "file" && hasPhrase(text, /attachment|file upload|upload (?:a )?file|upload (?:a )?document/)) return "resume_upload";
   const genderOptions = field.options?.map((option) => normalized(option.label)).filter(Boolean) ?? [];
-  if (hasPhrase(text, /demographic|\bgender\b|transgender|sexual orientation|sexuality|race|ethnicity|hispanic|latino|veteran|disability|voluntary self|first[- ]generation/) ||
+  if (hasPhrase(text, /demographic|\bgender\b|transgender|sexual orientation|sexuality|race|ethnicity|hispanic|latino|veteran|disability|voluntary self|first[- ]generation/) || (field.type !== "textarea" && /\bpronouns?\b/.test(text)) ||
     (genderOptions.includes("male") && genderOptions.includes("female") && genderOptions.some((option) => option === "non-binary" || option === "nonbinary"))) return "demographic";
   if (hasPhrase(text, /how did you hear|how did you learn|where did you hear|how did you discover|(?:job|role|opportunity) source|source of (?:this )?(?:job|role|opportunity)/)) return "unknown";
   if (smsConsent) return "legal_attestation";
@@ -2982,6 +3019,30 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         }
 
         const decision = decisionForField(fieldDescriptor, request, resumePath, executorEvidenceLabel(observed.target.provider));
+        // A box of a "select all that apply" group that would be asked on its
+        // own: answer the group once, checking only the chosen box.
+        const group = decision.blocker ? checkboxGroupKey(fieldDescriptor) : undefined;
+        const groupBoxes = group ? observed.fields.filter((candidate) => checkboxGroupKey(candidate) === group).map(descriptor) : [];
+        if (group && groupBoxes.length >= 2) {
+          const choice = checkboxGroupChoice(group, groupBoxes, request);
+          if (choice) {
+            if (normalized(choice) === normalized(fieldDescriptor.label)) {
+              try {
+                await field.setChecked(true);
+                fieldsFilled.add(fieldDescriptor.id);
+                evidence.push(`checkbox-group-choice:${group}`);
+              } catch {
+                blockers.push(formBlocker(checkboxGroupDescriptor(group, groupBoxes), "The chosen checkbox could not be checked.", "unknown_form_field", "ATS_FORM", executorEvidenceLabel(observed.target.provider)));
+              }
+            }
+            continue;
+          }
+          if (groupBoxes[0]!.id === fieldDescriptor.id && groupBoxes.some((box) => box.required)) {
+            blockers.push(formBlocker(checkboxGroupDescriptor(group, groupBoxes), "Choose one option for this checkbox group.", "unknown_form_field", "ATS_FORM", executorEvidenceLabel(observed.target.provider)));
+          }
+          unresolvedFields.add(fieldDescriptor.label);
+          continue;
+        }
         if (decision.blocker) {
           blockers.push(decision.blocker);
           unresolvedFields.add(fieldDescriptor.label);
@@ -3183,10 +3244,21 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       const group = checkboxGroupKey(field);
       if (group && field.readValue && await field.readValue().catch(() => null) === true) checkedGroups.add(group);
     }
+    const askedGroups = new Set<string>();
     for (const field of observed.fields) {
       if (!field.required || !field.readValue) continue;
       const group = checkboxGroupKey(field);
       if (group && checkedGroups.has(group)) continue;
+      const groupBoxes = group ? observed.fields.filter((candidate) => checkboxGroupKey(candidate) === group).map(descriptor) : [];
+      if (group && groupBoxes.length >= 2) {
+        // One question for the whole unchecked group, not one per box.
+        if (!askedGroups.has(group)) {
+          askedGroups.add(group);
+          unresolvedFields.add(groupBoxes[0]!.questionDescriptor?.promptText ?? groupBoxes[0]!.label);
+          dedupedBlockers.push(formBlocker(checkboxGroupDescriptor(group, groupBoxes), "A required checkbox group is still unchecked after the safe fill pass.", "unknown_form_field", "ATS_FORM", executorEvidenceLabel(observed.target.provider)));
+        }
+        continue;
+      }
       let value: string | boolean | null = null;
       try {
         value = await field.readValue();
