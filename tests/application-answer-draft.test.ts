@@ -884,6 +884,10 @@ describe("over-the-top drafts (Mercury, 2026-11-09)", () => {
   it("flags stock phrases", () => {
     expect(fillerPhrases(draft)).toEqual(expect.arrayContaining(["much like", "aligns perfectly", "commitment to"]));
     expect(fillerPhrases("I built a nightly ingest job that grades every prediction against closing lines.")).toEqual([]);
+    // ElevenLabs (2026-11-10): "aligning closely with ElevenLabs' focus" slipped through.
+    expect(fillerPhrases("PuckPulse is a robust platform, aligning closely with their focus, which resonated with me.")).toEqual(
+      expect.arrayContaining(["robust", "aligning closely", "resonated with"]),
+    );
   });
 
   it("flags lines lifted from the posting, but not short shared words", () => {
