@@ -637,11 +637,16 @@ function previousEmployerValueForField(
     .replace(/\b(?:inc|llc|ltd|corp|corporation|co|plc|gmbh)\b/g, " ").replace(/\s+/g, " ").trim();
   // Forms often shorten the name ("a current Stack employee" for Stack AV).
   const firstWord = company.split(" ")[0] ?? "";
-  if (!company || !text.includes(company) && !(firstWord.length >= 4 && text.includes(firstWord)) && !/\b(?:us|this company|our company)\b/.test(text)) return undefined;
+  const plainText = text.replace(/[.,]/g, " ").replace(/\s+/g, " ");
+  if (!company || !plainText.includes(company) && !(firstWord.length >= 4 && plainText.includes(firstWord)) && !/\b(?:us|this company|our company)\b/.test(text)) return undefined;
   const employers = request.profile?.employmentHistory.map((record) => normalized(record.employer ?? "")) ?? [];
   if (employers.some((employer) => employer && (employer.includes(company) || company.includes(employer)))) return undefined;
-  const no = field.options?.find((option) => normalized(option.label) === "no");
-  return field.options?.length ? no?.label : "No";
+  // "I have not previously been employed at Affirm" (Affirm, 2026-11-10) is the No.
+  const nos = field.options?.filter((option) => normalized(option.label) === "no" ||
+    /^no\b/.test(normalized(option.label)) ||
+    /\b(?:have not|haven'?t|never|not)\b.{0,30}\b(?:been )?(?:employed|worked)\b/.test(normalized(option.label))) ?? [];
+  const exactNo = field.options?.find((option) => normalized(option.label) === "no");
+  return field.options?.length ? exactNo?.label ?? (nos.length === 1 ? nos[0]!.label : undefined) : "No";
 }
 
 /**

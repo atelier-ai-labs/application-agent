@@ -643,6 +643,17 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(former.current).toBe("No");
     expect(veteran.current).toBe("No, I am not a veteran");
     expect(firstGeneration.current).toBe("I don't wish to answer");
+
+    // Affirm words its No as a sentence (2026-11-10).
+    const affirmFormer = select("q3", "Have you previously been employed at Affirm for any length of time?*", [
+      "I have not previously been employed at Affirm", "I have been employed at Affirm as a full-time employee", "I have been employed at Affirm as a part-time employee",
+    ]);
+    const affirmSession = new FakeSession([affirmFormer]);
+    const affirmBase = request(affirmSession);
+    const affirm = { ...affirmBase, careerJob: { ...affirmBase.careerJob, job: { ...affirmBase.careerJob.job, company: "Affirm" } } };
+    await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(affirmSession), provider: "greenhouse", now: () => capturedAt })
+      .execute({ ...affirm, profile });
+    expect(affirmFormer.current).toBe("I have not previously been employed at Affirm");
   });
 
   it("does not reuse United States authorization for a different country", async () => {
