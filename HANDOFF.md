@@ -72,11 +72,9 @@ listener for about a minute until `contract-to-hire` was dropped ("contract" alr
 
 ## Known gaps / next
 
-- **Checkbox groups** ("How did you hear… select all that apply", Gusto): each box becomes its own
-  question with no options, and a saved bank answer like "Job Board" matches no box, so it loops.
-  Planned fix: treat the group as one question with the box labels as choices; use a bank answer
-  only if it matches a box. Not built yet.
-- Preferred name and pronouns aren't in the profile (Affirm asked both). Ask Nate, then save them.
+- Done 11-10 late (bac524c): "select all that apply" groups are one question with the box labels as
+  choices; the answer checks only that box, and an answer that names no box asks again. Profile now
+  has `identity.preferredName: "Nate"` and `approvedReusableAnswers.pronouns: "He/him"`.
 - SQLite state move (see FUTURE_UPDATES).
 - Headless browser around 11-14 (FUTURE_UPDATES); the Slack Submit button is what makes it work.
 
