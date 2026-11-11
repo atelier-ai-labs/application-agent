@@ -612,6 +612,34 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(needs.current).toBe("b");
   });
 
+  it("answers Gusto's authorization, former-employee, veteran and first-generation questions without asking", async () => {
+    // Gusto (2026-11-10): all four were asked in Slack.
+    const profile = {
+      ...exampleCandidateProfile,
+      workAuthorization: { status: "authorized", countries: ["United States"], sponsorshipRequired: false },
+      approvedReusableAnswers: { ...exampleCandidateProfile.approvedReusableAnswers, veteran_status: "No, I am not a protected veteran" },
+    } satisfies CandidateProfile;
+    const select = (id: string, label: string, options: string[]) => new FakeField({
+      id, label, type: "select", required: true, options: options.map((option) => ({ label: option, value: option })),
+      questionDescriptor: { promptText: label, sourceStrategy: "aria_labelledby", confidence: "high" },
+    });
+    const authorized = select("q1", "Are you legally authorized to work in the country where you are applying?*", ["Yes", "No"]);
+    const former = select("q2", "Have you ever, or are you currently working at Gusto or Symmetry in any capacity (ie: employee or contingent worker)?*", ["Yes", "No"]);
+    const veteran = select("609", "Veteran Status (please select one):*", ["Yes, I am a veteran", "No, I am not a veteran", "I don't wish to answer"]);
+    const firstGeneration = select("1012", "I identify as a first-generation professional (please select one):*", ["Yes", "No", "I don't wish to answer"]);
+    const session = new FakeSession([authorized, former, veteran, firstGeneration]);
+    const base = request(session);
+    const gusto = { ...base, careerJob: { ...base.careerJob, job: { ...base.careerJob.job, company: "Gusto, Inc." } } };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse", now: () => capturedAt })
+      .execute({ ...gusto, profile });
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(authorized.current).toBe("Yes");
+    expect(former.current).toBe("No");
+    expect(veteran.current).toBe("No, I am not a veteran");
+    expect(firstGeneration.current).toBe("I don't wish to answer");
+  });
+
   it("does not reuse United States authorization for a different country", async () => {
     const profile = {
       ...exampleCandidateProfile,

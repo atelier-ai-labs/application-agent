@@ -330,6 +330,12 @@ function approvedDemographicValueForField(
   if (/\bsexual orientation\b|\bsexuality\b/.test(text)) return approved.sexual_orientation?.trim();
   if (/\bdisability\b|\bdisabled\b/.test(text)) return approved.disability_status?.trim();
   if (/\b(?:protected\s+)?veteran\b|\bmilitary service\b/.test(text)) return approved.veteran_status?.trim();
+  // "I identify as a first-generation professional" (Gusto, 2026-11-10): Nate
+  // declines it, so pick the form's own decline option instead of asking.
+  if (/\bfirst[- ]generation\b/.test(text)) {
+    const declines = (field.options ?? []).filter((option) => /\b(?:don'?t|do not) wish to (?:answer|disclose|say)|\bprefer not\b|\bdecline\b/.test(normalized(option.label)));
+    return declines.length === 1 ? declines[0]!.label : undefined;
+  }
   if (/\bhow do you describe your gender identity\b/.test(text)) return approved.gender_identity?.trim();
   // Ashby can expose a second, custom gender question whose inspected label is
   // only the currently rendered option (for example "Female"). The option
@@ -621,10 +627,14 @@ function previousEmployerValueForField(
   request: ApplicationExecutionRequest,
 ): string | undefined {
   const text = inspectedPromptText(field);
-  if (!/\b(?:have|had) you\b.{0,30}\b(?:employed|worked)\b.{0,60}\bbefore\b|\b(?:previously|ever) (?:been )?(?:employed|worked) (?:by|at|for|with)\b|\bformer employee\b|\bare you (?:a )?current\b.{0,30}\bemployee\b/.test(text)) {
+  // "Have you ever, or are you currently working at Gusto..." (Gusto, 2026-11-10).
+  const everOrCurrently = /\bhave you ever\b.{0,40}\b(?:currently )?(?:working|worked|employed)\b (?:at|by|for|with)\b/.test(text);
+  if (!everOrCurrently && !/\b(?:have|had) you\b.{0,30}\b(?:employed|worked)\b.{0,60}\bbefore\b|\b(?:previously|ever) (?:been )?(?:employed|worked) (?:by|at|for|with)\b|\bformer employee\b|\bare you (?:a )?current\b.{0,30}\bemployee\b/.test(text)) {
     return undefined;
   }
-  const company = normalized(request.careerJob.job.company ?? "");
+  // "Gusto, Inc." is asked about as "Gusto": drop punctuation and the legal suffix.
+  const company = normalized(request.careerJob.job.company ?? "").replace(/[.,]/g, " ")
+    .replace(/\b(?:inc|llc|ltd|corp|corporation|co|plc|gmbh)\b/g, " ").replace(/\s+/g, " ").trim();
   // Forms often shorten the name ("a current Stack employee" for Stack AV).
   const firstWord = company.split(" ")[0] ?? "";
   if (!company || !text.includes(company) && !(firstWord.length >= 4 && text.includes(firstWord)) && !/\b(?:us|this company|our company)\b/.test(text)) return undefined;
@@ -876,7 +886,7 @@ export function classifyLeverApplicationField(
   if (field.type === "file" && hasPhrase(text, /drop\s+or\s+select|\.docx?|\.pdf/)) return "resume_upload";
   if (field.type === "file" && hasPhrase(text, /attachment|file upload|upload (?:a )?file|upload (?:a )?document/)) return "resume_upload";
   const genderOptions = field.options?.map((option) => normalized(option.label)).filter(Boolean) ?? [];
-  if (hasPhrase(text, /demographic|\bgender\b|transgender|sexual orientation|sexuality|race|ethnicity|hispanic|latino|veteran|disability|voluntary self/) ||
+  if (hasPhrase(text, /demographic|\bgender\b|transgender|sexual orientation|sexuality|race|ethnicity|hispanic|latino|veteran|disability|voluntary self|first[- ]generation/) ||
     (genderOptions.includes("male") && genderOptions.includes("female") && genderOptions.some((option) => option === "non-binary" || option === "nonbinary"))) return "demographic";
   if (hasPhrase(text, /how did you hear|how did you learn|where did you hear|how did you discover|(?:job|role|opportunity) source|source of (?:this )?(?:job|role|opportunity)/)) return "unknown";
   if (smsConsent) return "legal_attestation";
@@ -1320,7 +1330,8 @@ function groundedWorkAuthorizationValue(
   // "in this location" / "in this country" means the posting's location. The
   // agent only applies to postings open where the candidate may work, so it
   // names no other country.
-  const workCountry = named && /^(?:this|that|the) (?:location|country|role'?s? location|job'?s? location)$/.test(named) ? undefined : named;
+  // "in the country where you are applying" (Gusto, 2026-11-10) means the same.
+  const workCountry = named && /^(?:(?:this|that|the) (?:location|country|role'?s? location|job'?s? location)|country (?:where|in which)\b.*)(?: (?:where|in which)\b.*)?$/.test(named) ? undefined : named;
   if (workCountry && !profile.workAuthorization.countries.some((country) =>
     isUnitedStates(workCountry) ? isUnitedStates(country) : normalized(country) === normalized(workCountry))) {
     return undefined;
@@ -1880,7 +1891,8 @@ function optionValue(
       smsAliases.some((alias) => labels.includes(alias)) ||
       // Ashby: "No - I do not consent to receiving text messages".
       (smsAliases.length > 0 && labels.some((label) => /^no\b/.test(label) && /\bdo not consent\b/.test(label))) ||
-      (demographicAliases.includes("no") && labels.some((label) => /not\s+(?:a\s+)?protected\s+veteran|do\s+not\s+have\s+(?:a\s+)?disability/.test(label))) ||
+      // "No, I am not a veteran" (Gusto) as well as "...not a protected veteran".
+      (demographicAliases.includes("no") && labels.some((label) => /not\s+(?:a\s+)?(?:protected\s+)?veteran|do\s+not\s+have\s+(?:a\s+)?disability/.test(label))) ||
       // Greenhouse's phone-country control appends the dialing code to the
       // grounded country name (for example, "United States +1"). Preserve
       // exact option selection while accepting that display form.
