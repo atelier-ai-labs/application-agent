@@ -3595,7 +3595,10 @@ export class CareerAgentService {
       blocker.unit !== "submission" ||
       blocker.kind !== "subjective_answer" ||
       questionProvenanceForBlocker(blocker) !== "ATS_FORM" ||
-      !job.applicationId
+      !job.applicationId ||
+      // A human check ("Which of the following is not a primary color?") is
+      // the candidate's to answer; the model got it wrong anyway.
+      /^\s*human verification\b|\bare you (?:a )?human\b|\bnot a robot\b/i.test(blocker.question)
     )
       return undefined;
     try {

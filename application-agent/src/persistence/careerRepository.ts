@@ -92,8 +92,16 @@ function boundedHistory(value: unknown): unknown {
   return {
     ...withHistory,
     // A malformed attention event must not hide an otherwise valid campaign.
-    attentionEvents: value.attentionEvents.filter(isPersistedAttentionEvent).slice(-ATTENTION_EVENT_HISTORY_LIMIT),
+    // A record whose only problem is its draft keeps the question: dropping it
+    // silently made the agent ask again every minute (Latitude, 2026-11-10).
+    attentionEvents: value.attentionEvents.map(withoutInvalidDraft).filter(isPersistedAttentionEvent).slice(-ATTENTION_EVENT_HISTORY_LIMIT),
   };
+}
+
+function withoutInvalidDraft(value: unknown): unknown {
+  if (!isRecord(value) || value.draft === undefined || isPersistedAttentionEvent(value)) return value;
+  const { draft: _draft, ...rest } = value;
+  return rest;
 }
 
 function boundedCampaign(campaign: Campaign): Campaign {

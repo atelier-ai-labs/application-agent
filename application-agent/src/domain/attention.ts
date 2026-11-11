@@ -550,7 +550,10 @@ export function attentionEventForCareerBlocker(input: {
   if (!question || !descriptorSignature || !blocker.context.applicationId) return undefined;
 
   const section = sectionFor(blocker);
-  const draft = safeAttentionDraft(input.draft);
+  // A typed draft only fits a free-text question. Latitude's multiple-choice
+  // human check got one, the saved record failed validation and was dropped on
+  // every read, so the question was posted again every minute (2026-11-10).
+  const draft = question.kind === "free_text" ? safeAttentionDraft(input.draft) : undefined;
   const event: AttentionEvent = {
     id: input.createId("attention"),
     type: "needs_input",
