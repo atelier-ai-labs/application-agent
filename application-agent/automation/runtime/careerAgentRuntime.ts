@@ -70,7 +70,7 @@ import { createGoogleOAuthAccessTokenProvider, gmailSecurityCodesEnabled, resolv
 import { createOllamaAnswerBankMatcher } from "../answerBank/ollamaAnswerBankMatcher";
 import { isUsableResumeArtifact } from "../resume/resumeArtifact";
 import { normalizeJobSearchIntent, type JobSearchIntent } from "../../src/domain/searchIntent";
-import { DEFAULT_CAREER_AGENT_STATE_FILE, FileKeyValueStorage } from "./fileKeyValueStorage";
+import { DEFAULT_CAREER_AGENT_STATE_DB, openStateStorage } from "./stateStorage";
 import { assertDuplicateRiskRetryAuthorization, assertSubmitPreparedApplicationPreflight } from "./submitPreparedApplicationPreflight";
 import { authorizeThenSubmit } from "./submitPreparedApplicationFlow";
 import { attentionDescriptorSignature, type AttentionEvent, type AttentionResponse, type NotificationAdapter, type PersistedAttentionEvent, type QueueHandoffNotice } from "../../src/domain/attention";
@@ -500,9 +500,9 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
     this.receiptInbox = options.receiptInbox;
     this.receiptPollIntervalMs = positiveInteger(options.receiptPollIntervalMs, 3 * 60_000, "Career Agent receipt poll interval");
     this.confirmQueueRow = options.confirmQueueRow;
-    const storage = options.stateStorage ?? new FileKeyValueStorage(options.stateFilePath ?? DEFAULT_CAREER_AGENT_STATE_FILE);
+    const storage = options.stateStorage ?? openStateStorage(options.stateFilePath ?? DEFAULT_CAREER_AGENT_STATE_DB);
     this.stateStorage = storage;
-    this.stateFilePath = storage instanceof FileKeyValueStorage ? storage.filePath : options.stateFilePath;
+    this.stateFilePath = "filePath" in storage && typeof (storage as { filePath?: unknown }).filePath === "string" ? (storage as { filePath: string }).filePath : options.stateFilePath;
     this.careerRepository = options.careerRepository ?? new LocalStorageCareerRepository(storage);
     this.applicationRepository = options.applicationRepository ?? new LocalStorageApplicationRepository(storage);
     this.notification = options.notification ?? (options.notificationAdapter ? { adapter: options.notificationAdapter } : undefined);
@@ -1228,8 +1228,8 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
   }
   const configuredExecutor = browserEnabled ? createConfiguredBrowserExecutor(executionConfig!) : new UnavailableApplicationExecutor();
   const applicationAnswerDraftGenerator = createConfiguredApplicationAnswerDraftGenerator(env);
-  const stateFilePath = resolve(valueOrDefault(env.ATELIER_CAREER_AGENT_STATE_FILE, DEFAULT_CAREER_AGENT_STATE_FILE));
-  const sharedStorage = new FileKeyValueStorage(stateFilePath);
+  const stateFilePath = resolve(valueOrDefault(env.ATELIER_CAREER_AGENT_STATE_FILE, DEFAULT_CAREER_AGENT_STATE_DB));
+  const sharedStorage = openStateStorage(stateFilePath);
   const sharedCareerRepository = new LocalStorageCareerRepository(sharedStorage);
   const sharedApplicationRepository = new LocalStorageApplicationRepository(sharedStorage);
   // The long-lived Slack listener and the browser execution host may be

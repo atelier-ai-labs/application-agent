@@ -1,3 +1,6 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { afterEach } from "vitest";
@@ -14,6 +17,13 @@ for (const key of ["NO_PROXY", "no_proxy"] as const) {
     const loopback = "127.0.0.1,localhost";
     process.env[key] = current ? `${current},${loopback}` : loopback;
   }
+}
+
+// Tests must never read or write the real agent state in .local/career-agent.
+// Code that opens state without naming a file (the browser host's submission
+// fences) uses this temporary database instead (2026-11-10).
+if (!process.env.ATELIER_CAREER_AGENT_STATE_FILE) {
+  process.env.ATELIER_CAREER_AGENT_STATE_FILE = join(mkdtempSync(join(tmpdir(), "career-agent-test-state-")), "state.db");
 }
 
 afterEach(() => cleanup());

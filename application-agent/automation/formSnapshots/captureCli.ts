@@ -1,7 +1,7 @@
 import { loadEnv } from "vite";
 import { PlaywrightLeverBrowserSessionFactory } from "../playwrightLeverBrowserSession";
 import { LocalStorageCareerRepository } from "../../src/persistence/careerRepository";
-import { FileKeyValueStorage } from "../runtime/fileKeyValueStorage";
+import { openStateStorage } from "../runtime/stateStorage";
 import { classifyJobUrl } from "../../src/domain/jobUrlClassifier";
 import { DEFAULT_FORM_SNAPSHOT_DIR, FormSnapshotStore, snapshotField } from "./formSnapshot";
 
@@ -36,7 +36,7 @@ export async function runCaptureCli(argv: readonly string[] = process.argv.slice
   const url = flag(argv, "--url");
   if (url) targets.push({ url: applicationPage(url), applicationId: `capture-${Date.now()}`, ...(flag(argv, "--company") ? { company: flag(argv, "--company") } : {}), ...(flag(argv, "--role") ? { role: flag(argv, "--role") } : {}) });
   if (argv.includes("--from-history")) {
-    const jobs = new LocalStorageCareerRepository(new FileKeyValueStorage()).listJobs().filter((job) => job.applicationId);
+    const jobs = new LocalStorageCareerRepository(openStateStorage()).listJobs().filter((job) => job.applicationId);
     for (const job of jobs) {
       const source = job.destinationResolution?.destinationUrl ?? job.job.applicationUrl ?? job.job.sourceUrl;
       if (!source) continue;

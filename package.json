@@ -35,7 +35,8 @@
     "career-agent:replay": "vite-node application-agent/automation/formSnapshots/replayCli.ts",
     "career-agent:answers": "vite-node application-agent/automation/answerBankCli.ts",
     "career-agent:questionnaire": "vite-node application-agent/automation/questionnaireCli.ts",
-    "career-agent:history": "vite-node application-agent/automation/historyRun.ts"
+    "career-agent:history": "vite-node application-agent/automation/historyRun.ts",
+    "career-agent:migrate-state": "vite-node application-agent/automation/runtime/migrateStateCli.ts"
   },
   "dependencies": {
     "react": "^19.1.1",

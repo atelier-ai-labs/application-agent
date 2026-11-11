@@ -136,6 +136,12 @@ export class FileKeyValueStorage implements KeyValueStorage {
     this.update((next) => next.delete(key));
   }
 
+  /** Every key and value (for the history report and the one-time SQLite import). */
+  entries(): [string, string][] {
+    try { this.refreshIfChanged(); } catch { /* keep the cached values */ }
+    return [...this.values.entries()];
+  }
+
   reload(): void {
     const version = this.fileVersion();
     this.values = new Map(Object.entries(readEnvelope(this.filePath).values));

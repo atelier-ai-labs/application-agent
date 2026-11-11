@@ -11,7 +11,7 @@ import { INBOX_LOG_FILE } from "./inboxMonitor";
  * never rendered; the report shows questions and counts only.
  */
 export const HISTORY_REPORT_FILE = ".local/career-agent/history.html";
-const STATE_FILE = ".local/career-agent/state.json";
+import { DEFAULT_CAREER_AGENT_STATE_DB, openStateStorage } from "./runtime/stateStorage";
 
 type Tone = "ok" | "warn" | "bad" | "info";
 
@@ -330,8 +330,7 @@ function readJsonLines<T>(file: string): T[] {
 
 /** Reads local state and writes the report; used by the CLI and the daily run. */
 export function writeApplicationHistoryReport(env: Record<string, string | undefined> = process.env): { path: string; report: HistoryReport } {
-  const statePath = resolve(env.ATELIER_CAREER_AGENT_STATE_FILE?.trim() || STATE_FILE);
-  const values = (JSON.parse(readFileSync(statePath, "utf8")) as { values: Record<string, string> }).values;
+  const values = Object.fromEntries(openStateStorage(env.ATELIER_CAREER_AGENT_STATE_FILE?.trim() || DEFAULT_CAREER_AGENT_STATE_DB).entries());
   const report = buildApplicationHistory(values, readJsonLines<InboxLogEntry>(INBOX_LOG_FILE), readJsonLines<DailyRunRecord>(DAILY_RUNS_FILE));
   const path = resolve(HISTORY_REPORT_FILE);
   mkdirSync(dirname(path), { recursive: true });

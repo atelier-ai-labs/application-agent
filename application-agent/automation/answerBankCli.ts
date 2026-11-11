@@ -5,7 +5,7 @@ import {
   STANDING_TOPICS, answerBankKey, answerRiskTier, isBankableQuestion, questionFromBlocker, withRecordedAnswer, withStandingAnswer,
   type AnswerBankEntry, type AnswerRiskTier, type StandingTopicId,
 } from "../src/domain/answerBank";
-import { FileKeyValueStorage } from "./runtime/fileKeyValueStorage";
+import { openStateStorage } from "./runtime/stateStorage";
 import { FileAnswerBankStore } from "./answerBank/fileAnswerBankStore";
 
 /**
@@ -78,7 +78,7 @@ export function runAnswerBankCli(argv = process.argv.slice(2), env = process.env
     store.save(entries);
   }
   if (argv.includes("--backfill")) {
-    const repository = new LocalStorageCareerRepository(new FileKeyValueStorage());
+    const repository = new LocalStorageCareerRepository(openStateStorage());
     const { entries, added } = backfillFromHistory(store.entries(), repository.listJobs());
     if (argv.includes("--dry-run")) {
       console.log(`Dry run: would add ${added} answer${added === 1 ? "" : "s"}.`);

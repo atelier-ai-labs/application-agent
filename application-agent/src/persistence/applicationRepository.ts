@@ -1,6 +1,6 @@
 import type { Application, ApplicationEvent } from "../domain/types";
 import { isApplication, isApplicationEvent, isRecord } from "../domain/validation";
-import { browserStorage, type KeyValueStorage } from "./storage";
+import { browserStorage, updateStoredArray, type KeyValueStorage } from "./storage";
 
 export const APPLICATIONS_STORAGE_KEY = "atelier.application-agent.applications.v0";
 export const EVENTS_STORAGE_KEY = "atelier.application-agent.events.v0";
@@ -73,14 +73,14 @@ export class LocalStorageApplicationRepository implements ApplicationRepository 
   }
 
   saveApplication(application: Application): void {
-    const applications = [...this.listApplications()];
-    const index = applications.findIndex((candidate) => candidate.id === application.id);
-    if (index === -1) {
-      applications.push(clone(application));
-    } else {
-      applications[index] = clone(application);
-    }
-    this.storage.setItem(APPLICATIONS_STORAGE_KEY, JSON.stringify(applications));
+    const saved = clone(application);
+    updateStoredArray(this.storage, APPLICATIONS_STORAGE_KEY, (items) => {
+      const applications = items.filter(isApplication);
+      const index = applications.findIndex((candidate) => candidate.id === saved.id);
+      if (index === -1) applications.push(saved);
+      else applications[index] = saved;
+      return applications;
+    });
   }
 
   listEvents(applicationId: string): readonly ApplicationEvent[] {
@@ -90,8 +90,8 @@ export class LocalStorageApplicationRepository implements ApplicationRepository 
   }
 
   appendEvent(event: ApplicationEvent): void {
-    const events = [...loadArray(this.storage, EVENTS_STORAGE_KEY).filter(isApplicationEvent), clone(event)];
-    this.storage.setItem(EVENTS_STORAGE_KEY, JSON.stringify(events));
+    const saved = clone(event);
+    updateStoredArray(this.storage, EVENTS_STORAGE_KEY, (items) => [...items.filter(isApplicationEvent), saved]);
   }
 }
 

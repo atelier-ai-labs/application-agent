@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { loadEnv } from "vite";
 import { loadBackgroundCandidateProfile } from "../runtime/careerAgentRuntime";
 import { LocalStorageCareerRepository } from "../../src/persistence/careerRepository";
-import { FileKeyValueStorage } from "../runtime/fileKeyValueStorage";
+import { openStateStorage } from "../runtime/stateStorage";
 import { FileAnswerBankStore } from "../answerBank/fileAnswerBankStore";
 import { createOllamaAnswerBankMatcher } from "../answerBank/ollamaAnswerBankMatcher";
 import { DEFAULT_FORM_SNAPSHOT_DIR, FormSnapshotStore, type FormSnapshot } from "./formSnapshot";
@@ -15,7 +15,7 @@ export const DEFAULT_REPLAY_BASELINE = ".local/career-agent/replay-baseline.json
 /** Company and role for snapshots taken before they were recorded, from the agent's own job records. */
 function withIdentity(snapshots: readonly FormSnapshot[]): FormSnapshot[] {
   let jobs: ReturnType<LocalStorageCareerRepository["listJobs"]> = [];
-  try { jobs = new LocalStorageCareerRepository(new FileKeyValueStorage()).listJobs(); } catch { /* no state yet */ }
+  try { jobs = new LocalStorageCareerRepository(openStateStorage()).listJobs(); } catch { /* no state yet */ }
   return snapshots.map((snapshot) => {
     if (snapshot.company && snapshot.role) return snapshot;
     const job = jobs.find((candidate) => candidate.applicationId === snapshot.applicationId) ??
@@ -33,7 +33,7 @@ export async function runReplayCli(argv: readonly string[] = process.argv.slice(
   const env = process.env as Record<string, string | undefined>;
   const profile = loadBackgroundCandidateProfile(env);
   let jobs: ReturnType<LocalStorageCareerRepository["listJobs"]> = [];
-  try { jobs = new LocalStorageCareerRepository(new FileKeyValueStorage()).listJobs(); } catch { /* no state yet */ }
+  try { jobs = new LocalStorageCareerRepository(openStateStorage()).listJobs(); } catch { /* no state yet */ }
   const snapshots = withIdentity(new FormSnapshotStore(env.ATELIER_FORM_SNAPSHOT_DIR?.trim() || DEFAULT_FORM_SNAPSHOT_DIR).list());
   if (snapshots.length === 0) {
     console.log("No form snapshots yet. They are saved as the agent opens real forms, or run career-agent:capture.");
