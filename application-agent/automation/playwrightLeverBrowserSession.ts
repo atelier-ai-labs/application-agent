@@ -2337,7 +2337,19 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       };
     }
 
-    if (passwordCount > 0 || /\b(?:sign in|log in|login|multi-factor|mfa|verification code)\b/.test(lowerBody)) {
+    // A job description can say "login" or "MFA" (Affirm's CIAM role, about
+    // building login and MFA, 2026-11-10). With the application form showing
+    // and no password box, those words are the posting, not a login wall. An
+    // emailed verification code still stops here either way.
+    const applicationFormShowing = passwordCount === 0 && await this.page.locator(
+      'input[autocomplete="given-name"], input[name*="first_name" i], input[id*="first_name" i], input[name*="firstname" i], input[id*="firstname" i]',
+    ).evaluateAll((elements) => elements.some((element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    })).catch(() => false);
+    const loginWords = !applicationFormShowing && /\b(?:sign in|log in|login|multi-factor|mfa)\b/.test(lowerBody);
+    if (passwordCount > 0 || loginWords || /\bverification code\b/.test(lowerBody)) {
       return {
         kind: "external_login",
         question: "Authenticate the application session in the browser",
