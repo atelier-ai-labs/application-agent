@@ -22,6 +22,7 @@ describe("per-company application limit", () => {
       job("installments", "Upstart", "ready_to_submit"),
       job("old", "Upstart", "applied", "2026-08-01T00:00:00.000Z"),
       job("skipped", "Upstart", "rejected"),
+      job("stuck", "Upstart", "pursuing", "2026-09-01T00:00:00.000Z"),
     ];
     expect(companyLimitReached(job("delivery", "Upstart", "pursuing"), history, limit, now)).toEqual({ company: "Upstart", count: 3, max: 3, windowDays: 60 });
     expect(companyLimitReached(job("delivery", "Upstart", "pursuing"), history.slice(1), limit, now)).toBeUndefined();

@@ -42,7 +42,10 @@ export function companyLimitReached(
   const count = allJobs.filter((other) =>
     other.id !== job.id &&
     companyKey(other.job.company) === key &&
-    ((other.status === "applied" && Date.parse(appliedAt(other)) >= since) || IN_PROGRESS.has(other.status)),
+    // In progress counts only when active inside the window: weeks-old jobs
+    // stuck in "pursuing" must not use up a company's limit.
+    ((other.status === "applied" && Date.parse(appliedAt(other)) >= since) ||
+      (IN_PROGRESS.has(other.status) && Date.parse(other.updatedAt) >= since)),
   ).length;
   return count >= max ? { company: job.job.company, count, max, windowDays: limit.windowDays } : undefined;
 }
