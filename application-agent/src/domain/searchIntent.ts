@@ -31,6 +31,8 @@ export interface JobSearchIntent {
   maxYearsExperience?: number;
   /** Applications per company in a rolling window ({ max, windowDays, overrides }). */
   companyApplicationLimit?: import("./companyLimit").CompanyApplicationLimit;
+  /** Companies never to apply to, matched by name in any spelling ("Sparksoft" = "Sparksoft Corporation"). */
+  excludedCompanies?: readonly string[];
   breadth: SearchBreadth;
 }
 
@@ -137,6 +139,7 @@ export function normalizeJobSearchIntent(value: unknown): JobSearchIntent {
     ...(minimumSalary !== undefined ? { minimumSalary } : {}),
     ...(maxYearsExperience !== undefined ? { maxYearsExperience } : {}),
     ...(candidate.companyApplicationLimit !== undefined ? { companyApplicationLimit: normalizeCompanyLimit(candidate.companyApplicationLimit) } : {}),
+    ...(candidate.excludedCompanies !== undefined ? { excludedCompanies: cleanList(candidate.excludedCompanies, "Search intent excluded companies") } : {}),
     breadth: candidate.breadth as SearchBreadth,
   };
 
@@ -211,6 +214,7 @@ export function searchCriteriaFromJobSearchIntent(
     excludedTitleTerms: [...normalized.excludedTitleTerms],
     ...(normalized.maxYearsExperience !== undefined ? { maxYearsExperience: normalized.maxYearsExperience } : {}),
     ...(normalized.companyApplicationLimit ? { companyApplicationLimit: normalized.companyApplicationLimit } : {}),
-    excludedCompanies: [...excludedCompanies],
+    // Companies from the search settings and from the caller, in any spelling.
+    excludedCompanies: [...new Set([...(normalized.excludedCompanies ?? []), ...excludedCompanies])],
   };
 }

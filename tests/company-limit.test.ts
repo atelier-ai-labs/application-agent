@@ -39,3 +39,23 @@ describe("per-company application limit", () => {
     expect(() => normalizeJobSearchIntent({ ...intent, companyApplicationLimit: { max: 0, windowDays: 60 } })).toThrow("companyApplicationLimit");
   });
 });
+
+describe("excluded companies from the search settings", () => {
+  it("blocks any spelling at discovery and before applying", async () => {
+    const { applyHardFilters } = await import("../application-agent/src/domain/policies");
+    const { screenDiscoveredJob } = await import("../application-agent/src/domain/discoveryFilter");
+    const intent = normalizeJobSearchIntent({
+      primaryLanes: ["DevOps Engineer"], adjacentLanes: [], secondaryLanes: [], preferredSeniorities: [], excludedSeniorities: [],
+      excludedTitleTerms: [], locations: ["United States"], remotePreference: "remote_preferred", breadth: "balanced",
+      excludedCompanies: ["Sparksoft", "D.A. Davidson"],
+    });
+    const posting = (company: string) => ({ title: "DevOps Engineer", company, description: "Build pipelines.", location: "Remote - US", remoteStatus: "remote", employmentType: "full time", requiredSkills: [], preferredSkills: [] }) as never;
+    const criteria = searchCriteriaFromJobSearchIntent(intent);
+    for (const company of ["Sparksoft Corporation", "D.A. Davidson Companies"]) {
+      expect(screenDiscoveredJob(posting(company), intent), company).toEqual({ keep: false, reason: "company" });
+      expect(applyHardFilters(posting(company), criteria).decision, company).toBe("reject");
+    }
+    expect(screenDiscoveredJob(posting("Sparkly Labs"), intent)).toEqual({ keep: true });
+    expect(applyHardFilters(posting("Sparkly Labs"), criteria).decision).not.toBe("reject");
+  });
+});

@@ -10,6 +10,7 @@ import type {
 } from "./campaignTypes";
 import { locationAllowed } from "./discoveryFilter";
 import { requiredYearsOfExperience } from "./experienceYears";
+import { companyKey } from "./companyLimit";
 import type { FitAssessment, JobPosting, ResumeFamilyId } from "./types";
 
 export interface HardFilterResult {
@@ -131,8 +132,10 @@ export function applyHardFilters(job: JobPosting, criteria: SearchCriteria): Har
   if (isContractRole(job)) {
     return { decision: "reject", reason: "Contract, 1099, freelance, or task-based roles are excluded by candidate policy.", evidence: [`employment-type:${job.employmentType ?? "unspecified"}`] };
   }
-  const company = normalized(job.company);
-  const excludedCompany = criteria.excludedCompanies.find((candidate) => company === normalized(candidate));
+  // Any spelling: "Sparksoft" excludes "Sparksoft Corporation" (2026-11-11).
+  const company = companyKey(job.company);
+  const excludedCompany = criteria.excludedCompanies.find((candidate) => company === companyKey(candidate) ||
+    (companyKey(candidate).length >= 4 && company.startsWith(`${companyKey(candidate)} `)));
   if (excludedCompany) {
     return {
       decision: "reject",

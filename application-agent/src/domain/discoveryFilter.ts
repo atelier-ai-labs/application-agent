@@ -1,6 +1,7 @@
 import type { JobSearchIntent } from "./searchIntent";
 import type { JobPosting } from "./types";
 import { requiredYearsOfExperience } from "./experienceYears";
+import { companyKey } from "./companyLimit";
 
 /**
  * Decides whether a discovered posting belongs in the user's tracker, using
@@ -8,7 +9,7 @@ import { requiredYearsOfExperience } from "./experienceYears";
  * employment type, and locations. Every decision carries a short reason so a
  * dry run can explain what was dropped.
  */
-export type DiscoveryScreen = { keep: true } | { keep: false; reason: "seniority" | "employment" | "role" | "location" | "experience" };
+export type DiscoveryScreen = { keep: true } | { keep: false; reason: "seniority" | "employment" | "role" | "location" | "experience" | "company" };
 
 const ROLE_WORD = /\b(?:engineer|engineering|developer|programmer|sre|devops|architect|scientist)\b/;
 const GENERIC_LANE_WORDS = new Set([
@@ -101,7 +102,10 @@ export function locationAllowed(job: Pick<JobPosting, "location" | "remoteStatus
   return location.replace(REMOTE_WORDS, " ").replace(/[^a-z]+/g, "").length === 0;
 }
 
-export function screenDiscoveredJob(job: Pick<JobPosting, "title" | "location" | "remoteStatus" | "description" | "employmentType">, intent: JobSearchIntent): DiscoveryScreen {
+export function screenDiscoveredJob(job: Pick<JobPosting, "title" | "location" | "remoteStatus" | "description" | "employmentType"> & { company?: string }, intent: JobSearchIntent): DiscoveryScreen {
+  const company = companyKey(job.company);
+  if (company && (intent.excludedCompanies ?? []).some((name) => company === companyKey(name) ||
+    (companyKey(name).length >= 4 && company.startsWith(`${companyKey(name)} `)))) return { keep: false, reason: "company" };
   const title = words(job.title);
   const excluded = [...intent.excludedTitleTerms, ...intent.excludedSeniorities, "sr", "staff", "intern", "internship", "head of", "manager"].map(words);
   if (excluded.some((term) => term && hasPhrase(title, term))) {
