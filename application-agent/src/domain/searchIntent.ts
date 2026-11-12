@@ -29,6 +29,8 @@ export interface JobSearchIntent {
   minimumSalary?: number;
   /** Skip postings whose stated minimum experience is more than this many years. */
   maxYearsExperience?: number;
+  /** Applications per company in a rolling window ({ max, windowDays, overrides }). */
+  companyApplicationLimit?: import("./companyLimit").CompanyApplicationLimit;
   breadth: SearchBreadth;
 }
 
@@ -86,6 +88,23 @@ function optionalSalary(value: unknown): number | undefined {
   return value;
 }
 
+export function isCompanyApplicationLimit(value: unknown): value is import("./companyLimit").CompanyApplicationLimit {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  const whole = (n: unknown, min: number) => typeof n === "number" && Number.isInteger(n) && n >= min && n <= 365;
+  const overrides = candidate.overrides;
+  return whole(candidate.max, 1) && whole(candidate.windowDays, 1) &&
+    (overrides === undefined || (typeof overrides === "object" && overrides !== null && !Array.isArray(overrides) &&
+      Object.keys(overrides).length <= 50 && Object.values(overrides as Record<string, unknown>).every((n) => whole(n, 1))));
+}
+
+function normalizeCompanyLimit(value: unknown): import("./companyLimit").CompanyApplicationLimit {
+  if (!isCompanyApplicationLimit(value)) {
+    throw new Error("Search intent companyApplicationLimit must be { max, windowDays, overrides? } with whole numbers from 1 to 365.");
+  }
+  return { max: value.max, windowDays: value.windowDays, ...(value.overrides ? { overrides: { ...value.overrides } } : {}) };
+}
+
 /** Normalize one user-authored intent without adding facts or provider syntax. */
 export function normalizeJobSearchIntent(value: unknown): JobSearchIntent {
   if (!value || typeof value !== "object") throw new Error("Search intent must be an object.");
@@ -117,6 +136,7 @@ export function normalizeJobSearchIntent(value: unknown): JobSearchIntent {
       : cleanList(candidate.employmentTypes, "Search intent employment types"),
     ...(minimumSalary !== undefined ? { minimumSalary } : {}),
     ...(maxYearsExperience !== undefined ? { maxYearsExperience } : {}),
+    ...(candidate.companyApplicationLimit !== undefined ? { companyApplicationLimit: normalizeCompanyLimit(candidate.companyApplicationLimit) } : {}),
     breadth: candidate.breadth as SearchBreadth,
   };
 
@@ -190,6 +210,7 @@ export function searchCriteriaFromJobSearchIntent(
     excludedSeniorities: [...normalized.excludedSeniorities],
     excludedTitleTerms: [...normalized.excludedTitleTerms],
     ...(normalized.maxYearsExperience !== undefined ? { maxYearsExperience: normalized.maxYearsExperience } : {}),
+    ...(normalized.companyApplicationLimit ? { companyApplicationLimit: normalized.companyApplicationLimit } : {}),
     excludedCompanies: [...excludedCompanies],
   };
 }

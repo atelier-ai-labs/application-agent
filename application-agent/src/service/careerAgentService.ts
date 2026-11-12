@@ -92,6 +92,7 @@ import type { ApplicationExecutor, ExecutionInspection } from "../domain/executo
 import { UnavailableApplicationExecutor, type ApplicationExecutionRequest, type ApplicationExecutorResult } from "../domain/executor";
 import { JobScout, canonicalJobUrl, jobDedupeKeys, jobKeysMatch, type ScoutedJob } from "../domain/scout";
 import { normalizeJobSearchIntent, searchCriteriaFromJobSearchIntent } from "../domain/searchIntent";
+import { companyLimitReached } from "../domain/companyLimit";
 import {
   UnavailableJobTracker,
   isJobTrackerResult,
@@ -1811,6 +1812,7 @@ export class CareerAgentService {
               }
             : {}),
           ...(input.searchCriteria?.maxYearsExperience !== undefined ? { maxYearsExperience: input.searchCriteria.maxYearsExperience } : {}),
+          ...(input.searchCriteria?.companyApplicationLimit ? { companyApplicationLimit: input.searchCriteria.companyApplicationLimit } : {}),
           ...(input.searchCriteria?.excludedCompanies
             ? {
                 excludedCompanies: cleanList(input.searchCriteria.excludedCompanies),
@@ -4631,6 +4633,15 @@ export class CareerAgentService {
       this.appendEvent(campaign.id, "job.held", careerEventMetadata(careerJob, hardFilter));
       this.appendEvent(campaign.id, "campaign.review_needed", careerEventMetadata(careerJob, hardFilter));
       return { held: true };
+    }
+    // Upstart allows 3 applications per 60 days and declined the 4th (2026-11-11).
+    const companyLimit = campaign.searchCriteria.companyApplicationLimit;
+    const overLimit = companyLimit ? companyLimitReached(careerJob, this.careerRepository.listJobs(), companyLimit, new Date(this.now())) : undefined;
+    if (overLimit) {
+      const reason = `Already ${overLimit.count} application${overLimit.count === 1 ? "" : "s"} to ${overLimit.company} in the last ${overLimit.windowDays} days or in progress (limit ${overLimit.max}).`;
+      careerJob = this.decideJob(careerJob, "rejected", reason);
+      this.appendEvent(campaign.id, "job.rejected", careerEventMetadata(careerJob, { decision: "reject", reason, evidence: [`company-limit:${overLimit.count}/${overLimit.max}`] }));
+      return { rejected: true };
     }
 
     let fit: FitAssessment;

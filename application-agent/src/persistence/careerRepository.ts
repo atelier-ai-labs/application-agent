@@ -1,3 +1,4 @@
+import { isCompanyApplicationLimit } from "../domain/searchIntent";
 import type {
   ApplicationPolicy,
   CareerBlocker,
@@ -259,6 +260,7 @@ function isSearchCriteria(value: unknown): value is SearchCriteria {
     isStringArray(value.excludedSeniorities) &&
     (value.excludedTitleTerms === undefined || isStringArray(value.excludedTitleTerms)) &&
     (value.maxYearsExperience === undefined || (typeof value.maxYearsExperience === "number" && Number.isInteger(value.maxYearsExperience) && value.maxYearsExperience >= 0)) &&
+    (value.companyApplicationLimit === undefined || isCompanyApplicationLimit(value.companyApplicationLimit)) &&
     isStringArray(value.excludedCompanies)
   );
 }

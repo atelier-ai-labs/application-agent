@@ -111,6 +111,8 @@ export interface SearchCriteria {
   excludedTitleTerms?: readonly string[];
   /** Skip postings whose stated minimum experience is more than this many years. */
   maxYearsExperience?: number;
+  /** Applications per company in a rolling window, counting ones still in progress. */
+  companyApplicationLimit?: import("./companyLimit").CompanyApplicationLimit;
   excludedCompanies: readonly string[];
 }
 

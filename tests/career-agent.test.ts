@@ -566,6 +566,28 @@ describe("Autonomous Career Agent domain seams", () => {
     expect(service.listJobs(campaign.id).some((job) => job.status === "held" && job.decisionReason?.includes("cap"))).toBe(true);
   });
 
+  it("skips a company's role once its application limit is reached, counting ones in progress", async () => {
+    // Upstart (2026-11-11): 3 per 60 days; three roles started the same evening and the 4th was declined.
+    const { service } = makeService({
+      listings: [
+        listing("Example Cloud Systems, Inc.", "Cloud Platform Engineer", ["AWS"], "limit-1"),
+        listing("Example Cloud Systems", "Platform Engineer II", ["AWS"], "limit-2"),
+        listing("Example Product Studio", "Cloud Platform Engineer", ["AWS"], "limit-3"),
+      ],
+    });
+    const campaign = service.createCampaign(campaignInput({
+      searchCriteria: { roleLanes: ["engineer"], remoteOnly: true, employmentTypes: ["full time"], companyApplicationLimit: { max: 1, windowDays: 60 } },
+    }));
+    service.activateCampaign(campaign.id);
+    await service.runCampaign(campaign.id);
+    const jobs = service.listJobs(campaign.id);
+    const limited = jobs.filter((job) => job.decisionReason?.includes("limit 1"));
+    expect(limited.map((job) => job.job.company)).toEqual(["Example Cloud Systems"]);
+    expect(limited[0]!.status).toBe("rejected");
+    expect(limited[0]!.decisionReason).toBe("Already 1 application to Example Cloud Systems in the last 60 days or in progress (limit 1).");
+    expect(jobs.find((job) => job.job.company === "Example Product Studio")?.status).not.toBe("rejected");
+  });
+
   it("skips one prepared application through the service without submission or attention residue", async () => {
     const { service, applicationService, careerRepository } = makeService({ executor: new UnavailableApplicationExecutor() });
     const campaign = service.createCampaign(campaignInput({
