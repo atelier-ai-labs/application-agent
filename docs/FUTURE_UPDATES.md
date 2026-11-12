@@ -31,7 +31,7 @@ These are ideas we've parked for later. None of them are scheduled; Nate picks w
 - **Redo command.** A Slack command to restart an application from scratch.
 - **Standing no-range salary answer.** An answer for postings that list no pay range, so the agent doesn't have to ask.
 - **Title-drift check.** Flag when the posting's title differs from the tracker row's, e.g. "AI Engineer" vs "Lead AI Engineer" at Reflow.
-- **Per-company limits.** Space out applications to many roles at one company. Left as is on 2026-11-06.
+- **Done 2026-11-11: per-company limits.** `companyApplicationLimit` in search intent (Nate: 3 per 60 days, Upstart listed). Possible follow-up: when several roles at one company arrive together, apply to the best-fitting ones first instead of queue order.
 - **Higher daily throughput.** Raise the limit from 3 to 5, or add a midday run.
 - **Screenshot (vision) fallback.** For Workday or custom sites the form reader can't parse. Declined for now (2026-11-07).
 

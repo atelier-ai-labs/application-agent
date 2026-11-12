@@ -29,6 +29,8 @@ const REJECTION = [
   /\bregret to inform\b|\bregrettably\b.{0,80}\b(?:not|others?|another)\b/,
   /\bother candidates whose (?:experience|qualifications|background)\b/,
   /\bunable to (?:move forward|offer you)\b/,
+  // Upstart (2026-11-11): "you have reached that limit, so we will not be able to move forward with your most recent application".
+  /\b(?:will|would) not be able to (?:move forward|proceed|continue) with your\b/,
   /\b(?:decided|chosen|elected) not to (?:proceed|move forward|continue) with your (?:candidacy|application)\b/,
   /\bdecided to (?:pursue|go with) other\b/,
 ];

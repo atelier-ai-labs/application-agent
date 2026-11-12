@@ -83,6 +83,15 @@ listener for about a minute until `contract-to-hire` was dropped ("contract" alr
   deleted parents with his replies leave "This message was deleted".
 - e7e444e: essay filler filter catches every form of "align"/"resonate".
 
+## 2026-11-11
+
+- Upstart declined Software Engineer II, Delivery: it allows **3 applications per person per 60 days**
+  and that was the 4th (DevOps Cloud Platform was earlier). Sheet row 82 set to Rejected with a note.
+- ecfd173: `companyApplicationLimit` in search intent (`{ max: 3, windowDays: 60, overrides: { Upstart: 3 } }`).
+  Before applying, a company's count is applications in the window plus ones still in progress; at
+  the limit the job is rejected with the reason. Roles are still taken in queue order, not best fit.
+- The inbox classifier now reads "will not be able to move forward with your…" as a rejection.
+
 ## Known gaps / next
 
 - Done 11-10 late (bac524c): "select all that apply" groups are one question with the box labels as
