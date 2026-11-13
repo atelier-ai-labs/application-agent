@@ -1369,9 +1369,17 @@ export class CareerAgentService {
    * applications never flood the channel. Returns how many jobs were posted.
    */
   async publishUnaskedAttention(recentSince: string): Promise<number> {
+    // Close questions whose job has moved on (now ready to submit, applied or
+    // skipped), so a leftover message with live buttons doesn't linger.
+    for (const campaign of this.careerRepository.listCampaigns()) {
+      if (campaign.status === "active") await this.reconcileStaleAttentionEvents(campaign.id).catch(() => undefined);
+    }
     let posted = 0;
     for (const job of this.careerRepository.listJobs()) {
       if (job.status !== "needs_input" || job.updatedAt < recentSince) continue;
+      // While the browser is still filling in an answer, nothing is unasked:
+      // re-posting mid-run duplicated a question just answered (Samsara, 2026-11-12).
+      if (job.execution?.mode === "real_local" && ["starting", "inspecting", "executing", "resuming"].includes(job.execution.status ?? "")) continue;
       const campaign = this.getCampaign(job.campaignId);
       if (campaign.status !== "active") continue;
       if ((campaign.attentionEvents ?? []).some((event) => event.jobId === job.id && event.status === "open")) continue;
@@ -3821,7 +3829,10 @@ export class CareerAgentService {
     // An answered question is not asked again while its answer is on the way
     // to the form. If the form ran after the answer and still reports the
     // same blocker, the answer did not fit, so the question is asked again.
-    const executedAt = job.execution?.updatedAt;
+    // Only a browser run that has finished after the answer can show the
+    // answer didn't fit; a run still in progress hasn't used it yet.
+    const runFinished = !(job.execution?.mode === "real_local" && ["starting", "inspecting", "executing", "resuming"].includes(job.execution.status ?? ""));
+    const executedAt = runFinished ? job.execution?.updatedAt : undefined;
     const previouslyResolved = new Set(
       (campaign.attentionEvents ?? [])
         .filter((event) => event.jobId === job.id && event.status === "resolved" && event.blockerId &&

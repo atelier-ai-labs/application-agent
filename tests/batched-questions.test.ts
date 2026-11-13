@@ -137,6 +137,27 @@ describe("one Slack message per application", () => {
     expect(service.listAttentionEvents(campaign.id).every((attention) => attention.status === "resolved")).toBe(true);
   });
 
+  it("doesn't re-post a question answered while the browser is still filling it in", async () => {
+    // Samsara (2026-11-12): the minute check re-posted a question during the run, so the tap looked ignored.
+    const { service, campaign, notifications, careerRepository } = setup(new FormExecutor([CLEARANCE]), async () => undefined);
+    await service.runCampaign(campaign.id);
+    const event = notifications.publishedEvents[0]!;
+    await service.resolveAttentionResponse(reply(event.id, "yes"));
+    const job = service.listJobs(campaign.id)[0]!;
+    const later = new Date(Date.parse(capturedAt) + 60_000).toISOString();
+    const reopen = (status: string) => careerRepository.saveJob({ ...service.getJob(job.id), status: "needs_input",
+      blockers: service.getJob(job.id).blockers.map((blocker) => ({ ...blocker, status: "open" as const })),
+      execution: { status, mode: "real_local", hostExecutionId: "execution-race-1", fieldsDetected: [], fieldsFilled: [], unresolvedFields: [],
+        evidence: ["submit:not-clicked"], startedAt: capturedAt, updatedAt: later } } as never);
+    reopen("resuming");
+    const before = notifications.publishedEvents.length;
+    expect(await service.publishUnaskedAttention(capturedAt)).toBe(0);
+    expect(notifications.publishedEvents.length).toBe(before);
+    // Once the run has finished and still reports the question, it is asked again.
+    reopen("waiting_for_human");
+    expect(await service.publishUnaskedAttention(capturedAt)).toBe(1);
+  });
+
   it("keeps the single-question message when only one question is open", async () => {
     const { service, campaign, notifications } = setup(new FormExecutor([QUESTIONS[1]!]));
     await service.runCampaign(campaign.id);

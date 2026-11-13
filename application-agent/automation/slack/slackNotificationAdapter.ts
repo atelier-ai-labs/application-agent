@@ -976,7 +976,10 @@ export class SlackNotificationAdapter implements NotificationAdapter {
       return;
     }
     if (payload.type === "block_actions") {
-      await this.handleInteraction(payload);
+      // A rejected tap used to vanish silently ("I click the buttons and
+      // nothing works", 2026-11-12); log the outcome and reason.
+      const result = await this.handleInteraction(payload).catch((error: unknown) => ({ status: "rejected" as const, reason: error instanceof Error ? error.message.slice(0, 120) : "error" }));
+      this.diagnosticLogger.info(`button tap: ${result.status}${"reason" in result && result.reason ? ` (${result.reason})` : ""}`);
       return;
     }
     if (payload.type === "event_callback") {
