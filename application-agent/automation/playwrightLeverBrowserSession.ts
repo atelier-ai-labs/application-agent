@@ -692,10 +692,13 @@ export function greenhouseOptionMatches(
     (optionValue !== null && normalize(optionValue) === normalizedDesired) ||
     normalizedText.startsWith(`${normalizedDesired}+`) ||
     normalizedText.startsWith(`${normalizedDesired} +`) ||
-    // Rippling dialing lists: "+1 US - United States" and committed "+1 US"
-    normalizedText.endsWith(` - ${normalizedDesired}`) ||
-    normalizedText.endsWith(`-${normalizedDesired}`) ||
-    normalizedText.includes(` - ${normalizedDesired}`) ||
+    // Rippling dialing lists: "+1 US - United States" and committed "+1 US".
+    // Only for labels that start with a dialing code: "Man" also matched
+    // "Cis-man" and Samsara's gender question committed it (2026-11-12).
+    (/^\+\d/.test(normalizedText) && (
+      normalizedText.endsWith(` - ${normalizedDesired}`) ||
+      normalizedText.endsWith(`-${normalizedDesired}`) ||
+      normalizedText.includes(` - ${normalizedDesired}`))) ||
     (
       (normalizedDesired === "united states" || normalizedDesired === "us" || normalizedDesired === "usa") &&
       /^\+\d+\s+us\b/.test(normalizedText)
@@ -1102,7 +1105,9 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
       const groundedRepresentative = locationSelection
         ? groundedLocationRepresentative(staticCandidates ?? [], value, context?.groundedLocation)
         : undefined;
-      const staticMatches = groundedRepresentative ? [groundedRepresentative] : staticCandidates;
+      // An exact label always beats a looser match ("Man" over anything else).
+      const exactStatic = staticCandidates?.filter((option) => normalizedOptionLabel(option.label) === normalizedOptionLabel(value));
+      const staticMatches = groundedRepresentative ? [groundedRepresentative] : exactStatic?.length === 1 ? exactStatic : staticCandidates;
       if (context?.groundedLocation && staticMatches && staticMatches.length > 1) {
         const labels = staticMatches.map((option) => option.label.trim()).filter(Boolean).slice(0, 8).join("|");
         throw new Error(`The select option ${value} was not uniquely verified${labels ? `; candidates:${labels}` : ""}.`);

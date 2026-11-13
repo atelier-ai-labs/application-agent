@@ -225,6 +225,10 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(greenhouseOptionMatches("North McDonald, Pennsylvania, United States", null, "McDonald")).toBe(false);
     expect(greenhouseLocationOptionMatches("McDonald, PA, United States", "McDonald", "McDonald, Pennsylvania, United States")).toBe(true);
     expect(greenhouseLocationOptionMatches("McDonald, TN, United States", "McDonald", "McDonald, Pennsylvania, United States")).toBe(false);
+    // Samsara (2026-11-12): "Man" must not match "Cis-man"; dialing labels still match their country.
+    expect(greenhouseOptionMatches("Cis-man", "Cis-man", "Man")).toBe(false);
+    expect(greenhouseOptionMatches("Man", "Man", "Man")).toBe(true);
+    expect(greenhouseOptionMatches("+1 US - United States", null, "United States")).toBe(true);
     // Affirm (2026-11-10): "Which U.S. State or Canadian Province do you reside in?" lists bare states.
     expect(greenhouseLocationOptionMatches("Pennsylvania", "Pennsylvania", "McDonald, Pennsylvania, USA")).toBe(true);
     expect(greenhouseLocationOptionMatches("Pennsylvania", "Pennsylvania", "Pittsburgh, PA")).toBe(true);
