@@ -1199,6 +1199,19 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(noFit.fields.every((field) => field.current !== true)).toBe(true);
   });
 
+  it("answers Samsara's 'How do you identify? (gender identity)' with Man, not a crash", async () => {
+    // Samsara (2026-11-12): the run failed with "Selected option was empty".
+    const options = ["Agender", "Cis-man", "Cis-woman", "Gender Fluid", "Genderqueer", "Man", "Non-Binary", "Transgender", "Trans non-binary", "Woman", "I prefer to self describe", "I don't wish to answer"];
+    const gender = new FakeField({ id: "498", label: "How do you identify? (gender identity)*", type: "select", required: true,
+      options: options.map((label) => ({ label, value: label })),
+      questionDescriptor: { promptText: "How do you identify? (gender identity)*", sourceStrategy: "aria_labelledby", confidence: "high" } });
+    const session = new FakeSession([gender]);
+    const profile = { ...exampleCandidateProfile, approvedReusableAnswers: { ...exampleCandidateProfile.approvedReusableAnswers, gender_identity: "Male" } } satisfies CandidateProfile;
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...request(session), profile });
+    expect(result.state, JSON.stringify(result).slice(0, 400)).toBe("ready_to_submit");
+    expect(gender.current).toBe("Man");
+  });
+
   it("answers pronouns from the profile's saved pronouns", async () => {
     const pronouns = new FakeField({ id: "question_33213610003", label: "Pronouns *", type: "select", required: true,
       options: ["He/him/his", "She/her/hers", "They/them/theirs", "I prefer not to say"].map((label) => ({ label, value: label })),

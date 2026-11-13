@@ -1923,6 +1923,8 @@ function optionValue(
   const smsAliases = isSmsConsentField(field) && desired === "no"
     ? ["no", "false"]
     : [];
+  const countryList = field.classification === "location" || looksLikeInternationalDialingOptions(field.options) ||
+    /\bcountry\b/.test(fieldText(field));
   const matches = field.options.filter((candidate) => {
     const labels = [normalized(candidate.value), normalized(candidate.label)];
     const rawLabels = [candidate.value, candidate.label];
@@ -1940,8 +1942,10 @@ function optionValue(
       // exact option selection while accepting that display form.
       labels.some((label) => desiredAliases.some((alias) =>
         label.startsWith(`${alias}+`) || label.startsWith(`${alias} +`))) ||
-      // Rippling dialing lists look like "+1 US - United States".
-      rawLabels.some((label) => desiredAliases.some((alias) => optionMatchesCountryLabel(label, alias))) ||
+      // Rippling dialing lists look like "+1 US - United States". Only for
+      // country/phone lists: on Samsara's gender question "Man" also matched
+      // "Cis-man" (it ends in "-man") and the run crashed (2026-11-12).
+      (countryList && rawLabels.some((label) => desiredAliases.some((alias) => optionMatchesCountryLabel(label, alias)))) ||
       booleanAliases.some((alias) => labels.includes(alias));
   });
   // Ashby native radios frequently give every option the same value (`on`).
@@ -3079,7 +3083,13 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
             await field.setChecked(checked);
           } else if (fieldDescriptor.type === "select" || fieldDescriptor.type === "radio") {
             const selected = optionValue(fieldDescriptor, decision.value);
-            if (!selected) throw new Error("Selected option was empty.");
+            // An answer that fits no single option is a question for the
+            // candidate, not a failed run (Samsara never reached Slack).
+            if (!selected) {
+              blockers.push(formBlocker(fieldDescriptor, "The answer did not match exactly one of the form's options.", "unknown_form_field", "ATS_FORM", executorEvidenceLabel(observed.target.provider)));
+              unresolvedFields.add(fieldDescriptor.label);
+              continue;
+            }
             // A work-from state option ("Pennsylvania (PA)") is an exact listed
             // choice, not the full grounded place, so it skips location matching.
             await field.select(selected, fieldDescriptor.classification === "location" && request.profile &&
