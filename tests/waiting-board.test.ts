@@ -13,6 +13,24 @@ function job(id: string, company: string, title: string, status: string, blocker
 const askable = () => true;
 
 describe("Waiting on you board", () => {
+  it("says which questions the open message asks and where to reply, then what comes next", () => {
+    // Samsara (2026-11-12): the board listed 6 questions while its message asked 3.
+    const samsara = job("samsara", "Samsara Inc.", "Software Engineer - Data Platform", "needs_input", [
+      question("data", "Processing of Personal Data*"),
+      question("hear", "How did you hear about this opportunity?*"),
+      question("learned", "Where have you learned about Samsara? Select all that apply.*"),
+      question("ai", "AI Policy for Interviewers*"),
+      question("salary", "Do you accept the listed salary range for this position? *"),
+    ]);
+    const events = [{ jobId: "samsara", status: "open", providerDelivery: { channelId: "C1", messageTs: "300.1" }, blockerId: "data", batchBlockerIds: ["data", "hear", "salary"] }];
+    const board = waitingBoardItems([samsara], events, askable, now);
+    expect(board.items[0]).toMatchObject({ askedCount: 3 });
+    const text = renderWaitingBoard(board, now, () => "https://example.slack.com/archives/C1/p3001").text;
+    expect(text).toContain("5 questions · <https://example.slack.com/archives/C1/p3001|answer 1–3 here>");
+    expect(text).toContain("      1. Processing of Personal Data\n      2. How did you hear about this opportunity?\n      3. Do you accept the listed salary range for this position?");
+    expect(text).toContain("      _Next:_ Where have you learned about Samsara? Select all that apply. · AI Policy for Interviewers");
+  });
+
   it("shows a dropped résumé as something to attach, not a question called Résumé", () => {
     const board = waitingBoardItems([job("mission", "Mission Underwriting Services", "Applied AI Engineer", "needs_input", [question("field-1", "Résumé", { kind: "resume_missing" })])], [], askable, now);
     expect(board.items[0]!.questions).toEqual(["Résumé upload didn't stick: attach it in the window, then reply DONE"]);
