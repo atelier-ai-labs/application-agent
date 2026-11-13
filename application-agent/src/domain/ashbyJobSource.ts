@@ -1,4 +1,5 @@
 import type { JobIntakeInput } from "./types";
+import { ashbyPostingText } from "./ashbyBoardSource";
 
 /** Small fetch surface so sparse queue rows can be tested without network access. */
 export interface AshbyFetchResponse {
@@ -97,11 +98,17 @@ function extractDescription(html: string): string | undefined {
 }
 
 export function containsPostingContent(rawText: string): boolean {
-  const normalized = rawText.replace(/https?:\/\/\S+/gi, " ").trim();
-  if (/\b(?:required qualifications?|responsibilities|what you(?:'|’)ll do|nice to have)\b/i.test(normalized) &&
-    /\b(?:build|operate|own|design|develop|support)\b/i.test(normalized)) return true;
-  if (normalized.length < 120) return false;
-  return /\b(?:about (?:the )?role|what you(?:'|’)ll|responsibilit(?:y|ies)|qualifications?|requirements?|nice to have|experience|build|operate|infrastructure|skills?)\b/i.test(normalized);
+  // A queue row's title and its own notes are not the posting: "Full-Stack
+  // Software Engineer, Experience" counted as posting prose, so the live
+  // Pinecone posting (Hybrid, NYC office) was never fetched (2026-11-12).
+  const queueNote = /^\s*(?:location|resume version|priority|fit|notes?|source|found by|queue context|employment type|salary|compensation)\b/i;
+  const lines = rawText.split("\n").filter((line) => !queueNote.test(line));
+  const all = lines.join("\n").replace(/https?:\/\/\S+/gi, " ").trim();
+  if (/\b(?:required qualifications?|responsibilities|what you(?:'|’)ll do|nice to have)\b/i.test(all) &&
+    /\b(?:build|operate|own|design|develop|support)\b/i.test(all)) return true;
+  const body = lines.slice(1).join("\n").replace(/https?:\/\/\S+/gi, " ").trim();
+  if (body.length < 120) return false;
+  return /\b(?:about (?:the )?role|what you(?:'|’)ll|responsibilit(?:y|ies)|qualifications?|requirements?|nice to have|experience|build|operate|infrastructure|skills?)\b/i.test(body);
 }
 
 /**
@@ -122,6 +129,18 @@ export async function enrichAshbyJobIntake(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 10_000);
   try {
+    // The public job-board data carries the workplace type ("Hybrid") that the
+    // web page doesn't; a queue row saying "(Remote)" let Pinecone's NYC
+    // hybrid role through (2026-11-12). The page is the fallback.
+    const ref = /^https:\/\/jobs\.ashbyhq\.com\/([^/?#]+)\/([0-9a-f-]{36})/i.exec(sourceUrl);
+    if (ref) {
+      const board = await fetchImpl(`https://api.ashbyhq.com/posting-api/job-board/${encodeURIComponent(ref[1]!)}`, { signal: controller.signal })
+        .then(async (response) => (response.ok ? JSON.parse(await response.text()) as unknown : undefined)).catch(() => undefined) as { jobs?: unknown[] } | undefined;
+      const job = board?.jobs?.find((candidate) => typeof candidate === "object" && candidate !== null &&
+        String((candidate as { id?: unknown }).id).toLowerCase() === ref[2]!.toLowerCase()) as Record<string, unknown> | undefined;
+      const posting = job ? ashbyPostingText(job) : "";
+      if (posting.trim().length >= 80) return { ...input, rawText: `${posting}\n\nQueue context:\n${input.rawText.trim()}` };
+    }
     const response = await fetchImpl(sourceUrl, { signal: controller.signal });
     if (!response.ok) return input;
     const html = await response.text();

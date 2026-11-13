@@ -12,6 +12,8 @@ describe("per-company application limit", () => {
     expect(companyKey("Gusto, Inc.")).toBe(companyKey("Gusto"));
     expect(companyKey("D.A. Davidson")).toBe(companyKey("D A Davidson"));
     expect(companyKey("Upstart")).not.toBe(companyKey("Upstart Bank Holdings"));
+    expect(companyKey("Outmarket AI")).toBe(companyKey("Outmarket"));
+    expect(companyKey("Scale AI")).toBe("scale");
   });
 
   it("counts applications inside the window and ones still in progress, with company overrides", () => {

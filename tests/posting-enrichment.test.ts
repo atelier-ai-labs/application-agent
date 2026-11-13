@@ -42,6 +42,23 @@ describe("posting enrichment", () => {
     expect(called).toBe(false);
   });
 
+  it("reads an Ashby queue row's workplace type from the job board, not the row's own note", async () => {
+    // Pinecone (2026-11-12): the row said "New York City (Remote)", its title has
+    // the word "Experience", so the posting was never fetched; the job is Hybrid.
+    const row = "Full-Stack Software Engineer, Experience at Pinecone\nhttps://jobs.ashbyhq.com/pinecone/08760530-e6c3-4167-9272-923d85a2388d/application\nLocation: New York City (Remote)\nResume Version: frontend-software\nPriority: Low\nFit: Stretch\nFound by career-agent discover (ashby:pinecone).";
+    const urls: string[] = [];
+    const enriched = await enrichJobIntake({ sourceUrl: "https://jobs.ashbyhq.com/pinecone/08760530-e6c3-4167-9272-923d85a2388d", rawText: row }, {
+      fetchImpl: async (url) => {
+        urls.push(url);
+        return json({ jobs: [{ id: "08760530-e6c3-4167-9272-923d85a2388d", title: "Full-Stack Software Engineer, Experience", location: "New York City", secondaryLocations: [], workplaceType: "Hybrid", isRemote: true,
+          descriptionPlain: "Pinecone is the leading vector database. You will build the product experience customers use every day." }] });
+      },
+    });
+    expect(urls).toEqual(["https://api.ashbyhq.com/posting-api/job-board/pinecone"]);
+    expect(enriched.rawText).toMatch(/^Full-Stack Software Engineer, Experience\nLocation: New York City \(Hybrid\)/);
+    expect(enriched.rawText).toContain("Queue context:");
+  });
+
   it("recognizes posting links", () => {
     expect(greenhousePostingRef("https://boards.greenhouse.io/Arize/jobs/123?gh_src=x")).toEqual({ board: "arize", id: "123" });
     expect(greenhousePostingRef("https://job-boards.greenhouse.io/embed/job_app?for=future&token=4745515005")).toEqual({ board: "future", id: "4745515005" });

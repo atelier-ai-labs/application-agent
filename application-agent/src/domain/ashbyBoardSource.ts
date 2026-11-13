@@ -51,6 +51,34 @@ function locationsOf(job: Record<string, unknown>): string[] {
 }
 
 /**
+ * Ashby sets isRemote on hybrid jobs too (Notion, Replit, Pinecone: "Hybrid",
+ * office only). A job is remote when its workplace type is Remote or one of
+ * its listed locations is a remote one ("Remote (US)" beside an HQ).
+ */
+function ashbyWorkplace(value: Record<string, unknown>): { remote: boolean; label: string } {
+  const locations = locationsOf(value);
+  const workplace = text(value.workplaceType)?.toLowerCase() ?? "";
+  const remote = /\bremote\b/.test(workplace) || locations.some((location) => /\bremote\b/i.test(location)) ||
+    (!workplace && value.isRemote === true);
+  const label = remote ? " (Remote)" : /\bhybrid\b/.test(workplace) ? " (Hybrid)" : workplace === "onsite" ? " (On-site)" : "";
+  return { remote, label };
+}
+
+/** Title, location with its workplace type, employment type and description of one Ashby job. */
+export function ashbyPostingText(value: Record<string, unknown>): string {
+  const locations = locationsOf(value);
+  const { remote, label } = ashbyWorkplace(value);
+  const employmentType = text(value.employmentType);
+  return [
+    text(value.title) ?? "",
+    locations.length > 0 ? `Location: ${locations.join("; ")}${label}` : remote ? "Location: Remote" : undefined,
+    employmentType ? `Employment type: ${employmentType}` : undefined,
+    "",
+    text(value.descriptionPlain) ?? "",
+  ].filter((line) => line !== undefined).join("\n");
+}
+
+/**
  * Turns an Ashby job-board payload into Scout listings. Unlisted postings are
  * skipped; search terms (when given) must match the title, team, location or
  * description, the same way the Greenhouse and Lever board sources filter.
@@ -78,25 +106,12 @@ export function parseAshbyBoardResponse(
     const sourceUrl = text(value.jobUrl) ?? `https://jobs.ashbyhq.com/${board}/${id}`;
     const applicationUrl = text(value.applyUrl) ?? `${sourceUrl.replace(/\/$/, "")}/application`;
     const locations = locationsOf(value);
-    // Ashby sets isRemote on hybrid jobs too (Notion, Replit: "Hybrid", office
-    // only). A job is remote when its workplace type is Remote or one of its
-    // listed locations is a remote one ("Remote (US)" beside an HQ).
-    const workplace = text(value.workplaceType)?.toLowerCase() ?? "";
-    const remote = /\bremote\b/.test(workplace) || locations.some((location) => /\bremote\b/i.test(location)) ||
-      (!workplace && value.isRemote === true);
-    const hybrid = !remote && /\bhybrid\b/.test(workplace);
+    const { remote } = ashbyWorkplace(value);
     const employmentType = text(value.employmentType);
     const description = text(value.descriptionPlain) ?? "";
     const matched = queries.filter((query) => searchQueryMatches(query, [title, text(value.department), text(value.team), locations.join(" "), description].filter(Boolean).join(" ").toLowerCase()));
     if (queries.length > 0 && matched.length === 0) continue;
-    const rawText = [
-      company,
-      title,
-      locations.length > 0 ? `Location: ${locations.join("; ")}${remote ? " (Remote)" : hybrid ? " (Hybrid)" : workplace === "onsite" ? " (On-site)" : ""}` : remote ? "Location: Remote" : undefined,
-      employmentType ? `Employment type: ${employmentType}` : undefined,
-      "",
-      description,
-    ].filter((line) => line !== undefined).join("\n");
+    const rawText = [company, ashbyPostingText(value)].join("\n");
     const publishedAt = text(value.publishedAt);
     listings.push({
       input: { rawText, sourceUrl, applicationUrl, companyHint: company, titleHint: title, isExample: false },

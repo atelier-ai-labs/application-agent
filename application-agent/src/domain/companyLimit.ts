@@ -9,11 +9,16 @@ export interface CompanyApplicationLimit {
   overrides?: Readonly<Record<string, number>>;
 }
 
-/** "Gusto, Inc." and "Gusto" are one company; so are "D.A. Davidson" and "D A Davidson". */
+/**
+ * "Gusto, Inc." and "Gusto" are one company; so are "D.A. Davidson" and
+ * "D A Davidson", and "Outmarket AI" and "Outmarket" (2026-11-12).
+ */
 export function companyKey(name: string | undefined): string {
-  return (name ?? "").toLowerCase().replace(/[.,'’]/g, " ")
+  const key = (name ?? "").toLowerCase().replace(/[.,'’]/g, " ")
     .replace(/\b(?:inc|llc|ltd|corp|corporation|co|plc|gmbh|company)\b/g, " ")
     .replace(/[^a-z0-9]+/g, " ").trim();
+  const withoutSuffix = key.replace(/\s+(?:ai|hq)$/, "");
+  return withoutSuffix.length >= 3 ? withoutSuffix : key;
 }
 
 const IN_PROGRESS = new Set(["pursuing", "needs_input", "ready_to_submit"]);
