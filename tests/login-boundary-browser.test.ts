@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chromium, type Browser } from "playwright";
-import { PlaywrightLeverBrowserSession } from "../application-agent/automation/playwrightLeverBrowserSession";
+import { PlaywrightLeverBrowserSession, enterOnExactOption } from "../application-agent/automation/playwrightLeverBrowserSession";
 
 let browser: Browser;
 beforeAll(async () => { browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] }); }, 60_000);
@@ -31,5 +31,37 @@ describe("login wall detection on a real page", () => {
     expect((await boundaryFor(`<h1>Sign in</h1><p>Use your account to log in.</p><input type="email">`))?.kind).toBe("external_login");
     const codeAfterSubmit = `<form><input id="first_name" name="first_name"><p>Enter the verification code we emailed you.</p><input name="security_code"></form>`;
     expect((await boundaryFor(codeAfterSubmit))?.kind).toBe("external_login");
+  });
+});
+
+describe("choosing a searchable dropdown option by keyboard", () => {
+  const dropdown = (labels: string[]) => `<input id="gender" role="combobox" aria-activedescendant="">
+    <div role="listbox">${labels.map((label, index) => `<div role="option" id="opt-${index}">${label}</div>`).join("")}</div>
+    <script>
+      const input = document.getElementById("gender"); let focus = -1; const count = ${labels.length};
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "ArrowDown") { focus = (focus + 1) % count; input.setAttribute("aria-activedescendant", "opt-" + focus); }
+        if (event.key === "Enter" && focus >= 0) input.dataset.chosen = document.getElementById("opt-" + focus).innerText;
+      });
+    </script>`;
+  const choose = async (labels: string[], target: string) => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.setContent(dropdown(labels));
+    const control = page.locator("#gender");
+    await control.focus();
+    const pressed = await enterOnExactOption(control, target);
+    const chosen = await control.getAttribute("data-chosen");
+    await context.close();
+    return { pressed, chosen };
+  };
+
+  it("presses Enter only on the exact option, not on 'Cis-man' highlighted first", async () => {
+    // Samsara (2026-11-12): a blind ArrowDown+Enter committed the wrong gender option.
+    expect(await choose(["Agender", "Cis-man", "Man", "Woman"], "Man")).toEqual({ pressed: true, chosen: "Man" });
+  });
+
+  it("gives up without choosing when the option isn't there", async () => {
+    expect(await choose(["Agender", "Cis-man", "Woman"], "Man")).toEqual({ pressed: false, chosen: null });
   });
 });

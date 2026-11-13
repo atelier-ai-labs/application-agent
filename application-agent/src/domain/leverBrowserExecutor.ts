@@ -530,7 +530,8 @@ function basedInUsValueForField(
   jobLocation?: string | null,
 ): string | undefined {
   const text = inspectedPromptText(field);
-  const namesUs = /\b(?:are you|currently)\b.{0,40}\b(?:based|located|living|residing|reside)\b.{0,20}\b(?:in )?(?:the )?(?:u\.?\s?s\.?a?|united states)\b/.test(text);
+  const namesUs = /\b(?:are you|currently|i confirm(?: that)?(?: i)?)\b.{0,40}\b(?:based|located|living|residing|reside)\b.{0,20}\b(?:in )?(?:the )?(?:u\.?\s?s\.?a?|united states)\b/.test(text);
+  // "I confirm that I reside in the US." (Samsara, 2026-11-12) is the same fact.
   // "Do you currently reside in the country where this position is located?"
   // (Instructure) names the job's country instead; it is the US when the job is.
   const namesJobCountry = /\b(?:are you|do you|currently)\b.{0,40}\b(?:based|located|living|residing|reside|live)\b.{0,20}\bin the country where (?:this|the) (?:position|role|job) is (?:located|based)\b/.test(text) &&
@@ -1899,7 +1900,7 @@ function optionValue(
   const demographicAliases = field.classification === "demographic"
     ? (() => {
         const candidate = normalized(valueAsString(value));
-        if (/not\s+a\s+protected\s+veteran|do\s+not\s+have\s+(?:a\s+)?disability|no\b/.test(candidate)) return ["no", "false"];
+        if (/not\s+a\s+protected\s+veteran|(?:do\s+not|don['’]?t)\s+have\s+(?:a\s+)?disability|no\b/.test(candidate)) return ["no", "false"];
         if (/protected\s+veteran|have\s+(?:a\s+)?disability|yes\b/.test(candidate)) return ["yes", "true"];
         return [];
       })()
@@ -1936,7 +1937,8 @@ function optionValue(
       // Ashby: "No - I do not consent to receiving text messages".
       (smsAliases.length > 0 && labels.some((label) => /^no\b/.test(label) && /\bdo not consent\b/.test(label))) ||
       // "No, I am not a veteran" (Gusto) as well as "...not a protected veteran".
-      (demographicAliases.includes("no") && labels.some((label) => /not\s+(?:a\s+)?(?:protected\s+)?veteran|do\s+not\s+have\s+(?:a\s+)?disability/.test(label))) ||
+      // ...and "No, I don’t have a disability" (Samsara, curly apostrophe).
+      (demographicAliases.includes("no") && labels.some((label) => /not\s+(?:a\s+)?(?:protected\s+)?veteran|(?:do\s+not|don['’]?t)\s+have\s+(?:a\s+)?disability/.test(label))) ||
       // Greenhouse's phone-country control appends the dialing code to the
       // grounded country name (for example, "United States +1"). Preserve
       // exact option selection while accepting that display form.
@@ -3117,6 +3119,13 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
           evidence.push(`filled:${fieldDescriptor.id}`);
         } catch (error) {
           const reason = safeErrorMessage(error, "The field could not be filled.");
+          // A dropdown the form wouldn't take is a question for the candidate,
+          // not a failed application (Samsara, 2026-11-12). Its answer re-fills it.
+          if (fieldDescriptor.type === "select" || fieldDescriptor.type === "radio") {
+            blockers.push(formBlocker(fieldDescriptor, `The form did not take the answer (${reason.slice(0, 160)}).`, "unknown_form_field", "ATS_FORM", executorEvidenceLabel(observed.target.provider)));
+            unresolvedFields.add(fieldDescriptor.label);
+            continue;
+          }
           return failedResult(`Could not fill ${fieldDescriptor.label}: ${reason}`, startedAt, this.now(), inspection(
             "failed",
             observed.inspection.fields,

@@ -475,13 +475,38 @@ async function interactableOption(locator: Locator): Promise<boolean> {
   }).catch(() => false);
 }
 
+// Options vanish when a menu closes, and Playwright waits the full action
+// timeout (15 s) for a missing element: reading a closed menu's options this
+// way turned Samsara's form into a 23-minute run (2026-11-12). An option is
+// either there now or gone.
+const OPTION_READ_TIMEOUT_MS = 500;
+
 async function exactOptionLabel(locator: Locator): Promise<string> {
-  const accessible = (await locator.getAttribute("aria-label").catch(() => null))?.trim();
-  return (accessible || (await locator.innerText().catch(() => ""))).replace(/\s+/g, " ").trim();
+  const accessible = (await locator.getAttribute("aria-label", { timeout: OPTION_READ_TIMEOUT_MS }).catch(() => null))?.trim();
+  return (accessible || (await locator.innerText({ timeout: OPTION_READ_TIMEOUT_MS }).catch(() => ""))).replace(/\s+/g, " ").trim();
 }
 
 function normalizedOptionLabel(value: string): string {
   return value.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/** Moves the highlight to the option whose text is exactly `label`, then presses Enter. */
+export async function enterOnExactOption(control: Locator, label: string): Promise<boolean> {
+  const target = normalizedOptionLabel(label);
+  for (let step = 0; step < 40; step += 1) {
+    const focused = await control.evaluate((input) => {
+      const id = input.getAttribute("aria-activedescendant");
+      const element = (id ? document.getElementById(id) : null) ?? document.querySelector('[class*="option--is-focused"]');
+      return element ? (element.getAttribute("aria-label") || (element as HTMLElement).innerText || "") : null;
+    }, undefined, { timeout: OPTION_READ_TIMEOUT_MS }).catch(() => null);
+    if (focused !== null && normalizedOptionLabel(focused) === target) {
+      await control.press("Enter");
+      return true;
+    }
+    if (focused === null && step > 0) return false;
+    await control.press("ArrowDown").catch(() => undefined);
+  }
+  return false;
 }
 
 /**
@@ -1178,13 +1203,14 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
       }
       if (matchedOption && (allowTypeahead || dynamicOptions)) {
         if (!exactVisibleOptionVerified) throw new Error(`The select option ${value} was not uniquely verified.`);
-        await locator.press("ArrowDown").catch(() => undefined);
-        await locator.press("Enter");
-      } else {
-      if (!exactVisibleOptionVerified) throw new Error(unmatchedSelectOptionMessage(value, lastRenderedLabels));
-      await locator.press("ArrowDown").catch(() => undefined);
-      await locator.press("Enter");
+      } else if (!exactVisibleOptionVerified) {
+        throw new Error(unmatchedSelectOptionMessage(value, lastRenderedLabels));
       }
+      // Never press Enter on whatever happens to be highlighted: typing "Man"
+      // also lists "Cis-man" and "Woman", and a blind ArrowDown+Enter committed
+      // the wrong one on Samsara's gender question (2026-11-12). Step to the
+      // exact option first; if it can't be found, the click retries below run.
+      await enterOnExactOption(locator, matchedOption?.label ?? value);
       for (let attempt = 0; attempt < 20; attempt += 1) {
         if (await isCommitted()) return;
         if (attempt < 19) await this.page.waitForTimeout(50);

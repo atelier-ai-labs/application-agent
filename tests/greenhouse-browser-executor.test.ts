@@ -1212,6 +1212,29 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(gender.current).toBe("Man");
   });
 
+  it("answers Samsara's disability and US-residence questions, and asks instead of failing on a dropdown the form won't take", async () => {
+    const select = (id: string, label: string, options: string[]) => new FakeField({ id, label, type: "select", required: true,
+      options: options.map((option) => ({ label: option, value: option })),
+      questionDescriptor: { promptText: label, sourceStrategy: "aria_labelledby", confidence: "high" } });
+    const disability = select("502", "Do you have a physical or mental disability, impairment, or condition that substantially limits major life activity? *",
+      ["Yes, I have a disability (or previously had a disability)", "No, I don’t have a disability", "I prefer to self describe", "I don't wish to answer"]);
+    const resides = select("question_67495931", "I confirm that I reside in the US. *", ["Yes", "No"]);
+    const stubborn = select("question_67496150", "Do you have a physical or mental disability, impairment, or condition? (second copy) *",
+      ["Yes, I have a disability (or previously had a disability)", "No, I don’t have a disability"]);
+    stubborn.select = async () => { throw new Error("The custom select control did not commit its verified option."); };
+    const session = new FakeSession([disability, resides, stubborn]);
+    const profile = {
+      ...exampleCandidateProfile,
+      identity: { ...exampleCandidateProfile.identity, location: "McDonald, Pennsylvania, USA" },
+      approvedReusableAnswers: { ...exampleCandidateProfile.approvedReusableAnswers, disability_status: "No, I do not have a disability" },
+    } satisfies CandidateProfile;
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...request(session), profile });
+    expect(disability.current).toBe("No, I don’t have a disability");
+    expect(resides.current).toBe("Yes");
+    expect(result.state).toBe("requires_human");
+    expect(((result as { blockers?: { field?: string }[] }).blockers ?? []).map((blocker) => blocker.field)).toEqual(["question_67496150"]);
+  });
+
   it("answers pronouns from the profile's saved pronouns", async () => {
     const pronouns = new FakeField({ id: "question_33213610003", label: "Pronouns *", type: "select", required: true,
       options: ["He/him/his", "She/her/hers", "They/them/theirs", "I prefer not to say"].map((label) => ({ label, value: label })),
