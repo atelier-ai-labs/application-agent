@@ -177,6 +177,9 @@ function eventMessage(
   };
 }
 
+/** Longer lists (a 244-country dropdown) are answered by typing instead of buttons. */
+const MAX_CHOICE_BUTTONS = 100;
+
 function eventMessageBody(
   event: AttentionEvent,
   renderOptions: { threadReply?: boolean; handoffUrl?: string } = {},
@@ -354,18 +357,17 @@ function eventMessageBody(
           },
         },
       ];
-  if (event.question.kind === "single_choice" && event.question.options.length > 0) {
-    blocks.push({
-      type: "actions",
-      elements: event.question.options.map((option, index) => ({
-        type: "button",
-        action_id: actionIdForOption(index),
-        // Slack caps button text at 75 characters; the button value is the
-        // option id, so the full label is still what reaches the form.
-        text: { type: "plain_text", text: safeText(option.label, 75) },
-        value: `${event.id}|${option.id}`,
-      })),
-    });
+  if (event.question.kind === "single_choice" && event.question.options.length > 0 && event.question.options.length <= MAX_CHOICE_BUTTONS) {
+    // Slack allows 25 elements per actions block; longer lists span several rows.
+    const buttons = event.question.options.map((option, index) => ({
+      type: "button",
+      action_id: actionIdForOption(index),
+      // Slack caps button text at 75 characters; the button value is the
+      // option id, so the full label is still what reaches the form.
+      text: { type: "plain_text", text: safeText(option.label, 75) },
+      value: `${event.id}|${option.id}`,
+    }));
+    for (let start = 0; start < buttons.length; start += 25) blocks.push({ type: "actions", elements: buttons.slice(start, start + 25) });
   }
   return {
     text,

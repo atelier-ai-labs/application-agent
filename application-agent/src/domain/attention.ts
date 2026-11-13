@@ -936,7 +936,9 @@ export function optionIdForTypedAnswer(options: readonly AttentionOption[], text
   // A reply that clearly names one choice: "Acknowledge" for "Acknowledge/Confirm"
   // (Samsara, 2026-11-12), "Indeed" for "Indeed / Glassdoor". Spacing around "/"
   // doesn't matter, and it must point to exactly one option.
-  const compact = (value: string) => value.trim().toLowerCase().replace(/[.!]+$/, "").replace(/\s*([/|·-])\s*/g, "$1").replace(/\s+/g, " ");
+  // Slack and phones turn ' into ’ ("I wasn’t familiar…", Samsara 2026-11-12).
+  const compact = (value: string) => value.trim().toLowerCase().replace(/[’‘`]/g, "'").replace(/[“”]/g, '"')
+    .replace(/[.!]+$/, "").replace(/\s*([/|·-])\s*/g, "$1").replace(/\s+/g, " ");
   const target = compact(text);
   if (target.length < 3) return undefined;
   const sameCompact = options.filter((option) => compact(option.label) === target);

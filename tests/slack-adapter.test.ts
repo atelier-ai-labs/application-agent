@@ -205,6 +205,22 @@ describe("Slack human-attention adapter", () => {
     expect(requests[0].body).not.toContain("blocker-1");
   });
 
+  it("splits a long list of choices into rows of at most 25 buttons", async () => {
+    const bodies: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        bodies.push(typeof init?.body === "string" ? init.body : "");
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000003" }) } as Response;
+      },
+    });
+    const base = event();
+    const options = Array.from({ length: 30 }, (_, index) => ({ id: `o${index}`, label: `Source ${index}` }));
+    await adapter.publishAttentionEvent({ ...base, question: { ...base.question!, kind: "single_choice", options } });
+    const rows = (JSON.parse(bodies[0]!).blocks as { type: string; elements?: unknown[] }[]).filter((block) => block.type === "actions" && (block.elements ?? []).length > 0);
+    expect(rows.map((row) => row.elements!.length).slice(0, 2)).toEqual([25, 5]);
+  });
+
   it("links the job posting under the title, and only a safe https link", async () => {
     // ElevenLabs (2026-11-10): the questions came with no way to read the job.
     const bodies: string[] = [];

@@ -3759,7 +3759,13 @@ export class CareerAgentService {
    * only one would be listed, so a single question keeps its usual message.
    */
   private batchForJob(campaign: Campaign, job: CareerJob, first: CareerBlocker): { questions: AttentionBatchQuestion[]; blockerIds: string[] } | undefined {
-    const batchable = (candidate: CareerBlocker) => !UNBATCHED_BLOCKER_KINDS.has(candidate.kind) && Boolean(questionForBlocker(candidate));
+    // A choice question gets its own message with a button per choice: typing a
+    // choice in a numbered reply failed on Samsara's lists (2026-11-12). Only
+    // questions answered by typing are batched.
+    const batchable = (candidate: CareerBlocker) => {
+      const question = !UNBATCHED_BLOCKER_KINDS.has(candidate.kind) ? questionForBlocker(candidate) : undefined;
+      return Boolean(question) && question!.kind !== "single_choice";
+    };
     if (!batchable(first)) return undefined;
     const executedAt = job.execution?.updatedAt;
     const answered = new Set((campaign.attentionEvents ?? [])

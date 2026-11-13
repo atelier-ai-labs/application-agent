@@ -68,8 +68,10 @@ function setup(executor: ApplicationExecutor, resumeAttention?: (campaignId: str
 }
 
 const reply = (eventId: string, text: string) => ({ eventId, selectedOption: text, actorIdentity: { provider: "slack", userId: "nate" }, respondedAt: capturedAt });
+// Typed questions are batched; a choice question gets its own message with buttons (2026-11-12).
+const CLEARANCE: Question = { field: "clearance", label: "Do you hold an active security clearance?", options: ["Yes", "No"] };
 const QUESTIONS: Question[] = [
-  { field: "clearance", label: "Do you hold an active security clearance?", options: ["Yes", "No"] },
+  { field: "notice", label: "What is your notice period?" },
   { field: "city", label: "Which city will you work from?" },
   { field: "pronouns", label: "Pronouns", required: false },
 ];
@@ -84,23 +86,24 @@ describe("one Slack message per application", () => {
     expect(event.batch?.map((item) => item.prompt)).toEqual(QUESTIONS.map((question) => question.label));
     expect(event.batch?.[2]).toMatchObject({ required: false });
 
-    const result = await service.resolveAttentionResponse(reply(event.id, "1. no\n2. Pittsburgh, PA\n3. SKIP"));
+    const result = await service.resolveAttentionResponse(reply(event.id, "1. two weeks\n2. Pittsburgh, PA\n3. SKIP"));
     expect(result.status).toBe("resolved");
     // No second or third Slack question; every answer reached the form.
     expect(notifications.publishedEvents).toHaveLength(1);
-    expect(executor.received).toMatchObject({ clearance: "no", city: "Pittsburgh, PA" });
+    expect(executor.received).toMatchObject({ notice: "two weeks", city: "Pittsburgh, PA" });
     expect(service.listJobs(campaign.id)[0]!.status).toBe("ready_to_submit");
   });
 
-  it("asks a question on its own when its saved answer does not fit, and keeps the rest", async () => {
-    const executor = new FormExecutor([QUESTIONS[1]!, QUESTIONS[0]!]);
+  it("keeps a choice question out of the batch and asks it on its own, with its choices", async () => {
+    const executor = new FormExecutor([QUESTIONS[1]!, CLEARANCE, QUESTIONS[0]!]);
     const { service, campaign, notifications } = setup(executor);
     await service.runCampaign(campaign.id);
     const event = notifications.publishedEvents[0]!;
-    await service.resolveAttentionResponse(reply(event.id, "1. Pittsburgh, PA 2. maybe"));
-    expect(notifications.notices.join("\n")).toMatch(/"maybe" didn't fit/);
+    expect(event.batch?.map((item) => item.prompt)).toEqual([QUESTIONS[1]!.label, QUESTIONS[0]!.label]);
+    await service.resolveAttentionResponse(reply(event.id, "1. Pittsburgh, PA 2. two weeks"));
     const asked = notifications.publishedEvents.at(-1)!;
     expect(asked.question?.prompt).toBe("Do you hold an active security clearance?");
+    expect(asked.question?.options.map((option) => option.label)).toEqual(["Yes", "No"]);
     expect(asked.batch).toBeUndefined();
     expect(service.listJobs(campaign.id)[0]!.status).toBe("needs_input");
   });
@@ -112,8 +115,8 @@ describe("one Slack message per application", () => {
     const event = notifications.publishedEvents[0]!;
     expect((await service.resolveAttentionResponse(reply(event.id, "2. Pittsburgh, PA"))).status).toBe("partial");
     expect(notifications.notices.at(-1)).toMatch(/Question 1 still needs one/);
-    await service.resolveAttentionResponse(reply(event.id, "1. No"));
-    expect(executor.received).toMatchObject({ clearance: "no", city: "Pittsburgh, PA" });
+    await service.resolveAttentionResponse(reply(event.id, "1. two weeks"));
+    expect(executor.received).toMatchObject({ notice: "two weeks", city: "Pittsburgh, PA" });
     expect(notifications.publishedEvents).toHaveLength(1);
   });
 
@@ -126,11 +129,11 @@ describe("one Slack message per application", () => {
       fieldsDetected: QUESTIONS.map((question) => question.field), fieldsFilled: [], unresolvedFields: QUESTIONS.map((question) => question.field),
       evidence: ["submit:not-clicked"], startedAt: capturedAt, updatedAt: capturedAt } } as never);
     const event = notifications.publishedEvents[0]!;
-    await service.resolveAttentionResponse(reply(event.id, "1. No 2. Pittsburgh, PA 3. SKIP"));
+    await service.resolveAttentionResponse(reply(event.id, "1. two weeks 2. Pittsburgh, PA 3. SKIP"));
     expect(resumes).toBe(1);
     expect(notifications.publishedEvents).toHaveLength(1);
     const blockers = service.getJob(job.id).blockers;
-    expect(blockers.map((blocker) => [blocker.field, blocker.status])).toEqual([["clearance", "resolved"], ["city", "resolved"], ["pronouns", "resolved"]]);
+    expect(blockers.map((blocker) => [blocker.field, blocker.status])).toEqual([["notice", "resolved"], ["city", "resolved"], ["pronouns", "resolved"]]);
     expect(service.listAttentionEvents(campaign.id).every((attention) => attention.status === "resolved")).toBe(true);
   });
 
@@ -169,5 +172,7 @@ describe("numbered reply parsing", () => {
     expect(optionIdForTypedAnswer(sources, "BuiltIn")).toBe("o5");
     expect(optionIdForTypedAnswer(sources, "LinkedIn")).toBeUndefined();
     expect(optionIdForTypedAnswer(sources, "Li")).toBeUndefined();
+    // Slack's curly apostrophe (Samsara, 2026-11-12).
+    expect(optionIdForTypedAnswer([{ id: "new", label: "I wasn't familiar with Samsara before applying" }], "I wasn’t familiar with Samsara before applying")).toBe("new");
   });
 });
