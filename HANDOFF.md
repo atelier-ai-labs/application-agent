@@ -92,6 +92,19 @@ listener for about a minute until `contract-to-hire` was dropped ("contract" alr
   the limit the job is rejected with the reason. Roles are still taken in queue order, not best fit.
 - The inbox classifier now reads "will not be able to move forward with your…" as a rejection.
 
+## 2026-11-12
+
+- Skipped Pinecone (hybrid, NYC 3 days/week), Outmarket Platform Engineer (already applied to
+  Outmarket AI), Sparksoft DevOps. `excludedCompanies` now lives in search intent (Sparksoft, D.A.
+  Davidson) and matches any spelling; "X AI" and "X" count as one company.
+- 92a1573: Ashby queue rows are enriched from the public job-board data (carries workplaceType);
+  the posting-content check no longer counts the title line ("…, Experience") as posting prose.
+- Samsara fixes (11b9439, 31eb3b6, 38707e8): two option matchers treated "Cis-man" as matching
+  "Man" (a dialing-list rule for "+1 US - United States"); option reads waited 15 s on closed menus
+  (a 23-minute run, now under a minute); keyboard fallback now Enters only on the exact option; a
+  dropdown the form won't take becomes a question; curly-apostrophe disability option; "I confirm
+  that I reside in the US". Verified live on Samsara: gender, disability and residence now fill.
+
 ## Known gaps / next
 
 - Done 11-10 late (bac524c): "select all that apply" groups are one question with the box labels as
