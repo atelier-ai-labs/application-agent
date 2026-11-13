@@ -3357,6 +3357,13 @@ export class CareerAgentService {
         attentionEvents: updated,
         updatedAt: this.now(),
       });
+      // Take the buttons off the Slack message too: a cancelled question kept
+      // its live buttons (Samsara, 2026-11-12). Best effort.
+      for (const event of updated) {
+        if (event.status !== "open" && attentionEvents.find((before) => before.id === event.id)?.status === "open" && event.publishedAt) {
+          void this.notificationAdapter?.closeAttentionEvent?.(publicAttentionEvent(event))?.catch?.(() => undefined);
+        }
+      }
     }
   }
 
