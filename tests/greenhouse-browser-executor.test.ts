@@ -1239,6 +1239,15 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(((result as { blockers?: { field?: string }[] }).blockers ?? []).map((blocker) => blocker.field)).toEqual(["question_67496150"]);
   });
 
+  it("treats 'Do you accept the listed salary range?' Yes/No as a yes/no question, not a salary amount", () => {
+    // Samsara (2026-11-12): the salary figure was tried on Yes/No and the question came back after every answer.
+    const field = (options: string[]) => ({ id: "q", label: "Do you accept the listed salary range for this position? *", type: "select" as const,
+      options: options.map((label) => ({ label, value: label })),
+      questionDescriptor: { promptText: "Do you accept the listed salary range for this position? *", sourceStrategy: "aria_labelledby" as const, confidence: "high" as const } });
+    expect(classifyLeverApplicationField(field(["Yes", "No"]))).toBe("unknown");
+    expect(classifyLeverApplicationField({ ...field([]), type: "text" as const, label: "Desired salary", questionDescriptor: undefined })).toBe("salary");
+  });
+
   it("treats a dropdown with listed choices as a choice question, never an essay", () => {
     // Samsara (2026-11-12): these got essay drafts and no buttons in Slack.
     const options = ["LinkedIn", "Podcast", "Other"].map((label) => ({ label, value: label }));

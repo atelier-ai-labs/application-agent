@@ -953,7 +953,14 @@ export function classifyLeverApplicationField(
   if (hasPhrase(text, /\blegal\b|attest|certif(?:y|ication)|agree to|authorize|terms|accurate and complete|sign your name for acknowledgement/)) return "legal_attestation";
   if (hasPhrase(text, /\bmost interesting problem\b|\byour take\b|\bwhy does it pull you in\b/)) return asFreeText();
   if (hasPhrase(text, /\b(?:ai|ml|machine\s+learning|aws|terraform|cloudformation|startup|early[ -]stage|production)\b/)) return asFreeText();
-  if (hasPhrase(text, /salary|compensation|pay expectation|desired pay|desired annual compensation/)) return "salary";
+  if (hasPhrase(text, /salary|compensation|pay expectation|desired pay|desired annual compensation/)) {
+    // "Do you accept the listed salary range?" with Yes/No is a yes/no question,
+    // not an amount: filling the salary figure into it failed and re-asked it
+    // after every answer (Samsara, 2026-11-12).
+    const labels = (field.options ?? []).map((option) => normalized(option.label));
+    const yesNo = labels.length > 0 && labels.length <= 3 && labels.some((label) => /^yes\b/.test(label)) && labels.some((label) => /^no\b/.test(label));
+    return yesNo ? "unknown" : "salary";
+  }
   // Overall experience ("total work experience in a similar role") is a résumé
   // summary for a reviewed draft; years with one named system stays unknown.
   if (hasPhrase(text, /\b(?:total|overall|relevant|prior) (?:work |professional )?experience\b/)) return asFreeText();
