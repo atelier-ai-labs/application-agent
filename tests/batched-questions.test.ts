@@ -158,4 +158,16 @@ describe("numbered reply parsing", () => {
     expect(optionIdForTypedAnswer(options, "Yes, I am.")).toBe("yes");
     expect(optionIdForTypedAnswer(options, "maybe")).toBeUndefined();
   });
+
+  it("matches a reply that clearly names one choice, and never guesses between several", () => {
+    // Samsara (2026-11-12): "1. Acknowledge" was rejected for "Acknowledge/Confirm".
+    expect(optionIdForTypedAnswer([{ id: "ack", label: "Acknowledge/Confirm" }], "Acknowledge")).toBe("ack");
+    expect(optionIdForTypedAnswer([{ id: "ack", label: "Acknowledge/Confirm" }], "acknowledge / confirm")).toBe("ack");
+    const sources = ["Samsara Careers Site", "LinkedIn Jobs", "LinkedIn Post", "LinkedIn InMail / Message from a Recruiter", "Indeed / Glassdoor", "BuiltIn"]
+      .map((label, index) => ({ id: `o${index}`, label }));
+    expect(optionIdForTypedAnswer(sources, "Indeed")).toBe("o4");
+    expect(optionIdForTypedAnswer(sources, "BuiltIn")).toBe("o5");
+    expect(optionIdForTypedAnswer(sources, "LinkedIn")).toBeUndefined();
+    expect(optionIdForTypedAnswer(sources, "Li")).toBeUndefined();
+  });
 });

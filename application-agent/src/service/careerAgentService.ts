@@ -2600,7 +2600,7 @@ export class CareerAgentService {
       const optionId = optionIdForTypedAnswer(record.question.options, response.selectedOption);
       if (!optionId) {
         await this.notificationAdapter?.publishInfoNotice?.(
-          `${record.context.company}: "${response.selectedOption.slice(0, 80)}" isn't one of the choices for "${record.question.prompt.slice(0, 120)}" (${record.question.options.map((option) => option.label).join(" / ")}). Reply again with 1. and one of them.`,
+          `${record.context.company}: "${response.selectedOption.slice(0, 80)}" isn't one of the choices for "${record.question.prompt.slice(0, 120)}" (${record.question.options.map((option) => option.label).join(" / ")}). Reply in that question's thread with 1. and one of them.`,
         ).catch(() => undefined);
         throw new AttentionResponseError("That choice is not valid for this attention event.");
       }

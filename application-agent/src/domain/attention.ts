@@ -933,5 +933,17 @@ export function optionIdForTypedAnswer(options: readonly AttentionOption[], text
     const leading = options.filter((option) => new RegExp(`^${word}\\b`, "i").test(option.label.trim()));
     if (leading.length === 1) return leading[0]!.id;
   }
-  return undefined;
+  // A reply that clearly names one choice: "Acknowledge" for "Acknowledge/Confirm"
+  // (Samsara, 2026-11-12), "Indeed" for "Indeed / Glassdoor". Spacing around "/"
+  // doesn't matter, and it must point to exactly one option.
+  const compact = (value: string) => value.trim().toLowerCase().replace(/[.!]+$/, "").replace(/\s*([/|·-])\s*/g, "$1").replace(/\s+/g, " ");
+  const target = compact(text);
+  if (target.length < 3) return undefined;
+  const sameCompact = options.filter((option) => compact(option.label) === target);
+  if (sameCompact.length === 1) return sameCompact[0]!.id;
+  const named = options.filter((option) => {
+    const label = compact(option.label);
+    return label.split(/[/|·]/).map((part) => part.trim()).includes(target) || label.startsWith(`${target}/`) || label.startsWith(`${target} `);
+  });
+  return named.length === 1 ? named[0]!.id : undefined;
 }
