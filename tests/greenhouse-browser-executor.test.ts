@@ -1239,6 +1239,16 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(((result as { blockers?: { field?: string }[] }).blockers ?? []).map((blocker) => blocker.field)).toEqual(["question_67496150"]);
   });
 
+  it("treats a dropdown with listed choices as a choice question, never an essay", () => {
+    // Samsara (2026-11-12): these got essay drafts and no buttons in Slack.
+    const options = ["LinkedIn", "Podcast", "Other"].map((label) => ({ label, value: label }));
+    for (const prompt of ["Where have you learned about Samsara? Select all that apply.*", "AI Policy for Interviewers*", "How many years of experience do you have in a a data software engineering role? *"]) {
+      const field = { id: "q", label: prompt, type: "select" as const, options, questionDescriptor: { promptText: prompt, sourceStrategy: "aria_labelledby" as const, confidence: "high" as const } };
+      expect(classifyLeverApplicationField(field), prompt).toBe("unknown");
+      expect(classifyLeverApplicationField({ ...field, type: "textarea" as const, options: [] }), prompt).toBe("free_text");
+    }
+  });
+
   it("answers pronouns from the profile's saved pronouns", async () => {
     const pronouns = new FakeField({ id: "question_33213610003", label: "Pronouns *", type: "select", required: true,
       options: ["He/him/his", "She/her/hers", "They/them/theirs", "I prefer not to say"].map((label) => ({ label, value: label })),

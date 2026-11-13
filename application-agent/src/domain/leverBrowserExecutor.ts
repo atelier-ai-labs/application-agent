@@ -897,6 +897,12 @@ export function classifyLeverApplicationField(
     questionDescriptor?: LeverBrowserField["questionDescriptor"];
   },
 ): ApplicationFieldClassification {
+  // A dropdown or radio group with listed choices is a choice question, never
+  // an essay: Samsara's "Where have you learned about Samsara?", "AI Policy for
+  // Interviewers" and years-of-experience dropdowns got essay drafts and no
+  // buttons in Slack (2026-11-12).
+  const hasChoices = (field.type === "select" || field.type === "radio") && (field.options?.length ?? 0) > 0;
+  const asFreeText = (): ApplicationFieldClassification => (hasChoices ? "unknown" : "free_text");
   // Prefer inspected prompt/accessible text over opaque DOM labels (Rippling
   // often exposes "Search" / "textbox" / random ids as the control label).
   // Most generated Yes/No radios expose only the option label as their DOM
@@ -945,16 +951,16 @@ export function classifyLeverApplicationField(
   // "Degree or Certification Earned" names a credential, not a statement to certify.
   if (/\beducation\b/.test(sectionTitleOf(field)) || hasPhrase(text, /\binstitution\b|\bdegree or certification\b|\b(?:degree|certification) earned\b/)) return "education";
   if (hasPhrase(text, /\blegal\b|attest|certif(?:y|ication)|agree to|authorize|terms|accurate and complete|sign your name for acknowledgement/)) return "legal_attestation";
-  if (hasPhrase(text, /\bmost interesting problem\b|\byour take\b|\bwhy does it pull you in\b/)) return "free_text";
-  if (hasPhrase(text, /\b(?:ai|ml|machine\s+learning|aws|terraform|cloudformation|startup|early[ -]stage|production)\b/)) return "free_text";
+  if (hasPhrase(text, /\bmost interesting problem\b|\byour take\b|\bwhy does it pull you in\b/)) return asFreeText();
+  if (hasPhrase(text, /\b(?:ai|ml|machine\s+learning|aws|terraform|cloudformation|startup|early[ -]stage|production)\b/)) return asFreeText();
   if (hasPhrase(text, /salary|compensation|pay expectation|desired pay|desired annual compensation/)) return "salary";
   // Overall experience ("total work experience in a similar role") is a résumé
   // summary for a reviewed draft; years with one named system stays unknown.
-  if (hasPhrase(text, /\b(?:total|overall|relevant|prior) (?:work |professional )?experience\b/)) return "free_text";
+  if (hasPhrase(text, /\b(?:total|overall|relevant|prior) (?:work |professional )?experience\b/)) return asFreeText();
   if (hasPhrase(text, /relocat/)) return "relocation";
   if (hasPhrase(text, /travel/)) return "travel";
   if (hasPhrase(text, /education|degree|university|college|school|major|study/)) return "education";
-  if (hasPhrase(text, /why|interest|motivat|cover letter|tell us|anything else|additional information/)) return "free_text";
+  if (hasPhrase(text, /why|interest|motivat|cover letter|tell us|anything else|additional information/)) return asFreeText();
   if (factField) return factField;
   if (hasPhrase(text, /employ|employer|company|work history|job history|position held|job title|occupation|start date|end date/)) return "employment_history";
   // Contact (incl. email/e-mail) must win over bare "address" in location (e.g. "Email address").
@@ -964,8 +970,8 @@ export function classifyLeverApplicationField(
   // Opaque widget labels with a real question prompt are treated by prompt semantics above;
   // remaining long free-response prompts stay free_text rather than unknown.
   const prompt = field.questionDescriptor?.promptText?.trim();
-  if (!isAmbiguousYesNoControl(field) && prompt && prompt.length >= 24 && /[?]/.test(prompt)) return "free_text";
-  if (field.type === "textarea") return "free_text";
+  if (!isAmbiguousYesNoControl(field) && prompt && prompt.length >= 24 && /[?]/.test(prompt)) return asFreeText();
+  if (field.type === "textarea") return asFreeText();
   return "unknown";
 }
 
