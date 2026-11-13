@@ -94,7 +94,7 @@ export function waitingBoardItems(
 
 /** What changes the board's meaning; the "updated" time alone does not. */
 export function waitingBoardSignature(board: WaitingBoard): string {
-  return JSON.stringify([board.olderCount, board.items.map((item) => [item.jobId, item.state, item.questions, item.link ?? ""])]);
+  return JSON.stringify([board.olderCount, board.items.map((item) => [item.jobId, item.state, item.questions, item.link ?? "", item.askedCount ?? 0, item.postingUrl ?? ""])]);
 }
 
 export function renderWaitingBoard(
