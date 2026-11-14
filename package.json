@@ -36,7 +36,8 @@
     "career-agent:answers": "vite-node application-agent/automation/answerBankCli.ts",
     "career-agent:questionnaire": "vite-node application-agent/automation/questionnaireCli.ts",
     "career-agent:history": "vite-node application-agent/automation/historyRun.ts",
-    "career-agent:migrate-state": "vite-node application-agent/automation/runtime/migrateStateCli.ts"
+    "career-agent:migrate-state": "vite-node application-agent/automation/runtime/migrateStateCli.ts",
+    "career-agent:eval-essays": "vite-node application-agent/automation/answerDraft/evalEssaysCli.ts"
   },
   "dependencies": {
     "react": "^19.1.1",
