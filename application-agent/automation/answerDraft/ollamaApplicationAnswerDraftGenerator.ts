@@ -8,6 +8,7 @@ import {
   type ApplicationAnswerDraftRequest,
   type GroundedApplicationAnswerDraft,
 } from "../../src/domain/applicationAnswerDraft";
+import { promptVersion, type ModelCallLogger } from "../modelCallLog";
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -16,6 +17,8 @@ export interface OllamaApplicationAnswerDraftGeneratorOptions {
   model: string;
   timeoutMs?: number;
   fetcher?: Fetcher;
+  /** Records every model call (prompt version, outcome, timing, tokens). */
+  logger?: ModelCallLogger;
 }
 
 interface OllamaDraftPayload {
@@ -254,6 +257,9 @@ no meta-commentary about being an AI or a draft.
   );
 }
 
+/** Changes whenever the system prompt or the prompt template changes, so a log line says which prompt wrote it. */
+export const ESSAY_PROMPT_VERSION = promptVersion(DRAFT_SYSTEM_PROMPT, promptFor.toString());
+
 function rejectedAnswer(answer: string): boolean {
   return (
     answer.length === 0 ||
@@ -373,6 +379,20 @@ export class OllamaApplicationAnswerDraftGenerator {
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const started = Date.now();
+    let tokens: { promptTokens?: number; outputTokens?: number } = {};
+    let output: string | undefined;
+    // Every exit is logged with why: a dropped draft used to leave no trace.
+    const done = <T>(outcome: string, result: T): T => {
+      this.options.logger?.record({
+        at: new Date().toISOString(), purpose: "essay_draft", model: this.options.model.trim(), promptVersion: ESSAY_PROMPT_VERSION,
+        attempt: avoid.length > 0 ? 2 : 1, ...(request.job.company ? { company: request.job.company } : {}), question: request.question,
+        ...(avoid.length > 0 ? { avoid } : {}), outcome, ...(output !== undefined ? { output } : {}),
+        ...(output ? { problems: draftProblems(output, request.job.description) } : {}),
+        latencyMs: Date.now() - started, ...tokens,
+      });
+      return result;
+    };
     try {
       const response = await this.fetcher(`${this.baseUrl}/api/generate`, {
         method: "POST",
@@ -387,25 +407,37 @@ export class OllamaApplicationAnswerDraftGenerator {
         }),
         signal: controller.signal,
       });
-      if (!response.ok) return undefined;
-      const payload = parseModelPayload(await response.json());
-      if (!payload || payload.status !== "drafted" || typeof payload.answer !== "string") return undefined;
-      if (payload.answer.trim().length > MAX_ANSWER_LENGTH) return undefined;
+      if (!response.ok) return done(`http_${response.status}`, undefined);
+      const body: unknown = await response.json();
+      if (body && typeof body === "object") {
+        const counts = body as { prompt_eval_count?: unknown; eval_count?: unknown };
+        tokens = {
+          ...(typeof counts.prompt_eval_count === "number" ? { promptTokens: counts.prompt_eval_count } : {}),
+          ...(typeof counts.eval_count === "number" ? { outputTokens: counts.eval_count } : {}),
+        };
+      }
+      const payload = parseModelPayload(body);
+      if (!payload) return done("unparseable_output", undefined);
+      if (typeof payload.answer === "string") output = payload.answer;
+      if (payload.status !== "drafted" || typeof payload.answer !== "string") return done(`model_declined:${String(payload.status).slice(0, 40)}`, undefined);
+      if (payload.answer.trim().length > MAX_ANSWER_LENGTH) return done("too_long", undefined);
       const answer = bounded(honorExplicitPhraseRequirement(payload.answer, request.question), MAX_ANSWER_LENGTH);
-      if (rejectedAnswer(answer) || !Array.isArray(payload.evidenceIds)) return undefined;
+      output = answer;
+      if (rejectedAnswer(answer)) return done("rejected_answer", undefined);
+      if (!Array.isArray(payload.evidenceIds)) return done("no_evidence_ids", undefined);
       const evidenceIds = payload.evidenceIds.filter((value): value is string => typeof value === "string");
       const resolvedEvidenceIds = resolveEvidenceIds(evidenceIds, evidence);
-      if (!resolvedEvidenceIds) return undefined;
+      if (!resolvedEvidenceIds) return done("unknown_evidence_ids", undefined);
       const selectedEvidence = evidence.filter((item) => resolvedEvidenceIds.includes(item.id));
-      if (violatesEvidenceAttribution(answer, request, selectedEvidence)) return undefined;
+      if (violatesEvidenceAttribution(answer, request, selectedEvidence)) return done("claims_not_in_evidence", undefined);
       const sourceLabels = selectedEvidence.map((item) => item.source);
-      return {
+      return done("drafted", {
         answer,
         evidence: [...new Set(sourceLabels)].slice(0, 6),
-        provider: "ollama",
-      };
-    } catch {
-      return undefined;
+        provider: "ollama" as const,
+      });
+    } catch (error) {
+      return done(controller.signal.aborted ? "timeout" : `error:${error instanceof Error ? error.message.slice(0, 60) : "unknown"}`, undefined);
     } finally {
       clearTimeout(timeout);
     }

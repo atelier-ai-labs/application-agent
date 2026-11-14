@@ -21,7 +21,8 @@ import {
   type ExecutionInspection,
   type JobSourceListing,
 } from "../application-agent/src";
-import { OllamaApplicationAnswerDraftGenerator, fillerPhrases, phrasesCopiedFromPosting } from "../application-agent/automation/answerDraft/ollamaApplicationAnswerDraftGenerator";
+import { ESSAY_PROMPT_VERSION, OllamaApplicationAnswerDraftGenerator, fillerPhrases, phrasesCopiedFromPosting } from "../application-agent/automation/answerDraft/ollamaApplicationAnswerDraftGenerator";
+import type { ModelCallRecord } from "../application-agent/automation/modelCallLog";
 
 const capturedAt = "2026-09-10T12:00:00.000Z";
 
@@ -229,6 +230,38 @@ describe("local ATS answer drafting", () => {
 
     expect(evidence.some((item) => item.source === "Project — NHL Analytics App")).toBe(true);
     expect(evidence.every((item) => !item.source.startsWith("Verified profile skills"))).toBe(true);
+  });
+
+  it("logs every model call with its prompt version, outcome, timing and tokens", async () => {
+    // 2026-11-14: a dropped or retried draft used to leave no trace.
+    const records: ModelCallRecord[] = [];
+    const logger = { record: (entry: ModelCallRecord) => { records.push(entry); } };
+    const replies = [
+      { status: "drafted", answer: "I improved service observability by adding runbooks and operational checks.", evidenceIds: ["employment:example-employment-atelier"] },
+      { status: "drafted", answer: "I improved service observability by adding runbooks and operational checks.", evidenceIds: ["made-up-evidence"] },
+    ];
+    const generator = (reply: unknown, fail = false) => new OllamaApplicationAnswerDraftGenerator({
+      baseUrl: "http://ollama.test", model: "qwen2.5:7b", logger, timeoutMs: 50,
+      fetcher: async (_input, init) => {
+        if (fail) return await new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))));
+        return { ok: true, json: async () => ({ response: JSON.stringify(reply), prompt_eval_count: 812, eval_count: 41 }) } as Response;
+      },
+    });
+    const request = {
+      question: "Tell us about a difficult technical problem you solved.",
+      job: { company: "Example Cloud Co", title: "Platform Engineer", description: "Build reliable platform systems.", requiredSkills: [], preferredSkills: [], capturedAt },
+      profile: privateProfile(), resume: null,
+    };
+    expect(await generator(replies[0]).generate(request)).toBeDefined();
+    expect(await generator(replies[1]).generate(request)).toBeUndefined();
+    expect(await generator(undefined, true).generate(request)).toBeUndefined();
+    expect(records.map((record) => record.outcome)).toEqual(["drafted", "unknown_evidence_ids", "timeout"]);
+    expect(records[0]).toMatchObject({
+      purpose: "essay_draft", model: "qwen2.5:7b", promptVersion: ESSAY_PROMPT_VERSION, attempt: 1, company: "Example Cloud Co",
+      question: "Tell us about a difficult technical problem you solved.", promptTokens: 812, outputTokens: 41, problems: [],
+    });
+    expect(ESSAY_PROMPT_VERSION).toMatch(/^[0-9a-f]{10}$/);
+    expect(records[0]!.latencyMs).toBeGreaterThanOrEqual(0);
   });
 
   it("accepts only a structured grounded Ollama draft", async () => {

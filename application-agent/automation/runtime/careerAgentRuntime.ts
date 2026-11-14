@@ -71,6 +71,7 @@ import { createOllamaAnswerBankMatcher } from "../answerBank/ollamaAnswerBankMat
 import { isUsableResumeArtifact } from "../resume/resumeArtifact";
 import { normalizeJobSearchIntent, type JobSearchIntent } from "../../src/domain/searchIntent";
 import { DEFAULT_CAREER_AGENT_STATE_DB, openStateStorage } from "./stateStorage";
+import { FileModelCallLogger, type ModelCallLogger } from "../modelCallLog";
 import { assertDuplicateRiskRetryAuthorization, assertSubmitPreparedApplicationPreflight } from "./submitPreparedApplicationPreflight";
 import { authorizeThenSubmit } from "./submitPreparedApplicationFlow";
 import { attentionDescriptorSignature, type AttentionEvent, type AttentionResponse, type NotificationAdapter, type PersistedAttentionEvent, type QueueHandoffNotice } from "../../src/domain/attention";
@@ -1227,8 +1228,9 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
     executionConfig = resolveExecutionHostConfig(env);
   }
   const configuredExecutor = browserEnabled ? createConfiguredBrowserExecutor(executionConfig!) : new UnavailableApplicationExecutor();
-  const applicationAnswerDraftGenerator = createConfiguredApplicationAnswerDraftGenerator(env);
   const stateFilePath = resolve(valueOrDefault(env.ATELIER_CAREER_AGENT_STATE_FILE, DEFAULT_CAREER_AGENT_STATE_DB));
+  const modelCallLogger = configuredModelCallLogger(env, stateFilePath);
+  const applicationAnswerDraftGenerator = createConfiguredApplicationAnswerDraftGenerator(env, modelCallLogger);
   const sharedStorage = openStateStorage(stateFilePath);
   const sharedCareerRepository = new LocalStorageCareerRepository(sharedStorage);
   const sharedApplicationRepository = new LocalStorageApplicationRepository(sharedStorage);
@@ -1365,7 +1367,7 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
           applicationAnswerDraftGenerator: applicationAnswerDraftGenerator.generate.bind(applicationAnswerDraftGenerator),
         }
       : {}),
-    ...createConfiguredAnswerBank(env),
+    ...createConfiguredAnswerBank(env, modelCallLogger),
     ...createConfiguredReceiptInbox(env),
     notification: {
       adapter: slack,
@@ -1414,7 +1416,7 @@ function parsePositiveInteger(value: string | undefined, fallback: number, label
  * When the local model is configured it also matches low-risk questions
  * worded differently from the saved ones.
  */
-function createConfiguredAnswerBank(env: Partial<Record<"ATELIER_CAREER_AGENT_ANSWER_BANK" | "ATELIER_CAREER_AGENT_ANSWER_BANK_FILE" | "ATELIER_CAREER_AGENT_OLLAMA_MODEL" | "ATELIER_CAREER_AGENT_OLLAMA_BASE_URL", string | undefined>>) {
+function createConfiguredAnswerBank(env: Partial<Record<"ATELIER_CAREER_AGENT_ANSWER_BANK" | "ATELIER_CAREER_AGENT_ANSWER_BANK_FILE" | "ATELIER_CAREER_AGENT_OLLAMA_MODEL" | "ATELIER_CAREER_AGENT_OLLAMA_BASE_URL", string | undefined>>, logger?: ModelCallLogger) {
   const setting = env.ATELIER_CAREER_AGENT_ANSWER_BANK?.trim() || "enabled";
   if (setting === "disabled") return {};
   if (setting !== "enabled") throw new Error("ATELIER_CAREER_AGENT_ANSWER_BANK must be enabled or disabled.");
@@ -1422,7 +1424,7 @@ function createConfiguredAnswerBank(env: Partial<Record<"ATELIER_CAREER_AGENT_AN
   const baseUrl = env.ATELIER_CAREER_AGENT_OLLAMA_BASE_URL?.trim();
   return {
     answerBank: new FileAnswerBankStore(env.ATELIER_CAREER_AGENT_ANSWER_BANK_FILE?.trim() || undefined),
-    ...(model ? { answerBankMatcher: createOllamaAnswerBankMatcher({ model, ...(baseUrl ? { baseUrl } : {}) }) } : {}),
+    ...(model ? { answerBankMatcher: createOllamaAnswerBankMatcher({ model, ...(baseUrl ? { baseUrl } : {}), ...(logger ? { logger } : {}) }) } : {}),
   };
 }
 
@@ -1442,6 +1444,16 @@ function createConfiguredReceiptInbox(env: BackgroundCareerAgentEnvironment) {
   }
 }
 
+/**
+ * Every local-model call is logged next to the state database
+ * (model-calls.jsonl) unless ATELIER_MODEL_CALL_LOG=disabled (2026-11-14).
+ */
+function configuredModelCallLogger(env: Record<string, string | undefined> | object, stateFilePath: string): ModelCallLogger | undefined {
+  const values = env as Record<string, string | undefined>;
+  if (values.ATELIER_MODEL_CALL_LOG?.trim() === "disabled") return undefined;
+  return new FileModelCallLogger(values.ATELIER_MODEL_CALL_LOG_FILE?.trim() || resolve(dirname(stateFilePath), "model-calls.jsonl"));
+}
+
 function createConfiguredApplicationAnswerDraftGenerator(
   env: Pick<
     BackgroundCareerAgentEnvironment,
@@ -1450,6 +1462,7 @@ function createConfiguredApplicationAnswerDraftGenerator(
     | "ATELIER_CAREER_AGENT_OLLAMA_MODEL"
     | "ATELIER_CAREER_AGENT_OLLAMA_TIMEOUT_MS"
   >,
+  logger?: ModelCallLogger,
 ): OllamaApplicationAnswerDraftGenerator | undefined {
   const mode =
     env.ATELIER_CAREER_AGENT_ANSWER_DRAFT_MODE?.trim() || (env.ATELIER_CAREER_AGENT_OLLAMA_MODEL?.trim() ? "ollama" : "disabled");
@@ -1459,6 +1472,7 @@ function createConfiguredApplicationAnswerDraftGenerator(
   if (!model) throw new Error("ATELIER_CAREER_AGENT_OLLAMA_MODEL is required when answer-draft mode is ollama.");
   return new OllamaApplicationAnswerDraftGenerator({
     model,
+    ...(logger ? { logger } : {}),
     ...(env.ATELIER_CAREER_AGENT_OLLAMA_BASE_URL?.trim() ? { baseUrl: env.ATELIER_CAREER_AGENT_OLLAMA_BASE_URL.trim() } : {}),
     ...(env.ATELIER_CAREER_AGENT_OLLAMA_TIMEOUT_MS?.trim()
       ? {
