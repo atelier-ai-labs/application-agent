@@ -1,7 +1,7 @@
 # Application agent handoff (updated 2026-11-10 late night)
 
 Read this first in a new session. PuckPulse has its own handoff in `nhl-dashboard/HANDOFF.md`;
-this one is only the application agent (`application-agent/`). Parked ideas live in
+this one is only the application agent (`application-agent/`). Its learning log is [docs/LEARNING.md](docs/LEARNING.md). Parked ideas live in
 [docs/FUTURE_UPDATES.md](docs/FUTURE_UPDATES.md).
 
 ## Where things stand
@@ -44,7 +44,7 @@ in-memory copy:
   a browser runs and the listener would freeze.
 - Closed by the SQLite move the same night (see the top of this list): same-list changes now run
   in one transaction.
-- Interview write-up: `nhl-dashboard/docs/LEARNING.md`, "2026-11-10 — A lost update between two
+- Interview write-up: `docs/LEARNING.md`, "2026-11-10 — A lost update between two
   processes".
 
 **Questions the agent now answers itself** (`leverBrowserExecutor.ts`, staging trick):
