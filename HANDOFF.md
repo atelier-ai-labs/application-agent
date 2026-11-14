@@ -105,6 +105,18 @@ listener for about a minute until `contract-to-hire` was dropped ("contract" alr
   dropdown the form won't take becomes a question; curly-apostrophe disability option; "I confirm
   that I reside in the US". Verified live on Samsara: gender, disability and residence now fill.
 
+## 2026-11-14: model-call log and essay eval
+
+- 0e811e3: every local-model call (essay drafts, answer-bank matches) appends a line to
+  `.local/career-agent/model-calls.jsonl`: purpose, model, promptVersion (hash of prompt + template),
+  attempt, question, outcome (drafted or why dropped), output, problems, latency, tokens.
+- 0ff67e0: `npm run career-agent:eval-essays [-- --save-baseline] [--only <id>]` over
+  `application-agent/evals/essay-cases.json` (13 real questions). Checks: drafted, length, no_filler,
+  not_copied, grounded, names_company. Reports + baseline in `.local/career-agent/evals/`.
+- Baseline 0.48 (qwen2.5:7b, prompt a25c005a99): drafted 54%, no_filler 57%, others ~100%. 4 of the 6
+  missing drafts were the model declining for insufficient evidence on story questions → next: give
+  the drafter real stories (story bank / profile projects: this agent, PuckPulse AI), re-run, compare.
+
 ## Known gaps / next
 
 - Done 11-10 late (bac524c): "select all that apply" groups are one question with the box labels as
