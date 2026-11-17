@@ -5,6 +5,57 @@ how I'd describe it in an interview. Newest first. PuckPulse's log lives in nhl-
 
 ---
 
+## 2026-11-17 — How would a new user's answers get learned? Share the questions, never the answers
+
+**The question.** Today the agent knows my answers because I've answered hundreds of form questions
+over two months. If someone else signed up tomorrow, how would it learn theirs? A questionnaire of
+"every question ever" isn't possible.
+
+**The data.** I counted the questions in the 46 real forms the agent has saved (questions only,
+never answers):
+- 861 fields, but only **248 distinct questions** once the company name is taken out
+- **180 of the 248 (73%) appeared on just one form**: company-specific questions and essays
+- the 10 most common questions cover 41% of everything asked, the top 25 cover 52%, and the
+  top 100 cover 73%
+
+So a questionnaire has diminishing returns. A short one covers about half of every form, and no
+length of questionnaire gets close to all of it.
+
+**The design that follows from it, in three layers:**
+1. **Résumé → profile.** Name, contact details, current company, school, links and the résumé
+   file are 6 of the 15 most common fields.
+2. **A short starter questionnaire** (10–15 questions): work authorization, sponsorship,
+   demographics, location, salary strategy, and the never-changes facts (convictions, background
+   checks, knowing anyone at the company).
+3. **Learn as you go.** Everything else is asked the first time it appears and saved to that
+   user's own answer bank, with risk tiers deciding what gets reused:
+   - low risk: reused even when the wording differs
+   - medium risk: reused only for the same question
+   - high risk (salary, legal, employer-specific): never reused
+
+   Questions per application fall with every application; the history report already tracks
+   that number.
+
+**The idea that makes many users work: share the questions, never the answers.** What the agent
+learns about *questions* is general knowledge, and every user can benefit from it. "Do you know
+anyone at X?" is a never-changes fact, "From where do you intend to work?" is a location question,
+and Greenhouse has two domains. The *answers* stay private to each user. User #2 starts with
+everything the forms have taught the agent and none of user #1's data.
+
+**A lesson from the same day.** My answer to Arize's human check ("What is 10 times 10?") had been
+saved as "100 lol". Every reply was saved word for word, so the joke would have been typed into the
+next form that asked. At scale, the agent should confirm before saving ("Save '100' for next
+time?"), and offer "remember this for every company?" for facts like "No, I don't know anyone
+there".
+
+**How I'd say it in an interview.** "Most form questions are long-tail: 73% of the distinct
+questions in my data appeared on only one form, so no questionnaire covers them. I cover the head
+with a résumé import and a short questionnaire, then learn the tail per user, with risk tiers that
+decide what can be reused. The cross-user part is knowledge about questions, never answers, which
+keeps the data private but still helps every new user."
+
+---
+
 ## 2026-11-17 — An approval has to be tied to what was approved
 
 **The problem.** The agent fills a form, posts a "ready to submit" card in Slack and keeps the
