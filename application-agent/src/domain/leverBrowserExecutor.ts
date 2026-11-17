@@ -1930,7 +1930,8 @@ function profileValueForField(
   return undefined;
 }
 
-function optionValue(
+/** The one option a value picks on a dropdown or radio list, or undefined when none or several fit. */
+export function optionValue(
   field: ApplicationFieldDescriptor,
   value: AnswerValue,
 ): string | undefined {
@@ -1987,7 +1988,10 @@ function optionValue(
       (smsAliases.length > 0 && labels.some((label) => /^no\b/.test(label) && /\bdo not consent\b/.test(label))) ||
       // "No, I am not a veteran" (Gusto) as well as "...not a protected veteran".
       // ...and "No, I don’t have a disability" (Samsara, curly apostrophe).
-      (demographicAliases.includes("no") && labels.some((label) => /not\s+(?:a\s+)?(?:protected\s+)?veteran|(?:do\s+not|don['’]?t)\s+have\s+(?:a\s+)?disability/.test(label))) ||
+      // "I identify as a veteran but not a protected veteran" is a veteran, not
+      // a "no" (Twilio, 2026-11-17).
+      (demographicAliases.includes("no") && labels.some((label) => /not\s+(?:a\s+)?(?:protected\s+)?veteran|(?:do\s+not|don['’]?t)\s+have\s+(?:a\s+)?disability/.test(label) &&
+        !/\b(?:identify as|i am|am) a veteran\b/.test(label))) ||
       // Greenhouse's phone-country control appends the dialing code to the
       // grounded country name (for example, "United States +1"). Preserve
       // exact option selection while accepting that display form.
@@ -2007,8 +2011,14 @@ function optionValue(
     const query = valueAsString(value);
     return query || undefined;
   }
-  if (matches.length !== 1) return undefined;
-  const option = matches[0];
+  // Several options fit: the one that is word for word the profile's answer
+  // ("No, I am not a protected veteran" → "I am not a protected veteran") wins.
+  const exactlyStated = matches.length > 1
+    ? matches.filter((candidate) => [normalized(candidate.label), normalized(candidate.value)]
+      .some((label) => label === desired || label === desired.replace(/^(?:yes|no)\s*[,:;-]\s*/, "")))
+    : matches;
+  if (exactlyStated.length !== 1) return undefined;
+  const option = exactlyStated[0]!;
   const valueIsDuplicated = field.options.filter((candidate) =>
     normalized(candidate.value) === normalized(option.value),
   ).length > 1;

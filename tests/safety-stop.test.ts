@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyLeverApplicationField, sameProviderOrigin } from "../application-agent/src/domain/leverBrowserExecutor";
+import { classifyLeverApplicationField, optionValue, sameProviderOrigin } from "../application-agent/src/domain/leverBrowserExecutor";
 import { SlackNotificationAdapter } from "../application-agent/automation/slack/slackNotificationAdapter";
 import type { AttentionEvent } from "../application-agent/src/domain/attention";
 
@@ -40,5 +40,18 @@ describe("form safety stops (Figma, 2026-11-17)", () => {
     expect(classifyLeverApplicationField({ id: "question_1", label: "From where do you intend to work? *", type: "text" })).toBe("location");
     expect(classifyLeverApplicationField({ id: "question_2", label: "Where do you plan to work?", type: "text" })).toBe("location");
     expect(classifyLeverApplicationField({ id: "question_3", label: "Where do you see yourself in five years?", type: "textarea" })).not.toBe("location");
+  });
+
+  it("picks 'not a protected veteran' over 'a veteran but not a protected veteran' (Twilio)", () => {
+    const options = [
+      "I am not a protected veteran",
+      "I identify as one or more of the classifications of a protected veteran",
+      "I identify as a veteran but not a protected veteran",
+      "I don't wish to answer",
+    ].map((label) => ({ label, value: label }));
+    const field = { id: "75377", label: "Protected Veteran Status*", type: "select" as const, required: true, classification: "demographic" as const, options };
+    expect(optionValue(field, "No, I am not a protected veteran")).toBe("I am not a protected veteran");
+    expect(optionValue({ ...field, options: [{ label: "Yes", value: "Yes" }, { label: "No, I am not a veteran", value: "No, I am not a veteran" }] }, "No, I am not a protected veteran"))
+      .toBe("No, I am not a veteran");
   });
 });
