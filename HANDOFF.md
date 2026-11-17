@@ -1,4 +1,4 @@
-# Application agent handoff (updated 2026-11-10 late night)
+# Application agent handoff (updated 2026-11-17)
 
 Read this first in a new session. PuckPulse has its own handoff in `nhl-dashboard/HANDOFF.md`;
 this one is only the application agent (`application-agent/`). Its learning log is [docs/LEARNING.md](docs/LEARNING.md). Parked ideas live in
@@ -116,6 +116,37 @@ listener for about a minute until `contract-to-hire` was dropped ("contract" alr
 - Baseline 0.48 (qwen2.5:7b, prompt a25c005a99): drafted 54%, no_filler 57%, others ~100%. 4 of the 6
   missing drafts were the model declining for insufficient evidence on story questions → next: give
   the drafter real stories (story bank / profile projects: this agent, PuckPulse AI), re-run, compare.
+
+## 2026-11-17: Google login fixed, Submit works after the window closed
+
+- **Nothing applied 11-14 to 11-17.** Nate was busy, and finished windows close after 4 h
+  (`ATELIER_EXECUTION_SESSION_TIMEOUT_MS`). The 11-16 daily run failed in every phase because
+  the Google token expired (Testing app, 7-day refresh token).
+- **Google OAuth app is In production now.** Branding needed a homepage (the GitHub repo) and
+  a privacy policy (`PRIVACY.md`, 6aed8e9). There's no logo, because a logo forces brand
+  verification. google-auth was re-run, and the Sheets and Gmail dry runs are clean.
+- **Late Submit (2b388a4).** `submitFromHumanApproval` checks `executionHost.get(id)`. If the
+  window is gone (timed out, or a 404 after a host restart), it reopens the packet with
+  `startExistingApplication` (the restart path, forced to never-submit), polls it, and compares the
+  refill's `reviewSummary` with the card's copy (`APPROVED_FORMS_KEY`, written in
+  `announceSubmissionReview`) using `compareApprovedForm` (`runtime/approvedFormCheck.ts`).
+  - On a match, it submits once. A moved date is allowed.
+  - On a difference, it posts a new card.
+  - A new question goes to Slack.
+  - If the host is busy, it re-posts the old card.
+
+  Slack rewrites the tapped card with progress. Cards posted before this change have no saved
+  copy, so their first tap reopens the form and posts a fresh card, and the second tap submits.
+  Interview write-up: docs/LEARNING.md "2026-11-17 — An approval has to be tied to what was
+  approved".
+- **Waiting at end of session:**
+  - Span (DevOps) and Phantom (Backend) are at Submit, with old cards.
+  - Outmarket, Twilio, Smartsheet ×2, Figma and Reddit need answers. A Slack answer already
+    reopens a closed window (`resumeHostExecution`).
+- **Seen in passing:**
+  - The Muse source returns 404.
+  - The inbox check read a Langfuse webinar email as an interview. No row matched, so nothing
+    changed.
 
 ## Known gaps / next
 

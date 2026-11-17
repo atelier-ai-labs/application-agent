@@ -5,6 +5,42 @@ how I'd describe it in an interview. Newest first. PuckPulse's log lives in nhl-
 
 ---
 
+## 2026-11-17 — An approval has to be tied to what was approved
+
+**The problem.** The agent fills a form, posts a "ready to submit" card in Slack and keeps the
+browser window open until I tap Submit. The host closes windows after 4 hours. I was busy for a
+few days, so two finished applications (and six with questions) lost their windows, and a Submit tap
+had nothing left to click.
+
+**The obvious fix, and why it's wrong.** "If the window is gone, reopen it and submit." But my tap
+approved a specific filled-in form: the values on the card. A reopened form isn't guaranteed to be the
+same. The employer may have added a question, or the agent's rules may have changed since then and
+would answer something differently. Submitting it would mean submitting something I never saw.
+
+**What I built.** When the card is posted, the agent saves exactly what it showed: each field label
+and value. On a Submit tap it first asks the browser host whether that window still exists. If not,
+it reopens the same application, refills it from the saved answers, reads the form back, and
+compares the two field by field:
+- same → click Submit once, behind the same durable submission fence as before
+- a date that moved (the start date is "two weeks from today") → allowed, and mentioned in the reply
+- anything new, missing or different → no submit; post a fresh card with the current values instead
+- the form now asks a new question → it goes to Slack like any other question
+- all browser windows busy → put the old card back and say to tap again later
+
+**Why it matters.** This is how human-in-the-loop systems stay trustworthy as they get more
+automated. An approval isn't a general "yes, go ahead". It's a yes to a specific artifact, and the
+system has to prove that what it acts on is that artifact. The same idea shows up as "plan, then
+apply only that plan" in Terraform, or as optimistic concurrency: check that nothing changed since
+you looked, otherwise ask again.
+
+**How I'd say it in an interview.** "My agent needs human approval before submitting. Approvals
+can arrive days later, after the browser session is gone. I bind each approval to a snapshot of the
+filled form; on a late approval the agent rebuilds the form, diffs it against the snapshot, and only
+acts on an exact match, with one explicit exception for dates. Anything else turns back into a new
+approval request. It never acts on something the human didn't see."
+
+---
+
 ## 2026-11-14 — Measuring the essay drafter: model-call logging and an eval
 
 **The problem.** The application agent drafts essay answers with a small local model (qwen2.5:7b).
