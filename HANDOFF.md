@@ -4,14 +4,17 @@ Read this first in a new session. PuckPulse has its own handoff in `nhl-dashboar
 this one is only the application agent (`application-agent/`). Its learning log is [docs/LEARNING.md](docs/LEARNING.md). Parked ideas live in
 [docs/FUTURE_UPDATES.md](docs/FUTURE_UPDATES.md).
 
-## Where things stand
+## Where things stand (end of 2026-11-17)
 
-- **Applied 2026-11-09/10 (9):** Mercury, Temporal (11-09); Upstart ×3 (Upstart Bank, Unsecured
-  Installments, Delivery), Ramp Frontend, Latitude AI, Affirm CIAM, ElevenLabs (11-10).
-- **Skipped 11-10:** Gusto (asks 10+ years), Ramp Security/Stablecoin, and six stalled September
-  jobs (Rootstock, Home Depot, Tebra, Reddit Ads, McKesson, Abnormal Security). Nothing submitted.
-- **Waiting on Nate:** nothing at end of night. Next daily run is 17:30.
-- Host restarted after the last fix; every 11-10 fix is live in the host and the Slack listener.
+- **Applied: 39 total.** On 11-17: Reddit (Front End, Media Player), Smartsheet (SE I) and Twilio
+  (SE L3), all through the Slack Submit button. Nothing was applied 11-14 to 11-16.
+- **Waiting on Nate:** nothing. The host and listener both run every 11-17 fix (host restarted at
+  16:10, listener at about 16:20). The next daily run is 17:34 on 11-17, the first with all of
+  today's changes.
+- **Rules now:**
+  - One application per company: best fit, 365-day window.
+  - Ruby postings are skipped.
+  - Submission authority stays `never`: every application goes through Nate's Submit tap.
 
 ## What changed 2026-11-10 (all pushed to `feature/application-agent`)
 
@@ -117,156 +120,121 @@ listener for about a minute until `contract-to-hire` was dropped ("contract" alr
   missing drafts were the model declining for insufficient evidence on story questions → next: give
   the drafter real stories (story bank / profile projects: this agent, PuckPulse AI), re-run, compare.
 
-## 2026-11-17: Google login fixed, Submit works after the window closed
+## 2026-11-17: the day, organized
 
-- **Nothing applied 11-14 to 11-17.** Nate was busy, and finished windows close after 4 h
-  (`ATELIER_EXECUTION_SESSION_TIMEOUT_MS`). The 11-16 daily run failed in every phase because
-  the Google token expired (Testing app, 7-day refresh token).
-- **Google OAuth app is In production now.** Branding needed a homepage (the GitHub repo) and
-  a privacy policy (`PRIVACY.md`, 6aed8e9). There's no logo, because a logo forces brand
-  verification. google-auth was re-run, and the Sheets and Gmail dry runs are clean.
-- **Late Submit (2b388a4).** `submitFromHumanApproval` checks `executionHost.get(id)`. If the
-  window is gone (timed out, or a 404 after a host restart), it reopens the packet with
-  `startExistingApplication` (the restart path, forced to never-submit), polls it, and compares the
-  refill's `reviewSummary` with the card's copy (`APPROVED_FORMS_KEY`, written in
-  `announceSubmissionReview`) using `compareApprovedForm` (`runtime/approvedFormCheck.ts`).
-  - On a match, it submits once. A moved date is allowed.
-  - On a difference, it posts a new card.
-  - A new question goes to Slack.
-  - If the host is busy, it re-posts the old card.
+All of it is pushed to `feature/application-agent`. PR #10 merged the branch into `main` early in
+the day (6cba053). Everything after that is on the branch only.
 
-  Slack rewrites the tapped card with progress. Cards posted before this change have no saved
-  copy, so their first tap reopens the form and posts a fresh card, and the second tap submits.
-  Interview write-up: docs/LEARNING.md "2026-11-17 — An approval has to be tied to what was
-  approved".
-- **One application per company (Nate, 11-17).** search-intent is now
-  `companyApplicationLimit {max 1, windowDays 365}`, and the Upstart override is gone.
-  - **The limit was never actually applied before (eda5ea7).** The live campaign kept the
-    criteria it was created with, so the limit, `excludedCompanies` and `maxYearsExperience`
-    only filtered discovery, never the pre-apply check. Queue rows skipped discovery entirely.
-  - `CareerAgentService` now takes `liveSearchPolicy`. The runtime wires
-    `liveSearchPolicyFromIntentFile`, which reads search-intent for every job and keeps the last
-    good copy if the file is bad.
-  - Companies also match by job board (`companyBoardKey`), so "Span" and "Span App" are the
-    same company.
-  - **Skipped (nothing submitted), and their Sheet rows set to Skipped:**
-    - Phantom Backend (Trading) and Span App DevOps. Both companies already had an application,
-      and their Submit cards were deleted.
-    - Outmarket Full Stack AI. Already applied to Outmarket, 11-07.
-    - Smartsheet SE II. SE I was kept as the better fit: 1+ years asked vs 2+, and 4 strong
-      skill matches vs 2.
-- **Figma (d38450b, 4833a9e).** Figma had stopped with "Greenhouse form action / reply with one
-  grounded answer". The link `boards.greenhouse.io` redirects to `job-boards.greenhouse.io`, and
-  the form-destination check called that an unrelated site. `sameProviderOrigin` now treats every
-  https `*.greenhouse.io` host as Greenhouse.
-  - The three browser safety stops (wrong site, page identity, no form) carry a plain
-    explanation (`safetyStop`, kept under 240 characters because that is the prompt cap). Slack
-    shows the explanation plus "nothing to answer here", with no reply instruction.
-  - Two wordings are now answered: "From where do you intend to work?" (location) and
-    "authorized to work in the country for which you applied".
-  - Form replay: Figma goes from 4 questions to 2 (years in this type of role, why Figma), and
-    no other saved form regressed.
-  - Figma was reopened with the fix: 17 of 23 fields are filled.
-- **Applied 11-17:** Reddit (Front End, Media Player), via the Slack Submit button.
-- **Incidents 11-17:**
-  - I restarted the host while 2 windows were open (Figma, and Twilio at needs_input). Nothing was
-    lost, because Twilio's next answer reopens it, but check `activeSessions` and wait.
-  - The listener exited once with "database is locked" (14:22:05) while restart-existing was
-    running, and systemd restarted it 5 s later. Startup should retry a busy database instead of
-    exiting. **TODO.**
-- **Figma skipped** (Ruby is its main language). Then f78ffa5:
-  - **`excludedLanguages` in search-intent** (now `["Ruby"]`), handled in
-    `domain/requiredLanguages.ts`. Discovery and the pre-apply check skip a posting when the title
-    names the language, or when a sentence requires it. These don't count:
-    - a nice-to-have
-    - one choice among several ("or", "such as")
-    - a plain mention
+### Housekeeping
+- **README rewritten** in plain language, in Nate's voice (508800c). The old one is now
+  `docs/REFERENCE.md`.
+- **`PRIVACY.md` added** (6aed8e9) for the Google sign-in screen.
 
-    Aliases: ruby→rails, go→golang (a bare "Go" is never matched), c#→.net.
-  - **Yes/No buttons** for typed-answer questions that are plain yes/no questions
-    (`isYesNoQuestion`). A tap sends "Yes" or "No", the same as typing it.
-  - **Standing topic `knows_employee`** ("Do you know anyone who works at X?"). It is **not set
-    yet**: waiting for Nate's answer, then run
-    `npm run career-agent:answers -- --set-standing knows_employee=No`.
-- **The answer bank is in SQLite (0f097d7, migrated 14:54).** It is the `answer_bank` table in
-  state.db, one row per answer, keyed by `(owner_id, key)` with owner `local`.
-  - `AnswerBankStore.update(change)` replaced `save(list)`. Each change is one `BEGIN IMMEDIATE`
-    transaction that writes only changed rows and never deletes a row it can't parse.
-  - `openAnswerBankStore()` is the only way to open the bank.
-  - The 52 entries were imported and match the backup exactly. The JSON was renamed
-    `answer-bank.json.moved-to-state-db-1794945214950`, with backups
+### Why nothing got applied for three days, and the fixes
+- **Google login expired.** The OAuth app was in "Testing" (7-day refresh tokens), and the 11-16
+  daily run failed in every phase. The app is **In production** now.
+  - The branding page needed a homepage (the GitHub repo) and a privacy policy (`PRIVACY.md`).
+    No logo, because a logo forces brand verification.
+  - google-auth was re-run, and the Sheets and Gmail dry runs are clean.
+- **Finished forms expired.** The host closes windows after 4 h, and the Submit button then had
+  nothing to click. Now a late Submit works (2b388a4):
+  - `submitFromHumanApproval` checks `executionHost.get(id)`. If the window is gone, it reopens
+    the packet (`startExistingApplication`, forced never-submit) and refills it.
+  - It compares the refill's `reviewSummary` with the copy saved when the card was posted
+    (`APPROVED_FORMS_KEY`, `compareApprovedForm` in `runtime/approvedFormCheck.ts`).
+  - On a match it submits once. A moved date is allowed.
+  - Any difference posts a fresh card, and a new question goes to Slack.
+  - Write-up: LEARNING "An approval has to be tied to what was approved".
+
+### Search rules
+- **One application per company** (Nate's call): `companyApplicationLimit {max 1, windowDays 365}`,
+  no overrides.
+- **The limit, `excludedCompanies` and `maxYearsExperience` had never reached the pre-apply check**
+  (eda5ea7). The live campaign kept the criteria it was created with. Queue rows only went through
+  discovery, which does read search-intent.
+  - `CareerAgentService.liveSearchPolicy` fixes this. The runtime's
+    `liveSearchPolicyFromIntentFile` reads search-intent for every job and keeps the last good
+    copy if the file is bad.
+- **Companies match by job board too** (`companyBoardKey`), so "Span" and "Span App" are one
+  company.
+- **Excluded languages** (f78ffa5): `excludedLanguages: ["Ruby"]`, in `domain/requiredLanguages.ts`.
+  - A posting is skipped when its title names the language, or a sentence requires it.
+  - A nice-to-have, one choice among several, or a plain mention doesn't count.
+  - Aliases: rails→ruby, golang→go (a bare "Go" is never matched), .net→c#.
+- **Skipped under the new rules**, nothing submitted, Sheet rows set to Skipped:
+  - Phantom Backend, Span App DevOps, Outmarket Full Stack AI: already applied to each company.
+  - Smartsheet SE II: kept SE I as the better fit.
+  - Figma: Ruby.
+
+### Answers and the answer bank
+- **The answer bank is in SQLite** (0f097d7): the `answer_bank` table in state.db, keyed by
+  `(owner_id, key)`, with owner `local`.
+  - `AnswerBankStore.update(change)` replaced `save(list)`. It is one transaction that writes only
+    the rows that changed and never deletes a row it can't read.
+  - Edit with `career-agent:answers -- --set/--disable/--enable/--remove/--export` (`--help`
+    lists them).
+  - The import matched exactly: 52 entries. Backups are
     `answer-bank.json.pre-sqlite-20261117-145327.backup` and
     `state.db.pre-answer-bank-20261117-145327.backup`.
-  - Edit the bank with `career-agent:answers -- --set/--disable/--enable/--remove/--export`
-    (`--help` lists them). The browser host doesn't use the bank, so only the listener was
-    restarted.
-  - Fixed today: the Arize human-check answer had been saved as "100 lol" and is now "100".
-    `knows_employee=No` is set.
-- **7fa00d9:**
-  - **A lone checkbox** (Twilio's "By clicking Acknowledge…") now gets Yes/No buttons
-    (`questionOptions` in attention.ts). Before, it was posted as a typed question with no button.
-    Twilio's old message was deleted and re-posted (one-off).
-  - **`answerWaitingQuestionsFromBank`.** The listener rechecks open questions whenever the saved
-    answers change (a sha256 of key, value and disabled for each entry, checked every minute) and
-    once at start. It then resumes the form or posts the next question. On start it answered
-    Smartsheet's "know anyone" question with "No, I don't know anyone at Smartsheet." from the
-    standing answer.
-- **Applied 11-17:** Smartsheet SE I (15:29, Slack Submit).
-- **Lost question, fixed in 1262578.** Twilio's Yes did nothing: every tap logged
-  `unknown_or_closed_event`.
-  - Two code paths in the listener (answer → post next question, and the minute loop's stale
-    replacement) each read the campaign, added a question and saved it whole. One question was
-    erased, and its Slack message kept buttons that pointed at nothing.
-  - `saveCampaign` now merges `attentionEvents` and `runHistory` by id inside the transaction
-    (`mergeCampaignWrite`). Closed questions never reopen from an older copy, and a recorded
-    Slack delivery is kept.
-  - **Deliberate deletions or clearing a delivery must use `replaceCampaign`.** The re-post
-    one-offs used `saveCampaign` and would no longer work.
-  - `recordAttentionResolution` used to pick the first open copy of a question, see that the ids
-    differed, and silently record nothing. It now closes the answered copy and cancels its twins.
-  - Twilio's dead messages were deleted, and the guidelines question was re-posted top-level.
-  - Test gotcha: vitest's default environment is jsdom, where `SqliteKeyValueStorage` reads
-    return null (`instanceof Uint8Array` fails across realms). Database tests need
-    `// @vitest-environment node`.
-- **No essay drafts on checkboxes (623409c).** Twilio's guidelines checkbox was classified as
-  `free_text` because of its long label, so qwen drafted an essay about PuckPulse for it, and
-  Slack showed Yes/No plus "Approve draft". Four layers fix it:
-  1. `asFreeText` returns "unknown" for a checkbox (staging trick).
-  2. `draftAtsAnswerForBlocker` skips anything that isn't a typed answer.
-  3. `withoutInvalidDraft` drops a draft unless the question is free_text. It used to do that only
-     when the whole record was invalid.
-  4. The Slack render ignores a draft on a choice question.
+- **Standing answer `knows_employee=No`** ("Do you know anyone who works at X?").
+- **Fixed entry:** the Arize human check had been saved as "100 lol"; it's "100" now.
+- **Waiting questions are rechecked when saved answers change** (7fa00d9,
+  `answerWaitingQuestionsFromBank`). It runs every minute but only does work when the bank's hash
+  changed. Smartsheet's question was answered that way.
+- **Loop breaker** (c7420ff). If the form asks again after a saved answer was used, the question is
+  marked `answer-bank:rejected-by-form` and goes to Nate.
+  - Twilio's veteran question had looped 39 times (15:57–16:08) while the host ran old code.
+- **Ollama `keep_alive` 2h** (843deed). The model unloaded after 5 idle minutes, and the 37 s
+  reload was longer than the 15 s matcher timeout. Every bank check after a quiet spell timed out,
+  and the listener took 95 s to start.
 
-  Re-posted clean. **The host still runs the old classification**: restart it once no windows are
-  open (Twilio's was open at 15:46).
-- **Veteran match (d18217a).** "No, I am not a protected veteran" matched both "I am not a
-  protected veteran" and "I identify as a veteran but not a protected veteran", so the agent
-  asked. Labels that identify as a veteran are no longer a "no", and among several matches the
-  word-for-word one wins. `optionValue` is now exported for tests.
-- **39-cycle loop (c7420ff).** From 15:57 to 16:08 the host still ran the old veteran code. Each
-  run raised the veteran question, the bank answered it (exact entry), the job resumed, and the
-  host failed again. When `mergeBlockers` reopens a question that a saved answer had resolved, it
-  now adds `answer-bank:rejected-by-form`. The bank, `answerWaitingQuestionsFromBank` and
-  `carryAnswerToWaitingJobs` skip marked questions, so they go to Slack. The test fails without
-  the fix (11 runs).
-- **Ollama keep_alive 2h (843deed).** The default 5-minute unload plus a 37 s reload against the
-  15 s matcher timeout meant every bank check after idle timed out. That's also why the listener
-  took 95 s to start. Configurable with `ATELIER_CAREER_AGENT_OLLAMA_KEEP_ALIVE`.
-- **One-off scripts:** run them in the background, or with a long timeout. A `timeout 120` killed
-  one mid-poll and left Twilio's job record stuck at "executing" while the host had moved on.
-- **Waiting at end of session:** Twilio was reopened at about 16:15 on all of today's fixes
-  (`restart-existing`).
-- **Seen in passing:**
-  - The Muse source returns 404.
-  - The inbox check read a Langfuse webinar email as an interview. No row matched, so nothing
-    changed.
+### Form filling
+- **Greenhouse's two domains** (d38450b): `boards.greenhouse.io` redirects to
+  `job-boards.greenhouse.io`, and the form-destination check had called that a foreign site
+  (Figma).
+- **Safety stops explain themselves in Slack**, with "nothing to answer here".
+- **Newly answered from the profile:**
+  - "From where do you intend to work?" (location)
+  - "authorized to work in the country for which you applied" (4833a9e)
+- **Veteran lists** (d18217a): "I identify as a veteran but not a protected veteran" no longer
+  counts as "no". When several options match, the word-for-word one wins. `optionValue` is
+  exported.
+- **Checkboxes are never essays** (623409c), on four layers:
+  1. classification
+  2. the drafter skips them
+  3. a stored draft is dropped from a choice question when read
+  4. the Slack render
+
+### Slack
+- **Yes/No buttons** for plain yes/no typed questions (`isYesNoQuestion`) and for a lone checkbox.
+- **Lost questions** (1262578): two listener code paths each saved the whole campaign, and one
+  question was erased while its Slack buttons stayed live (Twilio's dead Yes).
+  - `saveCampaign` now merges `attentionEvents` and `runHistory` by id inside the transaction
+    (`mergeCampaignWrite`).
+  - `recordAttentionResolution` closes the copy that was answered and cancels its twins. It used
+    to pick the first copy, see the ids differ, and record nothing.
+
+### Incidents (mine)
+- I restarted the host with 2 windows open. Nothing was lost.
+- The listener exited once on "database is locked" (14:22) during restart-existing, and systemd
+  restarted it.
+- `timeout 120` killed two one-off scripts mid-poll and left Twilio's record at "executing".
+
+### Seen in passing, not fixed
+- The Muse job source returns 404.
+- The inbox check read a Langfuse webinar email as an interview. No row matched.
 
 ## Known gaps / next
 
-- Done 11-10 late (bac524c): "select all that apply" groups are one question with the box labels as
-  choices; the answer checks only that box, and an answer that names no box asks again. Profile now
-  has `identity.preferredName: "Nate"` and `approvedReusableAnswers.pronouns: "He/him"`.
-- Headless browser around 11-14 (FUTURE_UPDATES); the Slack Submit button is what makes it work.
+- **Step 3 of Nate's plan:** one daily Slack message with every open question, so they can be
+  cleared in minutes.
+- **The listener's startup** should retry a busy database instead of exiting.
+- **Answer bank:** confirm before saving an answer ("Save '100' for next time?"), and add a
+  "remember this for every company?" button.
+- **Multi-user design** (LEARNING 11-17): résumé → profile, a short starter questionnaire, then
+  learn as you go. Share the questions, never the answers. `owner_id` already exists.
+- **The Muse 404, and the inbox misreading newsletters as interviews.**
+- **Headless browser.** Later: Nate wants more trust in the agent first.
 
 ## How to operate (learned the hard way)
 
@@ -285,3 +253,12 @@ listener for about a minute until `contract-to-hire` was dropped ("contract" alr
   their tests are not ours; commit only our lines (staging trick: edit `git show HEAD:file` copy,
   `git update-index --cacheinfo`, verify with `git checkout-index` into a scratch dir).
 - Push after each chunk: `git push application-agent HEAD:feature/application-agent`.
+- **Deleting questions on purpose** (or clearing a Slack delivery to re-post) needs
+  `careerRepository.replaceCampaign`. `saveCampaign` merges, so it would keep them.
+- Tests that use `SqliteKeyValueStorage` need `// @vitest-environment node`. Under jsdom its reads
+  return null.
+- Run one-off scripts that touch the host in the background, or with a long timeout. A killed
+  script leaves the job record behind the host.
+- A Submit card can be tapped after its window closed: the agent reopens, refills, checks and
+  submits.
+- The browser host doesn't use the answer bank. A bank change needs only a listener restart.
