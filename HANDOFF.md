@@ -155,8 +155,29 @@ listener for about a minute until `contract-to-hire` was dropped ("contract" alr
     - Outmarket Full Stack AI. Already applied to Outmarket, 11-07.
     - Smartsheet SE II. SE I was kept as the better fit: 1+ years asked vs 2+, and 4 strong
       skill matches vs 2.
-- **Waiting at end of session:** Twilio, Smartsheet SE I, Figma and Reddit need answers. A Slack
-  answer already reopens a closed window (`resumeHostExecution`).
+- **Figma (d38450b, 4833a9e).** Figma had stopped with "Greenhouse form action / reply with one
+  grounded answer". The link `boards.greenhouse.io` redirects to `job-boards.greenhouse.io`, and
+  the form-destination check called that an unrelated site. `sameProviderOrigin` now treats every
+  https `*.greenhouse.io` host as Greenhouse.
+  - The three browser safety stops (wrong site, page identity, no form) carry a plain
+    explanation (`safetyStop`, kept under 240 characters because that is the prompt cap). Slack
+    shows the explanation plus "nothing to answer here", with no reply instruction.
+  - Two wordings are now answered: "From where do you intend to work?" (location) and
+    "authorized to work in the country for which you applied".
+  - Form replay: Figma goes from 4 questions to 2 (years in this type of role, why Figma), and
+    no other saved form regressed.
+  - Figma was reopened with the fix: 17 of 23 fields are filled.
+- **Applied 11-17:** Reddit (Front End, Media Player), via the Slack Submit button.
+- **Incidents 11-17:**
+  - I restarted the host while 2 windows were open (Figma, and Twilio at needs_input). Nothing was
+    lost, because Twilio's next answer reopens it, but check `activeSessions` and wait.
+  - The listener exited once with "database is locked" (14:22:05) while restart-existing was
+    running, and systemd restarted it 5 s later. Startup should retry a busy database instead of
+    exiting. **TODO.**
+- **Waiting at end of session:**
+  - Twilio: its window was closed by the restart, and its next answer reopens it.
+  - Smartsheet SE I.
+  - Figma: 2 questions.
 - **Seen in passing:**
   - The Muse source returns 404.
   - The inbox check read a Langfuse webinar email as an interview. No row matched, so nothing
