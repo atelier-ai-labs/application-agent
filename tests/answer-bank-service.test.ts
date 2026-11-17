@@ -5,7 +5,8 @@ import {
   type ApplicationExecutionRequest, type ApplicationExecutor, type ApplicationExecutorResult, type CandidateProfile,
   type CareerBlockerDraft, type ExecutionInspection, type JobSourceListing,
 } from "../application-agent/src";
-import { InMemoryAnswerBankStore, answerBankKey, type AnswerBankEntry } from "../application-agent/src/domain/answerBank";
+import { InMemoryAnswerBankStore, answerBankKey, withStandingAnswer, type AnswerBankEntry } from "../application-agent/src/domain/answerBank";
+import { attentionEventForCareerBlocker } from "../application-agent/src/domain/attention";
 
 const capturedAt = "2026-11-03T12:00:00.000Z";
 
@@ -93,6 +94,35 @@ function optionId(event: { question?: { options: readonly { id: string; label: s
 const hearAbout = (company: string) => ({ label: `How did you hear about ${company}?`, options: [`${company} Employee`, "LinkedIn", "Other"] });
 
 describe("answer bank in the career service", () => {
+  it("answers a question already waiting in Slack once a matching standing answer is set (Smartsheet, 2026-11-17)", async () => {
+    const bank = new InMemoryAnswerBankStore();
+    const executor = new QuestionExecutor((company) => ({ label: `Do you know anyone who works at ${company}?`, options: ["Yes", "No"] }));
+    const { service, campaign, notifications } = setup(["Smartsheet"], executor, bank);
+    await service.runCampaign(campaign.id);
+    expect(notifications.publishedEvents.map((event) => event.question?.prompt)).toEqual(["Do you know anyone who works at Smartsheet?"]);
+    expect(await service.answerWaitingQuestionsFromBank()).toEqual([]);
+
+    bank.update((entries) => withStandingAnswer(entries, "knows_employee", "No", capturedAt));
+    const answered = await service.answerWaitingQuestionsFromBank();
+    expect(answered).toEqual([expect.stringContaining("Smartsheet — Platform Engineer: Do you know anyone who works at Smartsheet? → No")]);
+    expect(executor.received.Smartsheet).toBe("No");
+    expect(notifications.notices.at(-1)).toMatch(/^I answered these waiting questions from your saved answers/);
+    expect(service.listAttentionEvents(campaign.id).every((event) => event.status !== "open")).toBe(true);
+  });
+
+  it("gives a lone acknowledgement checkbox Yes and No buttons (Twilio, 2026-11-17)", () => {
+    const created = attentionEventForCareerBlocker({
+      campaignId: "c", jobId: "j", createdAt: capturedAt, createId: (prefix) => `${prefix}-1`,
+      blocker: {
+        id: "b", kind: "unknown_form_field", unit: "submission", questionProvenance: "ATS_FORM", field: "ack", status: "open", createdAt: capturedAt,
+        question: "Acknowledge", reason: "r", resumeAfterHuman: true,
+        context: { jobId: "j", applicationId: "a", company: "Twilio", role: "Software Engineer L3" },
+        evidence: ["field-id:ack", "field-type:checkbox", "field-label:Acknowledge", "question-prompt:By clicking the \"Acknowledge\" button, you acknowledge that Twilio processes data in accordance with the Twilio Applicant Privacy Policy."],
+      },
+    });
+    expect(created?.event.question).toMatchObject({ kind: "single_choice", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] });
+  });
+
   it("saves a Slack answer, then fills the same question at the next company without asking", async () => {
     const bank = new InMemoryAnswerBankStore();
     const executor = new QuestionExecutor(hearAbout);

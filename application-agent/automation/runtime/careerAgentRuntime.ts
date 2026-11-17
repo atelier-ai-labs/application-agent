@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { ApplicationService, type ApplicationServiceOptions } from "../../src/service/applicationService";
@@ -203,6 +204,8 @@ export interface BackgroundCareerAgentRuntime {
   refreshWaitingBoard(now?: Date): Promise<"posted" | "unchanged" | "unavailable">;
   /** Deletes the bot's finished Slack messages older than a day; returns how many. */
   tidySlack(now?: Date, options?: { maxDeletes?: number; pauseMs?: number }): Promise<number>;
+  /** When the saved answers changed, answers waiting questions they now cover; returns one line per job. */
+  answerWaitingFromBankIfChanged(): Promise<string[]>;
   stop(): Promise<void>;
   createCampaign(input: CreateCampaignInput): Campaign;
   runCampaign(campaignId: string): Promise<CampaignRunResult>;
@@ -526,6 +529,7 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
   private readonly hostPollIntervalMs: number;
   private readonly hostPollTimeoutMs: number;
   private readonly submissionAuthority?: DurableSubmissionAuthority;
+  private readonly answerBankStore?: import("../../src/domain/answerBank").AnswerBankStore;
   private readonly confirmQueueRow?: (job: CareerJob) => Promise<string | undefined>;
   private readonly receiptInbox?: InboxSource;
   private readonly receiptPollIntervalMs: number;
@@ -556,6 +560,7 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
     this.hostPollIntervalMs = positiveInteger(options.hostPollIntervalMs, 500, "Career Agent host poll interval");
     this.hostPollTimeoutMs = positiveInteger(options.hostPollTimeoutMs, 30 * 60 * 1_000, "Career Agent host poll timeout");
     this.submissionAuthority = options.submissionAuthority;
+    this.answerBankStore = options.answerBank;
     this.defaultCampaignInput = options.defaultCampaignInput;
     const serviceOptions: CareerAgentServiceOptions = {
       ...(options.now ? { now: options.now } : {}),
@@ -1300,6 +1305,24 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
   }
 
   private readonly announcedSubmissionReviews = new Set<string>();
+  private answerBankSignature?: string;
+
+  async answerWaitingFromBankIfChanged(): Promise<string[]> {
+    const bank = this.answerBankStore;
+    if (!bank) return [];
+    let signature: string;
+    try {
+      signature = createHash("sha256")
+        .update(JSON.stringify(bank.entries().map((entry) => [entry.key, entry.value, entry.disabled === true])))
+        .digest("hex");
+    } catch {
+      return [];
+    }
+    if (signature === this.answerBankSignature) return [];
+    const answered = await this.service.answerWaitingQuestionsFromBank();
+    this.answerBankSignature = signature;
+    return answered;
+  }
 
   /**
    * jobId → Slack ts of the latest "Application ready to submit" card, kept in

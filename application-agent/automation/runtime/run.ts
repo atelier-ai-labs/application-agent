@@ -83,6 +83,13 @@ try {
       if (refreshing || shuttingDown) return;
       refreshing = true;
       try {
+        // A saved answer set or edited since the last check may answer a
+        // question already waiting in Slack (Smartsheet, 2026-11-17).
+        const answered = await activeRuntime.answerWaitingFromBankIfChanged().catch((error: unknown) => {
+          console.warn(`[career-agent-runtime] answering waiting questions from saved answers failed: ${error instanceof Error ? error.message.slice(0, 200) : "unknown error"}`);
+          return [] as string[];
+        });
+        if (answered.length > 0) console.log(`[career-agent-runtime] answered waiting questions from saved answers on ${answered.length} application(s)`);
         if (await activeRuntime.refreshWaitingBoard() === "posted") console.log("[career-agent-runtime] Waiting on you board updated");
       } catch (error) {
         console.warn(`[career-agent-runtime] Waiting on you board refresh failed: ${error instanceof Error ? error.message.slice(0, 200) : "unknown error"}`);

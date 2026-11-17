@@ -3619,6 +3619,56 @@ export class CareerAgentService {
     }
   }
 
+  /**
+   * Answers questions already waiting in Slack that the bank can now answer:
+   * a standing answer set after the question was posted ("Do you know anyone
+   * who works at Smartsheet?", 2026-11-17), or a saved answer edited by hand.
+   * The bank's usual risk rules apply. A job left with nothing to ask resumes
+   * in the browser; otherwise its next question is posted. Returns one line
+   * per job that changed.
+   */
+  async answerWaitingQuestionsFromBank(): Promise<string[]> {
+    if (!this.answerBank) return [];
+    let entries;
+    try { entries = this.answerBank.entries(); } catch { return []; }
+    const notices: string[] = [];
+    for (const job of this.careerRepository.listJobs().filter((candidate) => candidate.status === "needs_input")) {
+      // A browser that is still filling the form will read the bank itself.
+      if (job.execution?.mode === "real_local" && ["starting", "inspecting", "executing", "resuming"].includes(job.execution.status)) continue;
+      let current = job;
+      const answered: string[] = [];
+      for (const blocker of job.blockers) {
+        if (blocker.status !== "open" || blocker.unit !== "submission" || questionProvenanceForBlocker(blocker) !== "ATS_FORM") continue;
+        const match = await findAnswerBankMatch(entries, questionFromBlocker(blocker), this.answerBankMatcher,
+          standingRecordsFromJobs(this.careerRepository.listJobs(), current.id));
+        if (!match) continue;
+        current = await this.resolveCareerBlocker(current.campaignId, current.id, blocker.id, match.value, {
+          deferResume: true,
+          answerEvidence: ["answer-provider:answer-bank", `answer-bank-entry:${match.entry.id}`, `answer-bank-match:${match.kind}`, `answer-bank-tier:${match.entry.tier}`, "answered-while-waiting"],
+        });
+        answered.push(`${blocker.question.replace(/\s*\*+\s*$/, "").slice(0, 80)} → ${String(match.value).slice(0, 40)}`);
+      }
+      if (answered.length === 0) continue;
+      const campaign = this.getCampaign(current.campaignId);
+      const next = this.nextAttentionBlocker(campaign, current);
+      if (next) {
+        await this.publishAttentionForJob(campaign, current);
+      } else if (current.execution?.mode === "real_local") {
+        if (this.resumeAttention) {
+          try { await this.resumeAttention(current.campaignId, current.id, { verificationHandoff: false }); } catch { /* its next Slack answer resumes it */ }
+        }
+      } else if (campaign.status === "active") {
+        const resumed = await this.resumeBlockedJob(campaign, current);
+        if (resumed.careerJob.status === "needs_input") await this.publishAttentionForJob(this.getCampaign(current.campaignId), resumed.careerJob);
+      }
+      notices.push(`${current.job.company} — ${current.job.title}: ${answered.join("; ")}${next ? "" : " (nothing left to ask, so it's filling the form now)"}`);
+    }
+    if (notices.length > 0) {
+      await this.notificationAdapter?.publishInfoNotice?.(`I answered these waiting questions from your saved answers:\n${notices.map((line) => `• ${line}`).join("\n")}`).catch(() => undefined);
+    }
+    return notices;
+  }
+
   private async draftAtsAnswerForBlocker(job: CareerJob, blocker: CareerBlocker) {
     if (
       !this.applicationAnswerDraftGenerator ||
