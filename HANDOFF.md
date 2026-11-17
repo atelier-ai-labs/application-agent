@@ -139,10 +139,24 @@ listener for about a minute until `contract-to-hire` was dropped ("contract" alr
   copy, so their first tap reopens the form and posts a fresh card, and the second tap submits.
   Interview write-up: docs/LEARNING.md "2026-11-17 — An approval has to be tied to what was
   approved".
-- **Waiting at end of session:**
-  - Span (DevOps) and Phantom (Backend) are at Submit, with old cards.
-  - Outmarket, Twilio, Smartsheet ×2, Figma and Reddit need answers. A Slack answer already
-    reopens a closed window (`resumeHostExecution`).
+- **One application per company (Nate, 11-17).** search-intent is now
+  `companyApplicationLimit {max 1, windowDays 365}`, and the Upstart override is gone.
+  - **The limit was never actually applied before (eda5ea7).** The live campaign kept the
+    criteria it was created with, so the limit, `excludedCompanies` and `maxYearsExperience`
+    only filtered discovery, never the pre-apply check. Queue rows skipped discovery entirely.
+  - `CareerAgentService` now takes `liveSearchPolicy`. The runtime wires
+    `liveSearchPolicyFromIntentFile`, which reads search-intent for every job and keeps the last
+    good copy if the file is bad.
+  - Companies also match by job board (`companyBoardKey`), so "Span" and "Span App" are the
+    same company.
+  - **Skipped (nothing submitted), and their Sheet rows set to Skipped:**
+    - Phantom Backend (Trading) and Span App DevOps. Both companies already had an application,
+      and their Submit cards were deleted.
+    - Outmarket Full Stack AI. Already applied to Outmarket, 11-07.
+    - Smartsheet SE II. SE I was kept as the better fit: 1+ years asked vs 2+, and 4 strong
+      skill matches vs 2.
+- **Waiting at end of session:** Twilio, Smartsheet SE I, Figma and Reddit need answers. A Slack
+  answer already reopens a closed window (`resumeHostExecution`).
 - **Seen in passing:**
   - The Muse source returns 404.
   - The inbox check read a Langfuse webinar email as an interview. No row matched, so nothing
