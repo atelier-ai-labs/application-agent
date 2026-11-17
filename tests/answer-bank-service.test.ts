@@ -66,9 +66,10 @@ function setup(companies: string[], executor: ApplicationExecutor, bank: InMemor
   const source = new StaticJobSource("bank-source", listings ?? companies.map(listing));
   let id = 0;
   const createId = (prefix: string) => `${prefix}-bank-${(id += 1)}`;
+  const careerRepository = new InMemoryCareerRepository();
   const service = new CareerAgentService(profile, {
     applicationService: new ApplicationService(new InMemoryApplicationRepository(), profile, new DeterministicModelClient(), { now: () => capturedAt, createId }),
-    careerRepository: new InMemoryCareerRepository(),
+    careerRepository,
     scout: new JobScout({ [source.id]: source }, () => capturedAt),
     executor, notificationAdapter: notifications, answerBank: bank,
   }, { now: () => capturedAt, createId });
@@ -81,7 +82,7 @@ function setup(companies: string[], executor: ApplicationExecutor, bank: InMemor
     dailyApplicationLimit: listings?.length ?? companies.length,
   });
   service.activateCampaign(campaign.id);
-  return { service, campaign, notifications };
+  return { service, campaign, notifications, careerRepository };
 }
 
 /** Slack sends the option's id for a single-choice question. */
@@ -108,6 +109,24 @@ describe("answer bank in the career service", () => {
     expect(executor.received.Smartsheet).toBe("No");
     expect(notifications.notices.at(-1)).toMatch(/^I answered these waiting questions from your saved answers/);
     expect(service.listAttentionEvents(campaign.id).every((event) => event.status !== "open")).toBe(true);
+  });
+
+  it("closes both copies of a question posted twice when one is answered (Twilio, 2026-11-17)", async () => {
+    const executor = new QuestionExecutor(hearAbout);
+    const { service, campaign, notifications, careerRepository } = setup(["Twilio"], executor, new InMemoryAnswerBankStore());
+    await service.runCampaign(campaign.id);
+    const stored = careerRepository.getCampaign(campaign.id)!;
+    const original = stored.attentionEvents!.find((event) => event.status === "open")!;
+    careerRepository.saveCampaign({ ...stored, attentionEvents: [...stored.attentionEvents!, { ...original, id: "attention-twin" }] });
+    const closed: string[] = [];
+    notifications.closeAttentionEvent = async (event) => { closed.push(event.id); };
+    const result = await service.resolveAttentionResponse({ eventId: "attention-twin", selectedOption: optionId(original, "LinkedIn"), actorIdentity: { provider: "test", userId: "nate" }, respondedAt: capturedAt });
+    const after = service.listAttentionEvents(campaign.id);
+    expect(result.status).toBe("resolved");
+    expect(after.find((event) => event.id === "attention-twin")?.status).toBe("resolved");
+    expect(after.find((event) => event.id === original.id)?.status).toBe("cancelled");
+    expect(closed).toEqual(expect.arrayContaining(["attention-twin", original.id]));
+    expect(executor.received.Twilio).toBe("LinkedIn");
   });
 
   it("gives a lone acknowledgement checkbox Yes and No buttons (Twilio, 2026-11-17)", () => {

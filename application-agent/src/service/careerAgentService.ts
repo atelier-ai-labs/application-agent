@@ -3985,9 +3985,12 @@ export class CareerAgentService {
     suppliedResponse?: AttentionResponse,
   ): Promise<void> {
     const currentCampaign = this.getCampaign(campaign.id);
-    const record = currentCampaign.attentionEvents?.find(
+    const openForBlocker = (currentCampaign.attentionEvents ?? []).filter(
       (candidate) => candidate.jobId === job.id && candidate.blockerId === blocker.id && candidate.status === "open",
     );
+    // With two copies of one question, the one that was answered is the one
+    // that closes; the first copy found is only a fallback (Twilio, 2026-11-17).
+    const record = openForBlocker.find((candidate) => candidate.id === suppliedResponse?.eventId) ?? openForBlocker[0];
     if (!record || record.type !== "needs_input" || !record.question) return;
 
     const rawValue = typeof value === "string" ? value.trim() : String(value);
@@ -4023,16 +4026,25 @@ export class CareerAgentService {
       response,
       answerUsed: rawValue,
     };
+    // The same form question posted twice (two parts of the agent posting at
+    // once, Twilio 2026-11-17): one answer closes both, buttons included.
+    const twins = (currentCampaign.attentionEvents ?? [])
+      .filter((candidate) => candidate.id !== record.id && candidate.status === "open" && candidate.jobId === record.jobId &&
+        Boolean(record.blockerId) && candidate.blockerId === record.blockerId)
+      .map((candidate) => ({ ...candidate, status: "cancelled" as const, resolvedAt: response.respondedAt }));
     const updatedCampaign: Campaign = {
       ...currentCampaign,
-      attentionEvents: (currentCampaign.attentionEvents ?? []).map((candidate) => (candidate.id === record.id ? resolved : candidate)),
+      attentionEvents: (currentCampaign.attentionEvents ?? []).map((candidate) =>
+        candidate.id === record.id ? resolved : twins.find((twin) => twin.id === candidate.id) ?? candidate),
       updatedAt: this.now(),
     };
     this.careerRepository.saveCampaign(updatedCampaign);
-    try {
-      await this.notificationAdapter?.closeAttentionEvent?.(publicAttentionEvent(resolved));
-    } catch {
-      // Closing a notification is best effort; the persisted resolution is authoritative.
+    for (const closed of [resolved, ...twins]) {
+      try {
+        await this.notificationAdapter?.closeAttentionEvent?.(publicAttentionEvent(closed));
+      } catch {
+        // Closing a notification is best effort; the persisted resolution is authoritative.
+      }
     }
   }
 

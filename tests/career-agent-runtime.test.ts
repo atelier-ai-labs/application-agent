@@ -1325,7 +1325,7 @@ Build production cloud infrastructure with Terraform and Kubernetes.
       const currentBlocker = originalJob.blockers.find((candidate) => candidate.status === "open");
       expect(currentBlocker).toBeDefined();
       adapter.publishedEvents.length = 0;
-      runtime.careerRepository.saveCampaign({
+      runtime.careerRepository.replaceCampaign({
         ...runtime.service.getCampaign(campaign.id),
         attentionEvents: [],
       });
