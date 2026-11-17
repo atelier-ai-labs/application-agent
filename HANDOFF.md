@@ -174,10 +174,23 @@ listener for about a minute until `contract-to-hire` was dropped ("contract" alr
   - The listener exited once with "database is locked" (14:22:05) while restart-existing was
     running, and systemd restarted it 5 s later. Startup should retry a busy database instead of
     exiting. **TODO.**
+- **Figma skipped** (Ruby is its main language). Then f78ffa5:
+  - **`excludedLanguages` in search-intent** (now `["Ruby"]`), handled in
+    `domain/requiredLanguages.ts`. Discovery and the pre-apply check skip a posting when the title
+    names the language, or when a sentence requires it. These don't count:
+    - a nice-to-have
+    - one choice among several ("or", "such as")
+    - a plain mention
+
+    Aliases: ruby→rails, go→golang (a bare "Go" is never matched), c#→.net.
+  - **Yes/No buttons** for typed-answer questions that are plain yes/no questions
+    (`isYesNoQuestion`). A tap sends "Yes" or "No", the same as typing it.
+  - **Standing topic `knows_employee`** ("Do you know anyone who works at X?"). It is **not set
+    yet**: waiting for Nate's answer, then run
+    `npm run career-agent:answers -- --set-standing knows_employee=No`.
 - **Waiting at end of session:**
   - Twilio: its window was closed by the restart, and its next answer reopens it.
-  - Smartsheet SE I.
-  - Figma: 2 questions.
+  - Smartsheet SE I: its question was posted before the buttons existed, so type the answer.
 - **Seen in passing:**
   - The Muse source returns 404.
   - The inbox check read a Langfuse webinar email as an interview. No row matched, so nothing
