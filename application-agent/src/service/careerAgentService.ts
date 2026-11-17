@@ -3676,6 +3676,10 @@ export class CareerAgentService {
       blocker.kind !== "subjective_answer" ||
       questionProvenanceForBlocker(blocker) !== "ATS_FORM" ||
       !job.applicationId ||
+      // Only a typed answer can be drafted: never a checkbox, dropdown or
+      // choice list (Twilio's acknowledgement box got an essay, 2026-11-17).
+      questionForBlocker(blocker)?.kind !== "free_text" ||
+      blocker.evidence.some((item) => /^field-type:(?:checkbox|radio|select|file)$/.test(item)) ||
       // A human check ("Which of the following is not a primary color?") is
       // the candidate's to answer; the model got it wrong anyway.
       /^\s*human verification\b|\bare you (?:a )?human\b|\bnot a robot\b/i.test(blocker.question)

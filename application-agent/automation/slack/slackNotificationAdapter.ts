@@ -147,19 +147,21 @@ export function quickRepliesForEvent(event: AttentionEvent): readonly QuickReply
     return event.question.required === false ? ["DONE", "SKIP"] : ["DONE"];
   }
   const replies: QuickReply[] = [];
-  if (event.draft) replies.push("APPROVE");
+  if (event.draft && event.question.kind === "free_text") replies.push("APPROVE");
   if (!event.draft && event.question.kind === "free_text" && isYesNoQuestion(event.question.prompt)) replies.push("YES", "NO");
   if (event.question.required === false && event.question.kind === "free_text") replies.push("SKIP");
   return replies;
 }
 
 function eventMessage(
-  event: AttentionEvent,
+  input: AttentionEvent,
   renderOptions: { threadReply?: boolean; handoffUrl?: string } = {},
 ): {
   text: string;
   blocks: readonly Record<string, unknown>[];
 } {
+  // Never show a draft on a choice question (see withoutInvalidDraft).
+  const event = input.draft && input.question?.kind !== "free_text" ? (({ draft: _draft, ...rest }) => rest)(input) as AttentionEvent : input;
   const body = eventMessageBody(event, renderOptions);
   // The posting link sits under the title, so the job can be read before
   // answering (ElevenLabs, 2026-11-10). Thread replies already have it above.

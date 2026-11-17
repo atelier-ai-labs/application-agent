@@ -106,7 +106,12 @@ function boundedHistory(value: unknown): unknown {
 }
 
 function withoutInvalidDraft(value: unknown): unknown {
-  if (!isRecord(value) || value.draft === undefined || isPersistedAttentionEvent(value)) return value;
+  if (!isRecord(value) || value.draft === undefined) return value;
+  // A draft belongs only to a typed-answer question. Twilio's acknowledgement
+  // checkbox kept an essay draft after it became a Yes/No question, and Slack
+  // showed both (2026-11-17).
+  const kind = isRecord(value.question) ? value.question.kind : undefined;
+  if (kind === "free_text" && isPersistedAttentionEvent(value)) return value;
   const { draft: _draft, ...rest } = value;
   return rest;
 }

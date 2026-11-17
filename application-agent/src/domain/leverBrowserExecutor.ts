@@ -902,7 +902,9 @@ export function classifyLeverApplicationField(
   // Interviewers" and years-of-experience dropdowns got essay drafts and no
   // buttons in Slack (2026-11-12).
   const hasChoices = (field.type === "select" || field.type === "radio") && (field.options?.length ?? 0) > 0;
-  const asFreeText = (): ApplicationFieldClassification => (hasChoices ? "unknown" : "free_text");
+  // A checkbox is ticked or not; however long its text, it is never an essay
+  // to draft (Twilio's "By checking this box, I confirm…", 2026-11-17).
+  const asFreeText = (): ApplicationFieldClassification => (hasChoices || field.type === "checkbox" ? "unknown" : "free_text");
   // Prefer inspected prompt/accessible text over opaque DOM labels (Rippling
   // often exposes "Search" / "textbox" / random ids as the control label).
   // Most generated Yes/No radios expose only the option label as their DOM
