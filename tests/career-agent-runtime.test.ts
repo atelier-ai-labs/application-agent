@@ -384,6 +384,160 @@ class RestartedHost implements CareerAgentExecutionHostPort {
   }
 }
 
+describe("current search settings reach the pre-apply check (2026-11-17)", () => {
+  it("applies a per-company limit the campaign was created without", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "atelier-career-live-policy-"));
+    try {
+      const runtime = new BackgroundCareerAgentRuntimeImpl({
+        ...runtimeOptions(join(directory, "state.json"), new ReadyExecutor(), new InMemoryNotificationAdapter()),
+        liveSearchPolicy: () => ({ companyApplicationLimit: { max: 1, windowDays: 365 }, excludedCompanies: ["Globex"] }),
+      });
+      const campaign = runtime.createCampaign(campaignInput());
+      runtime.service.activateCampaign(campaign.id);
+      expect(runtime.service.getCampaign(campaign.id).searchCriteria.companyApplicationLimit).toBeUndefined();
+      const input = (path: string, title: string, company = "Acme") => ({
+        ...listing().input, isExample: false, companyHint: company, titleHint: title,
+        sourceUrl: `https://jobs.lever.co/acme/${path}`, applicationUrl: `https://jobs.lever.co/acme/${path}/apply`,
+        rawText: `${company}\n${title}\nRemote United States\n`,
+      });
+      const first = await runtime.service.processCuratedJob(campaign.id, input("post-1", "Data Platform Engineer"));
+      // Still waiting at Submit counts as an application to Acme.
+      expect(first.status).toBe("ready_to_submit");
+      const second = await runtime.service.processCuratedJob(campaign.id, input("post-2", "Cloud Platform Engineer", "Acme Inc."));
+      expect(second.status).toBe("rejected");
+      expect(second.decisionReason).toMatch(/Already 1 application to Acme Inc\. .*limit 1/);
+      const excluded = await runtime.service.processCuratedJob(campaign.id, input("post-3", "Platform Engineer", "Globex"));
+      expect(excluded.status).toBe("rejected");
+      await runtime.stop();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Submit after the browser window closed (2026-11-17)", () => {
+  const filled = [
+    { label: "Full name", value: "Ada Example" },
+    { label: "Are you legally eligible to work in the US?", value: "Yes" },
+  ];
+  const readySnapshot = (id: string, request: ExecutionHostRequest, summary = filled): ExecutionHostSnapshot => ({
+    id, mode: "real_local", applicationId: request.application.id, jobId: request.careerJob.id, campaignId: request.campaign.id,
+    status: "ready_to_submit", startedAt: capturedAt, updatedAt: capturedAt, attempt: 1,
+    result: { state: "ready_to_submit", inspection: { ...inspection("inspected"), reviewSummary: summary } },
+  });
+
+  class CardAdapter extends InMemoryNotificationAdapter {
+    cards: unknown[] = [];
+    async publishSubmissionReview(notice: unknown): Promise<string> {
+      this.cards.push(notice);
+      return `card-${this.cards.length}`;
+    }
+  }
+
+  /** First window times out; a reopen gets a new window with `refill`. */
+  class TimedOutHost implements CareerAgentExecutionHostPort {
+    starts = 0;
+    submits: string[] = [];
+    private readonly sessions = new Map<string, ExecutionHostSnapshot>();
+    constructor(private readonly refill: typeof filled, private readonly firstWindowClosed = true) {}
+    async start(request: ExecutionHostRequest): Promise<ExecutionHostSnapshot> {
+      this.starts += 1;
+      const snapshot = readySnapshot(`host-${this.starts}`, request, this.starts === 1 ? filled : this.refill);
+      this.sessions.set(snapshot.id, snapshot);
+      return snapshot;
+    }
+    async get(id: string): Promise<ExecutionHostSnapshot> {
+      const snapshot = this.sessions.get(id);
+      if (!snapshot) throw new ExecutionHostResponseError("Execution session was not found.", 404);
+      if (id === "host-1" && this.firstWindowClosed) {
+        return { ...snapshot, status: "failed", failureReasonCode: "timeout", error: "The local browser execution session timed out; no application was submitted." };
+      }
+      return snapshot;
+    }
+    async resume(): Promise<ExecutionHostSnapshot> { throw new Error("unused"); }
+    async submitManually(id: string): Promise<ExecutionHostSnapshot> {
+      this.submits.push(id);
+      const snapshot = this.sessions.get(id)!;
+      return {
+        ...snapshot, status: "submitted", manualSubmission: true,
+        result: { state: "submitted", proof: { mode: "external", provider: "Lever", externalApplicationId: `lever-${id}`, submittedAt: capturedAt, evidence: "confirmation-page" } },
+      };
+    }
+  }
+
+  async function prepared(host: TimedOutHost) {
+    const directory = mkdtempSync(join(tmpdir(), "atelier-career-reopen-submit-"));
+    const adapter = new CardAdapter();
+    const runtime = new BackgroundCareerAgentRuntimeImpl({
+      ...runtimeOptions(join(directory, "state.json"), new ReadyExecutor(), adapter),
+      submissionAuthority: new DurableSubmissionAuthority("runtime-worker", { stateFile: join(directory, "submission.json") }),
+      executionHost: host,
+    });
+    const campaign = runtime.createCampaign(campaignInput());
+    runtime.service.activateCampaign(campaign.id);
+    const input = { ...listing().input, isExample: false, sourceUrl: "https://jobs.lever.co/acme/post-1", applicationUrl: "https://jobs.lever.co/acme/post-1/apply", rawText: "Acme\nData Platform Engineer\nRemote United States\n" };
+    const job = await runtime.processCuratedJobThroughHost(campaign.id, { ...input, queueSelected: true });
+    expect(job.status).toBe("ready_to_submit");
+    expect(adapter.cards).toHaveLength(1);
+    return { directory, adapter, runtime, campaignId: campaign.id, job };
+  }
+
+  it("reopens, refills, checks the form matches the approved card, then submits once", async () => {
+    const host = new TimedOutHost(filled);
+    const { directory, adapter, runtime, campaignId, job } = await prepared(host);
+    try {
+      const progress: string[] = [];
+      const result = await runtime.submitFromHumanApproval(campaignId, job.id, job.applicationId!, "http://127.0.0.1:8787", async (text) => { progress.push(text); });
+      expect(result.submitted).toBe(true);
+      expect(result.message).toMatch(/filled in again first and matched what you approved/);
+      expect(progress[0]).toMatch(/had closed, so the agent is reopening the form/);
+      expect(host.starts).toBe(2);
+      expect(host.submits).toEqual(["host-2"]);
+      expect(adapter.cards).toHaveLength(1);
+      expect(runtime.service.getJob(job.id).status).toBe("applied");
+      await runtime.stop();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("posts a fresh card instead of submitting when the refill differs", async () => {
+    const host = new TimedOutHost([filled[0]!, { label: "Are you legally eligible to work in the US?", value: "No" }]);
+    const { directory, adapter, runtime, campaignId, job } = await prepared(host);
+    try {
+      const result = await runtime.submitFromHumanApproval(campaignId, job.id, job.applicationId!, "http://127.0.0.1:8787");
+      expect(result.submitted).toBe(false);
+      expect(result.message).toMatch(/no longer matches what you approved \("Are you legally eligible to work in the US\?" would now be filled in differently\)/);
+      expect(host.submits).toEqual([]);
+      expect(adapter.cards).toHaveLength(2);
+      expect(runtime.service.getJob(job.id).status).toBe("ready_to_submit");
+      // The new card is now the approved copy: tapping it submits without another reopen.
+      const second = await runtime.submitFromHumanApproval(campaignId, job.id, job.applicationId!, "http://127.0.0.1:8787");
+      expect(second.submitted).toBe(true);
+      expect(host.starts).toBe(2);
+      expect(host.submits).toEqual(["host-2"]);
+      await runtime.stop();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("submits the open window directly when it is still there", async () => {
+    const host = new TimedOutHost(filled, false);
+    const { directory, runtime, campaignId, job } = await prepared(host);
+    try {
+      const result = await runtime.submitFromHumanApproval(campaignId, job.id, job.applicationId!, "http://127.0.0.1:8787");
+      expect(result.submitted).toBe(true);
+      expect(result.message).not.toMatch(/filled in again/);
+      expect(host.starts).toBe(1);
+      expect(host.submits).toEqual(["host-1"]);
+      await runtime.stop();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("background Career Agent runtime", () => {
   it("reconciles a durable submitted fence through the production consumer without restarting the host", async () => {
     const directory = mkdtempSync(join(tmpdir(), "atelier-career-reconcile-"));
@@ -1171,7 +1325,7 @@ Build production cloud infrastructure with Terraform and Kubernetes.
       const currentBlocker = originalJob.blockers.find((candidate) => candidate.status === "open");
       expect(currentBlocker).toBeDefined();
       adapter.publishedEvents.length = 0;
-      runtime.careerRepository.saveCampaign({
+      runtime.careerRepository.replaceCampaign({
         ...runtime.service.getCampaign(campaign.id),
         attentionEvents: [],
       });

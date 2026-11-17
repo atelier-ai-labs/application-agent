@@ -5,6 +5,93 @@ how I'd describe it in an interview. Newest first. PuckPulse's log lives in nhl-
 
 ---
 
+## 2026-11-17 — How would a new user's answers get learned? Share the questions, never the answers
+
+**The question.** Today the agent knows my answers because I've answered hundreds of form questions
+over two months. If someone else signed up tomorrow, how would it learn theirs? A questionnaire of
+"every question ever" isn't possible.
+
+**The data.** I counted the questions in the 46 real forms the agent has saved (questions only,
+never answers):
+- 861 fields, but only **248 distinct questions** once the company name is taken out
+- **180 of the 248 (73%) appeared on just one form**: company-specific questions and essays
+- the 10 most common questions cover 41% of everything asked, the top 25 cover 52%, and the
+  top 100 cover 73%
+
+So a questionnaire has diminishing returns. A short one covers about half of every form, and no
+length of questionnaire gets close to all of it.
+
+**The design that follows from it, in three layers:**
+1. **Résumé → profile.** Name, contact details, current company, school, links and the résumé
+   file are 6 of the 15 most common fields.
+2. **A short starter questionnaire** (10–15 questions): work authorization, sponsorship,
+   demographics, location, salary strategy, and the never-changes facts (convictions, background
+   checks, knowing anyone at the company).
+3. **Learn as you go.** Everything else is asked the first time it appears and saved to that
+   user's own answer bank, with risk tiers deciding what gets reused:
+   - low risk: reused even when the wording differs
+   - medium risk: reused only for the same question
+   - high risk (salary, legal, employer-specific): never reused
+
+   Questions per application fall with every application; the history report already tracks
+   that number.
+
+**The idea that makes many users work: share the questions, never the answers.** What the agent
+learns about *questions* is general knowledge, and every user can benefit from it. "Do you know
+anyone at X?" is a never-changes fact, "From where do you intend to work?" is a location question,
+and Greenhouse has two domains. The *answers* stay private to each user. User #2 starts with
+everything the forms have taught the agent and none of user #1's data.
+
+**A lesson from the same day.** My answer to Arize's human check ("What is 10 times 10?") had been
+saved as "100 lol". Every reply was saved word for word, so the joke would have been typed into the
+next form that asked. At scale, the agent should confirm before saving ("Save '100' for next
+time?"), and offer "remember this for every company?" for facts like "No, I don't know anyone
+there".
+
+**How I'd say it in an interview.** "Most form questions are long-tail: 73% of the distinct
+questions in my data appeared on only one form, so no questionnaire covers them. I cover the head
+with a résumé import and a short questionnaire, then learn the tail per user, with risk tiers that
+decide what can be reused. The cross-user part is knowledge about questions, never answers, which
+keeps the data private but still helps every new user."
+
+---
+
+## 2026-11-17 — An approval has to be tied to what was approved
+
+**The problem.** The agent fills a form, posts a "ready to submit" card in Slack and keeps the
+browser window open until I tap Submit. The host closes windows after 4 hours. I was busy for a
+few days, so two finished applications (and six with questions) lost their windows, and a Submit tap
+had nothing left to click.
+
+**The obvious fix, and why it's wrong.** "If the window is gone, reopen it and submit." But my tap
+approved a specific filled-in form: the values on the card. A reopened form isn't guaranteed to be the
+same. The employer may have added a question, or the agent's rules may have changed since then and
+would answer something differently. Submitting it would mean submitting something I never saw.
+
+**What I built.** When the card is posted, the agent saves exactly what it showed: each field label
+and value. On a Submit tap it first asks the browser host whether that window still exists. If not,
+it reopens the same application, refills it from the saved answers, reads the form back, and
+compares the two field by field:
+- same → click Submit once, behind the same durable submission fence as before
+- a date that moved (the start date is "two weeks from today") → allowed, and mentioned in the reply
+- anything new, missing or different → no submit; post a fresh card with the current values instead
+- the form now asks a new question → it goes to Slack like any other question
+- all browser windows busy → put the old card back and say to tap again later
+
+**Why it matters.** This is how human-in-the-loop systems stay trustworthy as they get more
+automated. An approval isn't a general "yes, go ahead". It's a yes to a specific artifact, and the
+system has to prove that what it acts on is that artifact. The same idea shows up as "plan, then
+apply only that plan" in Terraform, or as optimistic concurrency: check that nothing changed since
+you looked, otherwise ask again.
+
+**How I'd say it in an interview.** "My agent needs human approval before submitting. Approvals
+can arrive days later, after the browser session is gone. I bind each approval to a snapshot of the
+filled form; on a late approval the agent rebuilds the form, diffs it against the snapshot, and only
+acts on an exact match, with one explicit exception for dates. Anything else turns back into a new
+approval request. It never acts on something the human didn't see."
+
+---
+
 ## 2026-11-14 — Measuring the essay drafter: model-call logging and an eval
 
 **The problem.** The application agent drafts essay answers with a small local model (qwen2.5:7b).
@@ -32,6 +119,42 @@ chat) weren't in it.
 a small eval from real questions with deterministic checks for grounding, filler, copying and length.
 The first run scored 0.48, and the logs showed most failures were missing evidence, not prompt quality,
 so I fixed retrieval before touching the prompt. Every change is now a before-and-after number."
+
+---
+
+## 2026-11-17 — The same bug, one file over: moving the answer bank into SQLite
+
+**What I found.** On 2026-11-10 I fixed a lost update in the agent's state by moving it to SQLite
+(the entry below). The answer bank, where the agent keeps my reusable answers, was still a JSON
+file with the same pattern: read the whole file, change it, write it all back. Two programs saving
+at once could lose an answer. There was a worse failure too: a hand edit that broke the JSON was
+read as an empty bank, and the next answer saved would overwrite the file with just that one
+answer. That would wipe all 52.
+
+**What I changed.**
+- **A table instead of a file:** the bank is now the `answer_bank` table in the same SQLite
+  database as the rest of the state, with one row per answer.
+- **No "save the whole list" anymore:** a change is a function from the current answers to the
+  new ones. The store runs it inside one `BEGIN IMMEDIATE` transaction against what is stored
+  *now*, then writes only the rows that changed. A program holding an out-of-date copy can't erase
+  anything, because its change is applied to the fresh rows.
+- **Fail closed:** a row the code can't read is skipped, never deleted. The one-time import
+  refuses a broken JSON file rather than starting with an empty bank.
+- **Commands instead of hand edits:** `--set`, `--disable`, `--remove`, `--export`. Each is one
+  atomic change, so they're safe while the agent is running.
+- **An `owner_id` column:** it costs nothing today, and it's what separates users' answers once
+  there are several (see the entry above).
+
+**The migration, done like a production change.** I stopped the one process that writes the
+bank, backed up both the file and the database, imported, and checked that the database matched
+the backup entry for entry. Then I restarted on the new code and confirmed the form replay still
+used the saved answers.
+
+**How I'd say it in an interview.** "I found the lost-update bug I'd already fixed once, in a
+second file. Rather than patching it, I moved that data into the same transactional store and
+changed the interface, so 'save everything' isn't possible anymore. Every write is a change
+function applied atomically to the current rows. I also made it fail closed, so unreadable data
+is never treated as empty."
 
 ---
 

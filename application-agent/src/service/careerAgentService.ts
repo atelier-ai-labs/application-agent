@@ -122,10 +122,15 @@ import {
 } from "../domain/jobUrlClassifier";
 import { isVerifiedAshbyApplicationUrl, isVerifiedAshbyHostedUrl } from "../domain/jobUrlClassifier";
 import { isPostSubmitHumanCheck } from "../domain/applicationReceipt";
-import { answerBankKey, answerRiskTier, findAnswerBankMatch, isBankableQuestion, questionFromBlocker, standingRecordsFromJobs, withRecordedAnswer, type AnswerBankSemanticMatcher, type AnswerBankStore } from "../domain/answerBank";
+import { answerBankKey, answerRiskTier, findAnswerBankMatch, isBankableQuestion, questionFromBlocker, standingRecordsFromJobs, withRecordedAnswer, type AnswerBankEntry, type AnswerBankSemanticMatcher, type AnswerBankStore } from "../domain/answerBank";
 import { isVerifiedLeverApplicationUrl, isVerifiedLeverHostedUrl } from "../domain/leverJobSource";
 
 let fallbackId = 0;
+
+/** Evidence on a question whose saved answer the form already rejected once. */
+export const ANSWER_BANK_REJECTED = "answer-bank:rejected-by-form";
+
+export type LiveSearchPolicy = Partial<Pick<SearchCriteria, "companyApplicationLimit" | "excludedCompanies" | "maxYearsExperience" | "excludedLanguages">>;
 
 export interface CareerAgentServiceOptions {
   now?: () => string;
@@ -161,6 +166,13 @@ export interface CareerAgentDependencies {
   answerBank?: AnswerBankStore;
   /** Optional local-model matcher for low-risk questions worded differently. */
   answerBankMatcher?: AnswerBankSemanticMatcher;
+  /**
+   * The search settings as they are now (search-intent.json), read for every
+   * job. A campaign keeps the criteria it was created with, so settings added
+   * later (the per-company limit, excluded companies, the experience cap) never
+   * reached the pre-apply check (found 2026-11-17).
+   */
+  liveSearchPolicy?: () => LiveSearchPolicy | undefined;
 }
 
 export interface LegacyAttentionRepairResult {
@@ -793,6 +805,7 @@ export class CareerAgentService {
   private readonly confirmPostSubmitDone?: (campaignId: string, jobId: string) => Promise<CareerJob>;
   private readonly answerBank?: AnswerBankStore;
   private readonly answerBankMatcher?: AnswerBankSemanticMatcher;
+  private readonly liveSearchPolicy?: () => LiveSearchPolicy | undefined;
   private readonly attentionResponseInFlight = new Map<
     string,
     {
@@ -823,6 +836,7 @@ export class CareerAgentService {
     this.confirmPostSubmitDone = dependencies.confirmPostSubmitDone;
     this.answerBank = dependencies.answerBank;
     this.answerBankMatcher = dependencies.answerBankMatcher;
+    this.liveSearchPolicy = dependencies.liveSearchPolicy;
   }
 
   listCampaigns(): readonly Campaign[] {
@@ -3473,7 +3487,7 @@ export class CareerAgentService {
     const question = questionFromBlocker(blocker);
     if (!isBankableQuestion(question, value)) return;
     try {
-      this.answerBank.save(withRecordedAnswer(this.answerBank.entries(), {
+      const recorded: AnswerBankEntry = {
         id: this.createId("answer"),
         key: answerBankKey(question.question, question.company),
         question: question.question,
@@ -3485,7 +3499,8 @@ export class CareerAgentService {
         ...(blocker.context.jobId ? { jobId: blocker.context.jobId } : {}),
         source,
         recordedAt: this.now(),
-      }));
+      };
+      this.answerBank.update((entries) => withRecordedAnswer(entries, recorded));
     } catch {
       // The bank is a convenience: failing to write it never fails the answer.
     }
@@ -3508,7 +3523,7 @@ export class CareerAgentService {
       const blocker = current.blockers.find(
         (candidate) => candidate.status === "open" && careerBlockerKey(candidate) === careerBlockerKey(draft),
       );
-      if (!blocker) continue;
+      if (!blocker || blocker.evidence.includes(ANSWER_BANK_REJECTED)) continue;
       let entries;
       try { entries = this.answerBank.entries(); } catch { return current; }
       const match = await findAnswerBankMatch(entries, questionFromBlocker(blocker), this.answerBankMatcher,
@@ -3524,7 +3539,7 @@ export class CareerAgentService {
         ],
       });
       try {
-        this.answerBank.save(this.answerBank.entries().map((entry) => entry.id === match.entry.id
+        this.answerBank.update((entries) => entries.map((entry) => entry.id === match.entry.id
           ? { ...entry, usedCount: (entry.usedCount ?? 0) + 1, lastUsedAt: this.now() }
           : entry));
       } catch { /* usage counts are informational */ }
@@ -3563,6 +3578,7 @@ export class CareerAgentService {
       const carried: string[] = [];
       for (const blocker of waitingJob.blockers) {
         if (blocker.status !== "open" || blocker.unit !== "submission" || questionProvenanceForBlocker(blocker) !== "ATS_FORM" || isPostSubmitHumanCheck(blocker)) continue;
+        if (blocker.evidence.includes(ANSWER_BANK_REJECTED)) continue;
         const question = questionFromBlocker(blocker);
         let answer: AnswerValue | undefined;
         let evidence: string[] = [];
@@ -3607,6 +3623,57 @@ export class CareerAgentService {
     }
   }
 
+  /**
+   * Answers questions already waiting in Slack that the bank can now answer:
+   * a standing answer set after the question was posted ("Do you know anyone
+   * who works at Smartsheet?", 2026-11-17), or a saved answer edited by hand.
+   * The bank's usual risk rules apply. A job left with nothing to ask resumes
+   * in the browser; otherwise its next question is posted. Returns one line
+   * per job that changed.
+   */
+  async answerWaitingQuestionsFromBank(): Promise<string[]> {
+    if (!this.answerBank) return [];
+    let entries;
+    try { entries = this.answerBank.entries(); } catch { return []; }
+    const notices: string[] = [];
+    for (const job of this.careerRepository.listJobs().filter((candidate) => candidate.status === "needs_input")) {
+      // A browser that is still filling the form will read the bank itself.
+      if (job.execution?.mode === "real_local" && ["starting", "inspecting", "executing", "resuming"].includes(job.execution.status)) continue;
+      let current = job;
+      const answered: string[] = [];
+      for (const blocker of job.blockers) {
+        if (blocker.status !== "open" || blocker.unit !== "submission" || questionProvenanceForBlocker(blocker) !== "ATS_FORM") continue;
+        if (blocker.evidence.includes(ANSWER_BANK_REJECTED)) continue;
+        const match = await findAnswerBankMatch(entries, questionFromBlocker(blocker), this.answerBankMatcher,
+          standingRecordsFromJobs(this.careerRepository.listJobs(), current.id));
+        if (!match) continue;
+        current = await this.resolveCareerBlocker(current.campaignId, current.id, blocker.id, match.value, {
+          deferResume: true,
+          answerEvidence: ["answer-provider:answer-bank", `answer-bank-entry:${match.entry.id}`, `answer-bank-match:${match.kind}`, `answer-bank-tier:${match.entry.tier}`, "answered-while-waiting"],
+        });
+        answered.push(`${blocker.question.replace(/\s*\*+\s*$/, "").slice(0, 80)} → ${String(match.value).slice(0, 40)}`);
+      }
+      if (answered.length === 0) continue;
+      const campaign = this.getCampaign(current.campaignId);
+      const next = this.nextAttentionBlocker(campaign, current);
+      if (next) {
+        await this.publishAttentionForJob(campaign, current);
+      } else if (current.execution?.mode === "real_local") {
+        if (this.resumeAttention) {
+          try { await this.resumeAttention(current.campaignId, current.id, { verificationHandoff: false }); } catch { /* its next Slack answer resumes it */ }
+        }
+      } else if (campaign.status === "active") {
+        const resumed = await this.resumeBlockedJob(campaign, current);
+        if (resumed.careerJob.status === "needs_input") await this.publishAttentionForJob(this.getCampaign(current.campaignId), resumed.careerJob);
+      }
+      notices.push(`${current.job.company} — ${current.job.title}: ${answered.join("; ")}${next ? "" : " (nothing left to ask, so it's filling the form now)"}`);
+    }
+    if (notices.length > 0) {
+      await this.notificationAdapter?.publishInfoNotice?.(`I answered these waiting questions from your saved answers:\n${notices.map((line) => `• ${line}`).join("\n")}`).catch(() => undefined);
+    }
+    return notices;
+  }
+
   private async draftAtsAnswerForBlocker(job: CareerJob, blocker: CareerBlocker) {
     if (
       !this.applicationAnswerDraftGenerator ||
@@ -3614,6 +3681,10 @@ export class CareerAgentService {
       blocker.kind !== "subjective_answer" ||
       questionProvenanceForBlocker(blocker) !== "ATS_FORM" ||
       !job.applicationId ||
+      // Only a typed answer can be drafted: never a checkbox, dropdown or
+      // choice list (Twilio's acknowledgement box got an essay, 2026-11-17).
+      questionForBlocker(blocker)?.kind !== "free_text" ||
+      blocker.evidence.some((item) => /^field-type:(?:checkbox|radio|select|file)$/.test(item)) ||
       // A human check ("Which of the following is not a primary color?") is
       // the candidate's to answer; the model got it wrong anyway.
       /^\s*human verification\b|\bare you (?:a )?human\b|\bnot a robot\b/i.test(blocker.question)
@@ -3923,9 +3994,12 @@ export class CareerAgentService {
     suppliedResponse?: AttentionResponse,
   ): Promise<void> {
     const currentCampaign = this.getCampaign(campaign.id);
-    const record = currentCampaign.attentionEvents?.find(
+    const openForBlocker = (currentCampaign.attentionEvents ?? []).filter(
       (candidate) => candidate.jobId === job.id && candidate.blockerId === blocker.id && candidate.status === "open",
     );
+    // With two copies of one question, the one that was answered is the one
+    // that closes; the first copy found is only a fallback (Twilio, 2026-11-17).
+    const record = openForBlocker.find((candidate) => candidate.id === suppliedResponse?.eventId) ?? openForBlocker[0];
     if (!record || record.type !== "needs_input" || !record.question) return;
 
     const rawValue = typeof value === "string" ? value.trim() : String(value);
@@ -3961,16 +4035,25 @@ export class CareerAgentService {
       response,
       answerUsed: rawValue,
     };
+    // The same form question posted twice (two parts of the agent posting at
+    // once, Twilio 2026-11-17): one answer closes both, buttons included.
+    const twins = (currentCampaign.attentionEvents ?? [])
+      .filter((candidate) => candidate.id !== record.id && candidate.status === "open" && candidate.jobId === record.jobId &&
+        Boolean(record.blockerId) && candidate.blockerId === record.blockerId)
+      .map((candidate) => ({ ...candidate, status: "cancelled" as const, resolvedAt: response.respondedAt }));
     const updatedCampaign: Campaign = {
       ...currentCampaign,
-      attentionEvents: (currentCampaign.attentionEvents ?? []).map((candidate) => (candidate.id === record.id ? resolved : candidate)),
+      attentionEvents: (currentCampaign.attentionEvents ?? []).map((candidate) =>
+        candidate.id === record.id ? resolved : twins.find((twin) => twin.id === candidate.id) ?? candidate),
       updatedAt: this.now(),
     };
     this.careerRepository.saveCampaign(updatedCampaign);
-    try {
-      await this.notificationAdapter?.closeAttentionEvent?.(publicAttentionEvent(resolved));
-    } catch {
-      // Closing a notification is best effort; the persisted resolution is authoritative.
+    for (const closed of [resolved, ...twins]) {
+      try {
+        await this.notificationAdapter?.closeAttentionEvent?.(publicAttentionEvent(closed));
+      } catch {
+        // Closing a notification is best effort; the persisted resolution is authoritative.
+      }
     }
   }
 
@@ -4011,6 +4094,19 @@ export class CareerAgentService {
    * Persist the opaque execution-host ID and high-level state without
    * serializing any browser/session data into the career repository.
    */
+  /** The campaign's criteria with the current search settings laid over them. */
+  private currentCriteria(criteria: SearchCriteria): SearchCriteria {
+    const live = this.liveSearchPolicy?.();
+    if (!live) return criteria;
+    return {
+      ...criteria,
+      excludedCompanies: [...new Set([...(criteria.excludedCompanies ?? []), ...(live.excludedCompanies ?? [])])],
+      ...(live.maxYearsExperience !== undefined ? { maxYearsExperience: live.maxYearsExperience } : {}),
+      ...(live.excludedLanguages ? { excludedLanguages: [...live.excludedLanguages] } : {}),
+      ...(live.companyApplicationLimit ? { companyApplicationLimit: live.companyApplicationLimit } : {}),
+    };
+  }
+
   async recordExecutionHostSnapshot(campaignId: string, jobId: string, snapshot: ExecutionHostSnapshot): Promise<CareerJob> {
     const campaign = this.getCampaign(campaignId);
     const job = this.getJob(jobId);
@@ -4632,11 +4728,12 @@ export class CareerAgentService {
         })
       : persistDiscovered();
 
+    const criteria = this.currentCriteria(campaign.searchCriteria);
     const hardFilter = trace
       ? trace.measureSync(
           `job.hard-filter.${careerJob.id}`,
           "deterministic",
-          () => applyHardFilters(careerJob.job, criteriaForQueueSelection(scouted.queueSelected ? { ...campaign.searchCriteria, employmentTypes: [] } : campaign.searchCriteria, Boolean(scouted.queueSelected), scouted.queueResumeFamily)),
+          () => applyHardFilters(careerJob.job, criteriaForQueueSelection(scouted.queueSelected ? { ...criteria, employmentTypes: [] } : criteria, Boolean(scouted.queueSelected), scouted.queueResumeFamily)),
           {
             parentNodeId,
             inputCount: 1,
@@ -4646,7 +4743,7 @@ export class CareerAgentService {
             metadata: { stage: "job.hard-filter", jobId: careerJob.id },
           },
         )
-      : applyHardFilters(careerJob.job, criteriaForQueueSelection(scouted.queueSelected ? { ...campaign.searchCriteria, employmentTypes: [] } : campaign.searchCriteria, Boolean(scouted.queueSelected), scouted.queueResumeFamily));
+      : applyHardFilters(careerJob.job, criteriaForQueueSelection(scouted.queueSelected ? { ...criteria, employmentTypes: [] } : criteria, Boolean(scouted.queueSelected), scouted.queueResumeFamily));
     if (hardFilter.decision === "reject") {
       careerJob = this.decideJob(careerJob, "rejected", hardFilter.reason);
       this.appendEvent(campaign.id, "job.rejected", careerEventMetadata(careerJob, hardFilter));
@@ -4659,7 +4756,7 @@ export class CareerAgentService {
       return { held: true };
     }
     // Upstart allows 3 applications per 60 days and declined the 4th (2026-11-11).
-    const companyLimit = campaign.searchCriteria.companyApplicationLimit;
+    const companyLimit = criteria.companyApplicationLimit;
     const overLimit = companyLimit ? companyLimitReached(careerJob, this.careerRepository.listJobs(), companyLimit, new Date(this.now())) : undefined;
     if (overLimit) {
       const reason = `Already ${overLimit.count} application${overLimit.count === 1 ? "" : "s"} to ${overLimit.company} in the last ${overLimit.windowDays} days or in progress (limit ${overLimit.max}).`;
@@ -5718,6 +5815,11 @@ export class CareerAgentService {
       }
       consumed.add(key);
       if (current.status === "resolved") {
+        // The form asked again after a saved answer was used: the form didn't
+        // take it. Mark it so the bank never answers this question on this
+        // job again; it goes to the candidate instead. Without this, Twilio's
+        // veteran question was answered and re-asked 39 times (2026-11-17).
+        const bankAnswerRejected = current.evidence.some((item) => item === "answer-provider:answer-bank" || item === ANSWER_BANK_REJECTED);
         return {
           ...current,
           kind: draft.kind,
@@ -5726,7 +5828,7 @@ export class CareerAgentService {
           ...(draft.field ? { field: draft.field } : {}),
           question: draft.question,
           reason: draft.reason,
-          evidence: [...draft.evidence],
+          evidence: [...draft.evidence, ...(bankAnswerRejected ? [ANSWER_BANK_REJECTED] : [])],
           ...(draft.resumeAfterHuman !== undefined ? { resumeAfterHuman: draft.resumeAfterHuman } : {}),
           status: "open" as const,
           resolvedAt: undefined,

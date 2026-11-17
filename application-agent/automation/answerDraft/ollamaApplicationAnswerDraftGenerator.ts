@@ -1,3 +1,4 @@
+import { OLLAMA_KEEP_ALIVE } from "../answerBank/ollamaAnswerBankMatcher";
 import {
   isBroadMotivationQuestion,
   isCompanyInterestQuestion,
@@ -402,6 +403,7 @@ export class OllamaApplicationAnswerDraftGenerator {
           system: DRAFT_SYSTEM_PROMPT,
           prompt: promptFor(request, evidence, avoid),
           stream: false,
+          keep_alive: OLLAMA_KEEP_ALIVE,
           format: DRAFT_RESPONSE_SCHEMA,
           options: { temperature: avoid.length > 0 ? 0.4 : 0.1, num_ctx: 8_192, num_predict: 200 },
         }),

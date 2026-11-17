@@ -224,7 +224,7 @@ Every real form the agent opens is saved (labels, types, options, question text;
 
 ### Answer bank
 
-Every answer you give in Slack to an employer's form question is saved to `.local/career-agent/answer-bank.json`. Before the agent asks you anything, it checks the bank:
+Every answer you give in Slack to an employer's form question is saved to the answer bank, the `answer_bank` table in `.local/career-agent/state.db`. It has one row per answer, with an `owner_id` for when there's more than one user. Before the agent asks you anything, it checks the bank:
 
 - **Low risk** (how you heard about the job, work region or location, self-ID questions, privacy notices): reused when the question is the same, worded similarly ("Before applying, how did you hear about X?"), or judged the same by the local model.
 - **Medium risk** (years of experience, travel, relocation, education, age): reused only for the same question, so "years with Python" never takes the answer to "years with React".
@@ -234,7 +234,19 @@ The employer's name is replaced with `{company}`, so "How did you hear about Pha
 
 **Standing answers** cover high-risk facts that do not change between applications (convictions, being fired, liens or bankruptcy, insurance/securities licenses, regulatory discipline, non-competes, background-check willingness, essential functions, applied or interviewed here before). They are never learned from Slack; set each one once with `npm run career-agent:answers -- --set-standing criminal_conviction=No background_check=Yes previously_applied=@records`. Each topic matches only questions asked about you ("Have you been convicted…"), not statements or consents ("employment may be terminated", "do you consent to a criminal history check"), and a question touching two topics is still asked. `@records` answers "applied here before?" from the agent's own applications; "interviewed here before?" is No only when the agent never applied there.
 
-`npm run career-agent:answers` lists the bank. `-- --backfill` seeds it from answers on past applications (add `--dry-run` to preview). The file is plain JSON: change a `value`, or set `"disabled": true` to stop an answer from being reused. Edits apply on the next lookup. Set `ATELIER_CAREER_AGENT_ANSWER_BANK=disabled` to turn the bank off.
+`npm run career-agent:answers` lists the bank. Edit it with commands rather than by hand. Each command is one atomic database change, so it's safe while the agent is running:
+
+```bash
+npm run career-agent:answers -- --set "10 times 10" 100      # change a saved answer
+npm run career-agent:answers -- --disable "how did you hear"  # stop reusing one (--enable undoes it)
+npm run career-agent:answers -- --remove "<question>"         # delete one
+npm run career-agent:answers -- --export bank.json            # a readable copy
+npm run career-agent:answers -- --backfill --dry-run          # seed from past applications
+```
+
+A question can be named by part of its text. If the text matches several answers, the command lists them and changes nothing. Set `ATELIER_CAREER_AGENT_ANSWER_BANK=disabled` to turn the bank off.
+
+**Before 2026-11-17** the bank was `answer-bank.json`. Saving rewrote the whole file, so two programs saving at once could lose an answer, and a broken hand edit read as an empty bank that the next save would overwrite. The first time it opens, the new store imports that file into the database in one transaction. It refuses to start on a broken file instead of starting empty, and then renames the file to `answer-bank.json.moved-to-state-db-<time>`. `ATELIER_CAREER_AGENT_ANSWER_BANK_FILE` now names only that old file.
 
 ### Source discovery and ATS routing
 

@@ -29,7 +29,7 @@ export interface QuestionnaireItem {
 const SECTIONS = ["Background", "Where and when", "Years of experience", "Conduct history"] as const;
 
 const STANDING_SECTION: Record<StandingTopicId, (typeof SECTIONS)[number]> = {
-  security_clearance: "Background", military_service: "Background", related_to_employee: "Background", certifications: "Background",
+  security_clearance: "Background", military_service: "Background", related_to_employee: "Background", knows_employee: "Background", certifications: "Background",
   background_check: "Background", essential_functions: "Background", previously_applied: "Background", previously_interviewed: "Background",
   work_location: "Where and when", notice_period: "Where and when",
   criminal_conviction: "Conduct history", terminated: "Conduct history", financial_judgments: "Conduct history",

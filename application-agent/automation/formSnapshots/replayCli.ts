@@ -4,7 +4,7 @@ import { loadEnv } from "vite";
 import { loadBackgroundCandidateProfile } from "../runtime/careerAgentRuntime";
 import { LocalStorageCareerRepository } from "../../src/persistence/careerRepository";
 import { openStateStorage } from "../runtime/stateStorage";
-import { FileAnswerBankStore } from "../answerBank/fileAnswerBankStore";
+import { openAnswerBankStore } from "../answerBank/sqliteAnswerBankStore";
 import { createOllamaAnswerBankMatcher } from "../answerBank/ollamaAnswerBankMatcher";
 import { DEFAULT_FORM_SNAPSHOT_DIR, FormSnapshotStore, type FormSnapshot } from "./formSnapshot";
 import { compareReplays, replayForm, replayTotals, type FormReplay } from "./formReplay";
@@ -39,7 +39,9 @@ export async function runReplayCli(argv: readonly string[] = process.argv.slice(
     console.log("No form snapshots yet. They are saved as the agent opens real forms, or run career-agent:capture.");
     return 0;
   }
-  const bank = new FileAnswerBankStore(env.ATELIER_CAREER_AGENT_ANSWER_BANK_FILE?.trim() || undefined).entries();
+  const bankStore = openAnswerBankStore(env);
+  const bank = bankStore.entries();
+  bankStore.close();
   const model = env.ATELIER_CAREER_AGENT_OLLAMA_MODEL?.trim();
   const matcher = argv.includes("--with-model") && model ? createOllamaAnswerBankMatcher({ model }) : undefined;
 

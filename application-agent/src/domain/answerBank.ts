@@ -61,7 +61,7 @@ export interface AnswerBankQuestion {
 export type StandingTopicId =
   | "criminal_conviction" | "terminated" | "financial_judgments" | "financial_license" | "regulatory_discipline"
   | "restrictive_agreements" | "background_check" | "essential_functions" | "previously_applied" | "previously_interviewed"
-  | "related_to_employee" | "security_clearance" | "military_service" | "work_location" | "notice_period" | "certifications";
+  | "related_to_employee" | "knows_employee" | "security_clearance" | "military_service" | "work_location" | "notice_period" | "certifications";
 
 /** A standing value that is looked up from the agent's own records instead of fixed. */
 export const STANDING_FROM_RECORDS = "@records";
@@ -98,6 +98,15 @@ export const STANDING_TOPICS: readonly {
     pattern: /\brelated to\b.{0,30}\b(?:anyone|any(?:one)? (?:current )?employees?|an? (?:current )?employee|someone)\b.{0,30}(?:\{company\}|\bemploy)|\brelated to\b.{0,20}\{company\}|\b(?:relatives?|family members?)\b.{0,40}\b(?:work(?:s|ing)?|employed)\b.{0,20}(?:\{company\}|\bhere\b)/,
     conditional: true,
     asText: (value, company) => /^no\b/i.test(value.trim()) ? `Not applicable. I am not related to anyone at ${company?.trim() || "the company"}.` : undefined,
+  },
+  {
+    // Smartsheet, 2026-11-17. Asked once, answered the same for every company;
+    // when Nate does know someone somewhere, he answers that form by hand.
+    id: "knows_employee", label: "Knows anyone who works at the company",
+    pattern: /\b(?:know|acquainted with)\b.{0,20}\b(?:anyone|anybody|someone|any (?:current )?(?:employees?|team members?))\b.{0,40}(?:\b(?:works?|working|employed)\b.{0,25}(?:\{company\}|\bhere\b)|\{company\})/,
+    // "Who referred you?" asks for a name, and a referral is a different fact.
+    exclude: /\brefer/,
+    asText: (value, company) => /^no\b/i.test(value.trim()) ? `No, I don't know anyone at ${company?.trim() || "the company"}.` : undefined,
   },
   {
     id: "security_clearance", label: "Currently holds an active security clearance",
@@ -567,15 +576,44 @@ export function withRecordedAnswer(entries: readonly AnswerBankEntry[], entry: A
   return [...entries.filter((candidate) => candidate.key !== entry.key), entry];
 }
 
-/** Where the bank lives. The service reads and writes it through this. */
+/**
+ * Where the bank lives. The service reads and writes it through this.
+ *
+ * There is no "save the whole list": a change is a function from the current
+ * entries to the new ones, run as one atomic step against whatever is stored
+ * now. Two programs answering at the same moment both keep their answer
+ * (2026-11-17; the JSON file it replaced was read, changed and rewritten whole).
+ */
 export interface AnswerBankStore {
   entries(): readonly AnswerBankEntry[];
-  save(entries: readonly AnswerBankEntry[]): void;
+  update(change: (entries: readonly AnswerBankEntry[]) => readonly AnswerBankEntry[]): void;
 }
 
 export class InMemoryAnswerBankStore implements AnswerBankStore {
   private current: AnswerBankEntry[];
   constructor(entries: readonly AnswerBankEntry[] = []) { this.current = [...entries]; }
   entries(): readonly AnswerBankEntry[] { return this.current; }
-  save(entries: readonly AnswerBankEntry[]): void { this.current = [...entries]; }
+  update(change: (entries: readonly AnswerBankEntry[]) => readonly AnswerBankEntry[]): void { this.current = [...change(this.current)]; }
+}
+
+/** A stored entry has the fields every reader relies on. */
+export function isAnswerBankEntry(value: unknown): value is AnswerBankEntry {
+  if (!value || typeof value !== "object") return false;
+  const entry = value as Record<string, unknown>;
+  return typeof entry.id === "string" && typeof entry.key === "string" && entry.key.length > 0 && typeof entry.question === "string" &&
+    ["string", "number", "boolean"].includes(typeof entry.value) && ["low", "medium", "high"].includes(entry.tier as string) &&
+    ["slack", "history", "manual"].includes(entry.source as string) && typeof entry.recordedAt === "string";
+}
+
+/**
+ * Finds the entries a typed reference means: an exact key, the same question
+ * once normalized, or else the only entry whose question contains the text.
+ */
+export function findAnswerBankEntries(entries: readonly AnswerBankEntry[], reference: string): AnswerBankEntry[] {
+  const wanted = reference.trim();
+  if (!wanted) return [];
+  const exact = entries.filter((entry) => entry.key === wanted || entry.key === answerBankKey(wanted, entry.company));
+  if (exact.length > 0) return exact;
+  const lower = wanted.toLowerCase();
+  return entries.filter((entry) => entry.question.toLowerCase().includes(lower) || entry.key.includes(lower));
 }

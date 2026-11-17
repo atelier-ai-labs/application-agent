@@ -58,6 +58,12 @@ export interface CareerRepository {
   listCampaigns(): readonly Campaign[];
   getCampaign(id: string): Campaign | null;
   saveCampaign(campaign: Campaign): void;
+  /**
+   * Writes the campaign exactly as given, dropping questions the stored copy
+   * has. Only for deliberate repairs and tests; everyday saves use
+   * `saveCampaign`, which merges questions so concurrent writers keep theirs.
+   */
+  replaceCampaign(campaign: Campaign): void;
   listJobs(campaignId?: string): readonly CareerJob[];
   getJob(id: string): CareerJob | null;
   saveJob(job: CareerJob): void;
@@ -100,9 +106,68 @@ function boundedHistory(value: unknown): unknown {
 }
 
 function withoutInvalidDraft(value: unknown): unknown {
-  if (!isRecord(value) || value.draft === undefined || isPersistedAttentionEvent(value)) return value;
+  if (!isRecord(value) || value.draft === undefined) return value;
+  // A draft belongs only to a typed-answer question. Twilio's acknowledgement
+  // checkbox kept an essay draft after it became a Yes/No question, and Slack
+  // showed both (2026-11-17).
+  const kind = isRecord(value.question) ? value.question.kind : undefined;
+  if (kind === "free_text" && isPersistedAttentionEvent(value)) return value;
   const { draft: _draft, ...rest } = value;
   return rest;
+}
+
+const ATTENTION_PROGRESS: Record<string, number> = { open: 0, resolved: 1, cancelled: 1 };
+
+/**
+ * One question as two writers saw it. A closed question (answered or
+ * cancelled) never reopens from an older copy; otherwise the newer write wins,
+ * keeping the Slack delivery an older copy already recorded.
+ */
+function mergeAttentionEvent(stored: PersistedAttentionEvent, incoming: PersistedAttentionEvent): PersistedAttentionEvent {
+  const storedProgress = ATTENTION_PROGRESS[stored.status] ?? 0;
+  const incomingProgress = ATTENTION_PROGRESS[incoming.status] ?? 0;
+  if (storedProgress > incomingProgress) return stored;
+  if (incomingProgress > storedProgress) return incoming;
+  return {
+    ...incoming,
+    ...(!incoming.publishedAt && stored.publishedAt ? { publishedAt: stored.publishedAt } : {}),
+    ...(!incoming.providerDelivery && stored.providerDelivery ? { providerDelivery: stored.providerDelivery } : {}),
+  };
+}
+
+/**
+ * Every part of the agent saves a campaign whole: it reads it, changes one
+ * question, and writes it back. Two of them doing that at once used to drop
+ * the other's question. Twilio's Yes button then pointed at a question
+ * that no longer existed, and every tap was rejected (2026-11-17). Inside the
+ * save transaction, the questions (and run history) are merged by id with
+ * what is stored now. Nothing removes questions on purpose; old ones only
+ * fall off the end of the history.
+ */
+export function mergeCampaignWrite(stored: Campaign, incoming: Campaign): Campaign {
+  const mergedEvents = (() => {
+    if (!stored.attentionEvents?.length) return incoming.attentionEvents;
+    const incomingById = new Map((incoming.attentionEvents ?? []).map((event) => [event.id, event]));
+    const storedIds = new Set(stored.attentionEvents.map((event) => event.id));
+    return [
+      ...stored.attentionEvents.map((event) => {
+        const theirs = incomingById.get(event.id);
+        return theirs ? mergeAttentionEvent(event, theirs) : event;
+      }),
+      ...(incoming.attentionEvents ?? []).filter((event) => !storedIds.has(event.id)),
+    ];
+  })();
+  const mergedRuns = (() => {
+    if (!stored.runHistory?.length) return incoming.runHistory;
+    const incomingIds = new Set((incoming.runHistory ?? []).map((run) => run.runId));
+    return [...stored.runHistory.filter((run) => !incomingIds.has(run.runId)), ...(incoming.runHistory ?? [])]
+      .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+  })();
+  return {
+    ...incoming,
+    ...(mergedEvents ? { attentionEvents: mergedEvents } : {}),
+    ...(mergedRuns ? { runHistory: mergedRuns } : {}),
+  };
 }
 
 function boundedCampaign(campaign: Campaign): Campaign {
@@ -261,6 +326,7 @@ function isSearchCriteria(value: unknown): value is SearchCriteria {
     (value.excludedTitleTerms === undefined || isStringArray(value.excludedTitleTerms)) &&
     (value.maxYearsExperience === undefined || (typeof value.maxYearsExperience === "number" && Number.isInteger(value.maxYearsExperience) && value.maxYearsExperience >= 0)) &&
     (value.companyApplicationLimit === undefined || isCompanyApplicationLimit(value.companyApplicationLimit)) &&
+    (value.excludedLanguages === undefined || isStringArray(value.excludedLanguages)) &&
     isStringArray(value.excludedCompanies)
   );
 }
@@ -677,10 +743,15 @@ export class InMemoryCareerRepository implements CareerRepository {
   }
 
   saveCampaign(campaign: Campaign): void {
-    campaign = boundedCampaign(campaign);
     const index = this.campaigns.findIndex((candidate) => candidate.id === campaign.id);
-    if (index === -1) this.campaigns.push(clone(campaign));
-    else this.campaigns[index] = clone(campaign);
+    if (index === -1) this.campaigns.push(clone(boundedCampaign(campaign)));
+    else this.campaigns[index] = clone(boundedCampaign(mergeCampaignWrite(this.campaigns[index]!, campaign)));
+  }
+
+  replaceCampaign(campaign: Campaign): void {
+    const index = this.campaigns.findIndex((candidate) => candidate.id === campaign.id);
+    if (index === -1) this.campaigns.push(clone(boundedCampaign(campaign)));
+    else this.campaigns[index] = clone(boundedCampaign(campaign));
   }
 
   listJobs(campaignId?: string): readonly CareerJob[] {
@@ -721,6 +792,17 @@ export class LocalStorageCareerRepository implements CareerRepository {
   }
 
   saveCampaign(campaign: Campaign): void {
+    const incoming = clone(campaign);
+    updateStoredArray(this.storage, CAMPAIGNS_STORAGE_KEY, (items) => {
+      const campaigns = items.map(boundedHistory).filter(isCampaign);
+      const index = campaigns.findIndex((candidate) => candidate.id === incoming.id);
+      if (index === -1) campaigns.push(boundedCampaign(incoming));
+      else campaigns[index] = boundedCampaign(mergeCampaignWrite(campaigns[index]!, incoming));
+      return campaigns;
+    });
+  }
+
+  replaceCampaign(campaign: Campaign): void {
     const saved = clone(boundedCampaign(campaign));
     updateStoredArray(this.storage, CAMPAIGNS_STORAGE_KEY, (items) => {
       const campaigns = items.map(boundedHistory).filter(isCampaign);

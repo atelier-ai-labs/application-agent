@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { companyKey, companyLimitReached } from "../application-agent/src/domain/companyLimit";
+import { companyBoardKey, companyKey, companyLimitReached } from "../application-agent/src/domain/companyLimit";
 import { normalizeJobSearchIntent, searchCriteriaFromJobSearchIntent } from "../application-agent/src/domain/searchIntent";
 import type { CareerJob } from "../application-agent/src/domain/campaignTypes";
 
@@ -43,6 +43,22 @@ describe("per-company application limit", () => {
 });
 
 describe("excluded companies from the search settings", () => {
+  it("treats one job board as one company, whatever the name says (Span vs Span App)", () => {
+    expect(companyBoardKey({ sourceUrl: "https://jobs.ashbyhq.com/span.app/070905ca" })).toBe("ashby:span.app");
+    expect(companyBoardKey({ applicationUrl: "https://job-boards.greenhouse.io/figma/jobs/123" })).toBe("greenhouse:figma");
+    expect(companyBoardKey({ applicationUrl: "https://boards.greenhouse.io/embed/job_app?for=Reddit&token=1" })).toBe("greenhouse:reddit");
+    expect(companyBoardKey({ sourceUrl: "https://jobs.lever.co/plane/abc/apply" })).toBe("lever:plane");
+    expect(companyBoardKey({ sourceUrl: "https://example.com/careers/1" })).toBeUndefined();
+
+    const onBoard = (id: string, company: string, status: string, url: string) =>
+      ({ id, status, updatedAt: "2026-11-10T23:00:00.000Z", job: { company, title: "Engineer", sourceUrl: url } }) as unknown as CareerJob;
+    const applied = onBoard("platform", "Span", "applied", "https://jobs.ashbyhq.com/span.app/070905ca");
+    const limit = { max: 1, windowDays: 365 };
+    expect(companyLimitReached(onBoard("devops", "Span App", "pursuing", "https://jobs.ashbyhq.com/span.app/00de323d"), [applied], limit, now))
+      .toEqual({ company: "Span App", count: 1, max: 1, windowDays: 365 });
+    expect(companyLimitReached(onBoard("other", "Spanner", "pursuing", "https://jobs.ashbyhq.com/spanner/1"), [applied], limit, now)).toBeUndefined();
+  });
+
   it("blocks any spelling at discovery and before applying", async () => {
     const { applyHardFilters } = await import("../application-agent/src/domain/policies");
     const { screenDiscoveredJob } = await import("../application-agent/src/domain/discoveryFilter");

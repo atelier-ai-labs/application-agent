@@ -38,6 +38,8 @@ export type SlackSubmissionApprovalHandler = (approval: {
   jobId: string;
   applicationId: string;
   actorIdentity: { provider: "slack"; userId: string; workspaceId?: string };
+  /** Rewrites the tapped card while a slow submit is underway (e.g. reopening a closed window). */
+  progress?: (text: string) => Promise<void>;
 }) => Promise<{ submitted: boolean; message: string }>;
 
 export interface SlackNotificationAdapterOptions {
@@ -110,9 +112,23 @@ function responseData(value: unknown): string {
 }
 
 const QUICK_REPLY_ACTION_ID = "career_agent_quick_reply";
-const QUICK_REPLY_ACTION_PATTERN = new RegExp(`^${QUICK_REPLY_ACTION_ID}_(APPROVE|SKIP|DONE)$`);
-type QuickReply = "APPROVE" | "SKIP" | "DONE";
-const QUICK_REPLY_LABELS: Record<QuickReply, string> = { APPROVE: "Approve draft", SKIP: "Skip", DONE: "Done" };
+const QUICK_REPLY_ACTION_PATTERN = new RegExp(`^${QUICK_REPLY_ACTION_ID}_(APPROVE|SKIP|DONE|YES|NO)$`);
+type QuickReply = "APPROVE" | "SKIP" | "DONE" | "YES" | "NO";
+const QUICK_REPLY_LABELS: Record<QuickReply, string> = { APPROVE: "Approve draft", SKIP: "Skip", DONE: "Done", YES: "Yes", NO: "No" };
+/** What a tap sends: the same text as typing the reply in the thread. */
+const QUICK_REPLY_TEXT: Record<QuickReply, string> = { APPROVE: "APPROVE", SKIP: "SKIP", DONE: "DONE", YES: "Yes", NO: "No" };
+
+/**
+ * A typed-answer box whose question is a plain yes/no question ("Do you know
+ * anyone who works at Smartsheet?") gets Yes and No buttons too; typing a
+ * longer answer still works (2026-11-17).
+ */
+export function isYesNoQuestion(prompt: string): boolean {
+  const text = prompt.replace(/[*\s]+$/, "").trim();
+  return /^(?:do|does|did|are|is|was|were|have|has|had|will|would|can|could)\s+you\b[^?]{0,200}\?$/i.test(text) &&
+    // "Do you prefer A or B?" and "...please describe" are not yes/no.
+    !/\b(?:or|describe|explain|list|please provide)\b/i.test(text);
+}
 
 function isHumanVerificationHandoff(event: AttentionEvent): boolean {
   return event.submissionAlreadyClicked === true || event.blockerType === "captcha" ||
@@ -131,18 +147,21 @@ export function quickRepliesForEvent(event: AttentionEvent): readonly QuickReply
     return event.question.required === false ? ["DONE", "SKIP"] : ["DONE"];
   }
   const replies: QuickReply[] = [];
-  if (event.draft) replies.push("APPROVE");
+  if (event.draft && event.question.kind === "free_text") replies.push("APPROVE");
+  if (!event.draft && event.question.kind === "free_text" && isYesNoQuestion(event.question.prompt)) replies.push("YES", "NO");
   if (event.question.required === false && event.question.kind === "free_text") replies.push("SKIP");
   return replies;
 }
 
 function eventMessage(
-  event: AttentionEvent,
+  input: AttentionEvent,
   renderOptions: { threadReply?: boolean; handoffUrl?: string } = {},
 ): {
   text: string;
   blocks: readonly Record<string, unknown>[];
 } {
+  // Never show a draft on a choice question (see withoutInvalidDraft).
+  const event = input.draft && input.question?.kind !== "free_text" ? (({ draft: _draft, ...rest }) => rest)(input) as AttentionEvent : input;
   const body = eventMessageBody(event, renderOptions);
   // The posting link sits under the title, so the job can be read before
   // answering (ElevenLabs, 2026-11-10). Thread replies already have it above.
@@ -304,6 +323,9 @@ function eventMessageBody(
         .filter(Boolean)
         .join("\n\n")
     : "";
+  // The browser stopped for safety (wrong site, no form found): the prompt is
+  // the explanation, and there is nothing to reply (Figma, 2026-11-17).
+  const safetyStop = event.questionProvenance === "POLICY" && event.blockerType === "unknown_form_field" && event.question.kind === "free_text";
   const questionFraming =
     event.questionProvenance === "ATS_FORM"
       ? "Application question:"
@@ -315,7 +337,7 @@ function eventMessageBody(
   const questionDetails = [
     event.questionProvenance === "ATS_FORM" ? requiredness : "",
     salaryContext,
-    `${questionFraming}\n\"${question}\"`,
+    safetyStop ? question : `${questionFraming}\n\"${question}\"`,
     answerOptions,
     draftReview,
     event.blockerType === "salary" ? "What should I enter?" : "",
@@ -325,10 +347,14 @@ function eventMessageBody(
   const optionalNote = event.question.required === false && event.question.kind === "free_text"
     ? " This question is optional: reply SKIP to leave it blank."
     : "";
-  const replyInstruction = (event.draft
+  const replyInstruction = safetyStop
+    ? "\n\n_Nothing to answer here. Open the posting link to check, and apply there by hand if you still want this job._"
+    : (event.draft
     ? "\n\nTap *Approve draft* (or reply APPROVE) to use this draft, or reply with your edited answer. The draft is never used without your explicit approval."
     : event.question.kind === "free_text"
-      ? "\n\nReply in this Slack thread with one grounded answer."
+      ? isYesNoQuestion(event.question.prompt)
+        ? "\n\nTap *Yes* or *No*, or reply in this thread with a longer answer."
+        : "\n\nReply in this Slack thread with one grounded answer."
       : "") + (optionalNote && (event.draft || event.question.kind === "free_text") ? optionalNote : "");
   const threadReply = renderOptions.threadReply === true;
   const text = threadReply
@@ -807,7 +833,7 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     // Remove the button before the browser click so a second tap cannot queue.
     await update("Submitting… the agent is clicking Submit once for this application.");
     try {
-      const result = await this.submissionApprovalHandler({ campaignId: match[1]!, jobId: match[2]!, applicationId: match[3]!, actorIdentity });
+      const result = await this.submissionApprovalHandler({ campaignId: match[1]!, jobId: match[2]!, applicationId: match[3]!, actorIdentity, progress: update });
       await update(result.message);
       return { status: result.submitted ? "resolved" : "rejected", ...(result.submitted ? {} : { reason: "submission_not_completed" }) };
     } catch (error) {
@@ -1244,9 +1270,9 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     const event = this.eventLookup?.(eventId) ?? this.publishedAttentionEvents.get(eventId);
     if (!event || event.status !== "open") return { status: "rejected", reason: "unknown_or_closed_event" };
     if (!quickRepliesForEvent(event).includes(reply)) return { status: "rejected", reason: "invalid_option" };
-    await this.acknowledgeTap(event, reply === "APPROVE" ? "Approve draft" : reply === "SKIP" ? "Skip" : "Done");
+    await this.acknowledgeTap(event, QUICK_REPLY_LABELS[reply]);
     try {
-      const result = await this.responseHandler!({ eventId, selectedOption: reply, actorIdentity, respondedAt: new Date().toISOString() });
+      const result = await this.responseHandler!({ eventId, selectedOption: QUICK_REPLY_TEXT[reply], actorIdentity, respondedAt: new Date().toISOString() });
       return { status: result.status === "partial" ? "ignored" : result.status };
     } catch {
       return { status: "rejected", reason: "attention_response_rejected" };

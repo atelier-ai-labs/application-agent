@@ -902,7 +902,9 @@ export function classifyLeverApplicationField(
   // Interviewers" and years-of-experience dropdowns got essay drafts and no
   // buttons in Slack (2026-11-12).
   const hasChoices = (field.type === "select" || field.type === "radio") && (field.options?.length ?? 0) > 0;
-  const asFreeText = (): ApplicationFieldClassification => (hasChoices ? "unknown" : "free_text");
+  // A checkbox is ticked or not; however long its text, it is never an essay
+  // to draft (Twilio's "By checking this box, I confirm…", 2026-11-17).
+  const asFreeText = (): ApplicationFieldClassification => (hasChoices || field.type === "checkbox" ? "unknown" : "free_text");
   // Prefer inspected prompt/accessible text over opaque DOM labels (Rippling
   // often exposes "Search" / "textbox" / random ids as the control label).
   // Most generated Yes/No radios expose only the option label as their DOM
@@ -974,6 +976,8 @@ export function classifyLeverApplicationField(
   if (hasPhrase(text, /first name|given name|last name|family name|surname|full name|your name|applicant name|email|e-mail|phone|telephone|mobile|linkedin|portfolio|website/)) return "contact";
   // Whole words only: "capacity" contains "city" and "statement" contains "state".
   if (hasPhrase(text, /\b(?:location|city|state|country|address|postal|zip)\b|phone country|dialing code|country code/)) return "location";
+  // "From where do you intend to work?" names no place word (Figma, 2026-11-17).
+  if (hasPhrase(text, /\b(?:from )?where (?:do|will|would) you (?:intend|plan|expect)(?: to)? (?:work|be (?:based|working))\b|\bfrom where\b.{0,30}\bwork\b/)) return "location";
   // Opaque widget labels with a real question prompt are treated by prompt semantics above;
   // remaining long free-response prompts stay free_text rather than unknown.
   const prompt = field.questionDescriptor?.promptText?.trim();
@@ -1092,6 +1096,37 @@ function formBlocker(
     resumeAfterHuman: true,
   };
 }
+
+/**
+ * A safety stop is not a question: there is nothing to answer, so Slack shows
+ * the plain explanation (as the question prompt) instead of the field label.
+ * "Greenhouse form action / reply with one grounded answer" told Nate nothing
+ * (Figma, 2026-11-17).
+ */
+function safetyStop(blocker: CareerBlockerDraft, explanation: string): CareerBlockerDraft {
+  // Attention prompts are capped at 240 characters; Slack adds "nothing to answer".
+  return { ...blocker, evidence: [...blocker.evidence, `question-prompt:${explanation.slice(0, 240)}`] };
+}
+
+/**
+ * Greenhouse moved its boards from boards.greenhouse.io to
+ * job-boards.greenhouse.io and redirects old links, so a form on the new host
+ * is still Greenhouse. Treating it as an unrelated site stopped Figma's
+ * application before anything was filled (2026-11-17).
+ */
+export function sameProviderOrigin(actual: string, expected: string): boolean {
+  if (actual === expected) return true;
+  try {
+    const a = new URL(actual);
+    const b = new URL(expected);
+    const greenhouse = (host: string) => host === "greenhouse.io" || host.endsWith(".greenhouse.io");
+    return a.protocol === "https:" && b.protocol === "https:" && greenhouse(a.hostname) && greenhouse(b.hostname);
+  } catch {
+    return false;
+  }
+}
+
+const hostOf = (origin: string) => { try { return new URL(origin).hostname; } catch { return origin; } };
 
 function boundaryBlocker(boundary: BrowserHumanBoundary, executor = "lever-browser"): CareerBlockerDraft {
   return {
@@ -1386,8 +1421,9 @@ function groundedWorkAuthorizationValue(
   // "in this location" / "in this country" means the posting's location. The
   // agent only applies to postings open where the candidate may work, so it
   // names no other country.
-  // "in the country where you are applying" (Gusto, 2026-11-10) means the same.
-  const workCountry = named && /^(?:(?:this|that|the) (?:location|country|role'?s? location|job'?s? location)|country (?:where|in which)\b.*)(?: (?:where|in which)\b.*)?$/.test(named) ? undefined : named;
+  // "in the country where you are applying" (Gusto, 2026-11-10) means the same,
+  // and so does "the country for which you applied" (Figma, 2026-11-17).
+  const workCountry = named && /^(?:(?:this|that|the) (?:location|country|role'?s? location|job'?s? location)|country (?:where|in which|for which)\b.*)(?: (?:where|in which|for which)\b.*)?$/.test(named) ? undefined : named;
   if (workCountry && !profile.workAuthorization.countries.some((country) =>
     isUnitedStates(workCountry) ? isUnitedStates(country) : normalized(country) === normalized(workCountry))) {
     return undefined;
@@ -1894,7 +1930,8 @@ function profileValueForField(
   return undefined;
 }
 
-function optionValue(
+/** The one option a value picks on a dropdown or radio list, or undefined when none or several fit. */
+export function optionValue(
   field: ApplicationFieldDescriptor,
   value: AnswerValue,
 ): string | undefined {
@@ -1951,7 +1988,10 @@ function optionValue(
       (smsAliases.length > 0 && labels.some((label) => /^no\b/.test(label) && /\bdo not consent\b/.test(label))) ||
       // "No, I am not a veteran" (Gusto) as well as "...not a protected veteran".
       // ...and "No, I don’t have a disability" (Samsara, curly apostrophe).
-      (demographicAliases.includes("no") && labels.some((label) => /not\s+(?:a\s+)?(?:protected\s+)?veteran|(?:do\s+not|don['’]?t)\s+have\s+(?:a\s+)?disability/.test(label))) ||
+      // "I identify as a veteran but not a protected veteran" is a veteran, not
+      // a "no" (Twilio, 2026-11-17).
+      (demographicAliases.includes("no") && labels.some((label) => /not\s+(?:a\s+)?(?:protected\s+)?veteran|(?:do\s+not|don['’]?t)\s+have\s+(?:a\s+)?disability/.test(label) &&
+        !/\b(?:identify as|i am|am) a veteran\b/.test(label))) ||
       // Greenhouse's phone-country control appends the dialing code to the
       // grounded country name (for example, "United States +1"). Preserve
       // exact option selection while accepting that display form.
@@ -1971,8 +2011,14 @@ function optionValue(
     const query = valueAsString(value);
     return query || undefined;
   }
-  if (matches.length !== 1) return undefined;
-  const option = matches[0];
+  // Several options fit: the one that is word for word the profile's answer
+  // ("No, I am not a protected veteran" → "I am not a protected veteran") wins.
+  const exactlyStated = matches.length > 1
+    ? matches.filter((candidate) => [normalized(candidate.label), normalized(candidate.value)]
+      .some((label) => label === desired || label === desired.replace(/^(?:yes|no)\s*[,:;-]\s*/, "")))
+    : matches;
+  if (exactlyStated.length !== 1) return undefined;
+  const option = exactlyStated[0]!;
   const valueIsDuplicated = field.options.filter((candidate) =>
     normalized(candidate.value) === normalized(option.value),
   ).length > 1;
@@ -3673,8 +3719,9 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         });
       }
       if (target.provider === "generic" && !(await state.session.verifyPageIdentity?.(request.careerJob.job.company, request.careerJob.job.title))) {
-        const blocker = formBlocker({ id: "application-page", label: "direct application page", type: "unknown", required: true, classification: "unknown" },
-          "The rendered page did not visibly identify the expected company and role; preparation stopped.", "unknown_form_field", "POLICY", executorEvidenceLabel(target.provider));
+        const blocker = safetyStop(formBlocker({ id: "application-page", label: "direct application page", type: "unknown", required: true, classification: "unknown" },
+          "The rendered page did not visibly identify the expected company and role; preparation stopped.", "unknown_form_field", "POLICY", executorEvidenceLabel(target.provider)),
+          `Stopped before filling anything: the page didn't show ${request.careerJob.job.company.slice(0, 60)} and the job title, so the agent couldn't be sure it was the right form.`);
         return finish({ target, session: state.session, fields: [], inspection: inspection("unsupported", [], startedAt, this.now(), {
           blockers: [blocker], unresolvedFields: ["application page identity"], evidence: [...commonEvidence, "navigation:page-identity-unverified", "submit:not-clicked"],
         }) });
@@ -3682,9 +3729,10 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       const formActionOrigin = await state.session.formActionOrigin?.();
       if (formActionOrigin) {
         const expectedOrigin = new URL(target.applicationUrl).origin;
-        if (formActionOrigin !== expectedOrigin) {
-          const blocker = formBlocker({ id: "application-form", label: `${providerLabel(target.provider)} form action`, type: "unknown", required: true, classification: "unknown" },
-            "The rendered form submits to an unrelated origin; preparation stopped.", "unknown_form_field", "POLICY", executorEvidenceLabel(target.provider));
+        if (!sameProviderOrigin(formActionOrigin, expectedOrigin)) {
+          const blocker = safetyStop(formBlocker({ id: "application-form", label: `${providerLabel(target.provider)} form action`, type: "unknown", required: true, classification: "unknown" },
+            "The rendered form submits to an unrelated origin; preparation stopped.", "unknown_form_field", "POLICY", executorEvidenceLabel(target.provider)),
+            `Stopped before filling anything: this form sends applications to ${hostOf(formActionOrigin).slice(0, 60)}, not ${hostOf(expectedOrigin).slice(0, 60)}, and the agent won't send your details to a site it can't verify.`);
           return finish({ target, session: state.session, fields: [], inspection: inspection("unsupported", [], startedAt, this.now(), {
             blockers: [blocker], unresolvedFields: ["application form destination"], evidence: [...commonEvidence, "navigation:form-action-cross-origin", "submit:not-clicked"],
           }) });
@@ -3714,13 +3762,14 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         });
       }
       if (descriptors.length === 0) {
-        const blocker = formBlocker({
+        const blocker = safetyStop(formBlocker({
           id: "application-form",
           label: `${providerLabel(target.provider)} application form`,
           type: "unknown",
           required: true,
           classification: "unknown",
-        }, "No supported application fields were found on the verified page.", "unknown_form_field", "POLICY", executorEvidenceLabel(target.provider));
+        }, "No supported application fields were found on the verified page.", "unknown_form_field", "POLICY", executorEvidenceLabel(target.provider)),
+          "Stopped: the job page opened, but the agent found no application form on it (it may need an Apply click or a sign-in first).");
         diagnostic = {
           stage: "controls_inspection",
           reasonCode: "unsupported_page",

@@ -21,6 +21,37 @@ export function companyKey(name: string | undefined): string {
   return withoutSuffix.length >= 3 ? withoutSuffix : key;
 }
 
+/**
+ * The employer's own job-board account, from the posting link: one Ashby org,
+ * Greenhouse board, Lever site or Rippling board is one company. Names alone
+ * missed "Span" vs "Span App", both on jobs.ashbyhq.com/span.app (2026-11-17).
+ */
+export function companyBoardKey(job: Pick<CareerJob["job"], "sourceUrl" | "applicationUrl">): string | undefined {
+  for (const raw of [job.applicationUrl, job.sourceUrl]) {
+    if (!raw) continue;
+    let url: URL;
+    try { url = new URL(raw); } catch { continue; }
+    const host = url.hostname.toLowerCase();
+    const first = url.pathname.split("/").filter(Boolean)[0]?.toLowerCase();
+    if (host === "jobs.ashbyhq.com" && first) return `ashby:${first}`;
+    if (host === "jobs.lever.co" && first) return `lever:${first}`;
+    if (/(^|\.)greenhouse\.io$/.test(host)) {
+      const board = url.searchParams.get("for")?.toLowerCase() ?? (first && first !== "embed" ? first : undefined);
+      if (board) return `greenhouse:${board}`;
+    }
+    if (host === "ats.rippling.com" && first) return `rippling:${first}`;
+  }
+  return undefined;
+}
+
+/** Two jobs are at the same company when the names match or the job boards do. */
+export function sameCompany(a: CareerJob, b: CareerJob): boolean {
+  const name = companyKey(a.job.company);
+  if (name && name === companyKey(b.job.company)) return true;
+  const board = companyBoardKey(a.job);
+  return Boolean(board && board === companyBoardKey(b.job));
+}
+
 const IN_PROGRESS = new Set(["pursuing", "needs_input", "ready_to_submit"]);
 
 function appliedAt(job: CareerJob): string {
@@ -40,13 +71,13 @@ export function companyLimitReached(
   now: Date,
 ): { company: string; count: number; max: number; windowDays: number } | undefined {
   const key = companyKey(job.job.company);
-  if (!key) return undefined;
+  if (!key && !companyBoardKey(job.job)) return undefined;
   const override = Object.entries(limit.overrides ?? {}).find(([name]) => companyKey(name) === key)?.[1];
   const max = override ?? limit.max;
   const since = now.getTime() - limit.windowDays * 24 * 60 * 60 * 1_000;
   const count = allJobs.filter((other) =>
     other.id !== job.id &&
-    companyKey(other.job.company) === key &&
+    sameCompany(job, other) &&
     // In progress counts only when active inside the window: weeks-old jobs
     // stuck in "pursuing" must not use up a company's limit.
     ((other.status === "applied" && Date.parse(appliedAt(other)) >= since) ||

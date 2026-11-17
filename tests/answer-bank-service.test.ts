@@ -5,7 +5,8 @@ import {
   type ApplicationExecutionRequest, type ApplicationExecutor, type ApplicationExecutorResult, type CandidateProfile,
   type CareerBlockerDraft, type ExecutionInspection, type JobSourceListing,
 } from "../application-agent/src";
-import { InMemoryAnswerBankStore, answerBankKey, type AnswerBankEntry } from "../application-agent/src/domain/answerBank";
+import { InMemoryAnswerBankStore, answerBankKey, withStandingAnswer, type AnswerBankEntry } from "../application-agent/src/domain/answerBank";
+import { attentionEventForCareerBlocker } from "../application-agent/src/domain/attention";
 
 const capturedAt = "2026-11-03T12:00:00.000Z";
 
@@ -65,9 +66,10 @@ function setup(companies: string[], executor: ApplicationExecutor, bank: InMemor
   const source = new StaticJobSource("bank-source", listings ?? companies.map(listing));
   let id = 0;
   const createId = (prefix: string) => `${prefix}-bank-${(id += 1)}`;
+  const careerRepository = new InMemoryCareerRepository();
   const service = new CareerAgentService(profile, {
     applicationService: new ApplicationService(new InMemoryApplicationRepository(), profile, new DeterministicModelClient(), { now: () => capturedAt, createId }),
-    careerRepository: new InMemoryCareerRepository(),
+    careerRepository,
     scout: new JobScout({ [source.id]: source }, () => capturedAt),
     executor, notificationAdapter: notifications, answerBank: bank,
   }, { now: () => capturedAt, createId });
@@ -80,7 +82,7 @@ function setup(companies: string[], executor: ApplicationExecutor, bank: InMemor
     dailyApplicationLimit: listings?.length ?? companies.length,
   });
   service.activateCampaign(campaign.id);
-  return { service, campaign, notifications };
+  return { service, campaign, notifications, careerRepository };
 }
 
 /** Slack sends the option's id for a single-choice question. */
@@ -93,6 +95,84 @@ function optionId(event: { question?: { options: readonly { id: string; label: s
 const hearAbout = (company: string) => ({ label: `How did you hear about ${company}?`, options: [`${company} Employee`, "LinkedIn", "Other"] });
 
 describe("answer bank in the career service", () => {
+  it("answers a question already waiting in Slack once a matching standing answer is set (Smartsheet, 2026-11-17)", async () => {
+    const bank = new InMemoryAnswerBankStore();
+    const executor = new QuestionExecutor((company) => ({ label: `Do you know anyone who works at ${company}?`, options: ["Yes", "No"] }));
+    const { service, campaign, notifications } = setup(["Smartsheet"], executor, bank);
+    await service.runCampaign(campaign.id);
+    expect(notifications.publishedEvents.map((event) => event.question?.prompt)).toEqual(["Do you know anyone who works at Smartsheet?"]);
+    expect(await service.answerWaitingQuestionsFromBank()).toEqual([]);
+
+    bank.update((entries) => withStandingAnswer(entries, "knows_employee", "No", capturedAt));
+    const answered = await service.answerWaitingQuestionsFromBank();
+    expect(answered).toEqual([expect.stringContaining("Smartsheet — Platform Engineer: Do you know anyone who works at Smartsheet? → No")]);
+    expect(executor.received.Smartsheet).toBe("No");
+    expect(notifications.notices.at(-1)).toMatch(/^I answered these waiting questions from your saved answers/);
+    expect(service.listAttentionEvents(campaign.id).every((event) => event.status !== "open")).toBe(true);
+  });
+
+  it("closes both copies of a question posted twice when one is answered (Twilio, 2026-11-17)", async () => {
+    const executor = new QuestionExecutor(hearAbout);
+    const { service, campaign, notifications, careerRepository } = setup(["Twilio"], executor, new InMemoryAnswerBankStore());
+    await service.runCampaign(campaign.id);
+    const stored = careerRepository.getCampaign(campaign.id)!;
+    const original = stored.attentionEvents!.find((event) => event.status === "open")!;
+    careerRepository.saveCampaign({ ...stored, attentionEvents: [...stored.attentionEvents!, { ...original, id: "attention-twin" }] });
+    const closed: string[] = [];
+    notifications.closeAttentionEvent = async (event) => { closed.push(event.id); };
+    const result = await service.resolveAttentionResponse({ eventId: "attention-twin", selectedOption: optionId(original, "LinkedIn"), actorIdentity: { provider: "test", userId: "nate" }, respondedAt: capturedAt });
+    const after = service.listAttentionEvents(campaign.id);
+    expect(result.status).toBe("resolved");
+    expect(after.find((event) => event.id === "attention-twin")?.status).toBe("resolved");
+    expect(after.find((event) => event.id === original.id)?.status).toBe("cancelled");
+    expect(closed).toEqual(expect.arrayContaining(["attention-twin", original.id]));
+    expect(executor.received.Twilio).toBe("LinkedIn");
+  });
+
+  it("asks the candidate when the form rejects a saved answer, instead of retrying it forever (Twilio, 2026-11-17)", async () => {
+    const bank = new InMemoryAnswerBankStore([{ id: "saved-veteran", key: answerBankKey("Protected Veteran Status", "Twilio"), question: "Protected Veteran Status", value: "I am not a protected veteran", tier: "low", source: "slack", recordedAt: capturedAt }]);
+    let runs = 0;
+    const stubborn: ApplicationExecutor = {
+      id: "stubborn-form",
+      executionMode: () => "preparation_only",
+      async execute(): Promise<ApplicationExecutorResult> {
+        runs += 1;
+        if (runs > 10) throw new Error("loop: the saved answer was retried more than 10 times");
+        return {
+          state: "requires_human",
+          blocker: {
+            kind: "unknown_form_field", unit: "submission", questionProvenance: "ATS_FORM", field: "veteran", question: "Protected Veteran Status",
+            reason: "The value did not match exactly one option.",
+            evidence: ["executor:test", "field-id:veteran", "field-type:select", "field-required:true",
+              "options:I am not a protected veteran|I identify as a veteran but not a protected veteran", "question-prompt:Protected Veteran Status"],
+            resumeAfterHuman: true,
+          },
+        };
+      },
+    };
+    const { service, campaign, notifications } = setup(["Twilio"], stubborn, bank);
+    await service.runCampaign(campaign.id);
+    expect(runs).toBe(2);
+    expect(notifications.publishedEvents.map((event) => event.question?.prompt)).toEqual(["Protected Veteran Status"]);
+    const blocker = service.listJobs(campaign.id)[0]!.blockers.find((candidate) => candidate.field === "veteran")!;
+    expect(blocker.status).toBe("open");
+    expect(blocker.evidence).toContain("answer-bank:rejected-by-form");
+    expect(await service.answerWaitingQuestionsFromBank()).toEqual([]);
+  });
+
+  it("gives a lone acknowledgement checkbox Yes and No buttons (Twilio, 2026-11-17)", () => {
+    const created = attentionEventForCareerBlocker({
+      campaignId: "c", jobId: "j", createdAt: capturedAt, createId: (prefix) => `${prefix}-1`,
+      blocker: {
+        id: "b", kind: "unknown_form_field", unit: "submission", questionProvenance: "ATS_FORM", field: "ack", status: "open", createdAt: capturedAt,
+        question: "Acknowledge", reason: "r", resumeAfterHuman: true,
+        context: { jobId: "j", applicationId: "a", company: "Twilio", role: "Software Engineer L3" },
+        evidence: ["field-id:ack", "field-type:checkbox", "field-label:Acknowledge", "question-prompt:By clicking the \"Acknowledge\" button, you acknowledge that Twilio processes data in accordance with the Twilio Applicant Privacy Policy."],
+      },
+    });
+    expect(created?.event.question).toMatchObject({ kind: "single_choice", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] });
+  });
+
   it("saves a Slack answer, then fills the same question at the next company without asking", async () => {
     const bank = new InMemoryAnswerBankStore();
     const executor = new QuestionExecutor(hearAbout);

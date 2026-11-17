@@ -398,7 +398,7 @@ describe("Slack human-attention adapter", () => {
     expect(approvals).toHaveLength(0);
 
     await expect(adapter.handleInteraction(click())).resolves.toEqual({ status: "resolved" });
-    expect(approvals).toEqual([{ campaignId: SUBMIT_IDS.campaign, jobId: SUBMIT_IDS.job, applicationId: SUBMIT_IDS.application, actorIdentity: { provider: "slack", userId: "U123456", workspaceId: "T123456" } }]);
+    expect(approvals).toEqual([{ campaignId: SUBMIT_IDS.campaign, jobId: SUBMIT_IDS.job, applicationId: SUBMIT_IDS.application, actorIdentity: { provider: "slack", userId: "U123456", workspaceId: "T123456" }, progress: expect.any(Function) }]);
     // First update removes the button before the click; the second reports the result.
     expect(requests).toHaveLength(2);
     expect(requests[0]).toContain("Submitting");

@@ -425,7 +425,13 @@ function questionMetadata(blocker: CareerBlocker): Pick<AttentionQuestion, "fiel
 }
 
 function questionOptions(blocker: CareerBlocker): readonly AttentionOption[] {
-  return structuredOptions(blocker) ?? [];
+  const listed = structuredOptions(blocker);
+  if (listed) return listed;
+  // A lone checkbox ("By clicking the Acknowledge button, you acknowledge…")
+  // lists no choices, so it was posted as a question to type an answer to
+  // (Twilio, 2026-11-17). Yes ticks the box; No leaves it unticked.
+  if (evidenceValue(blocker, "field-type:", 32) === "checkbox") return [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }];
+  return [];
 }
 
 function questionKind(options: readonly AttentionOption[]): AttentionQuestionKind {
