@@ -129,6 +129,37 @@ describe("answer bank in the career service", () => {
     expect(executor.received.Twilio).toBe("LinkedIn");
   });
 
+  it("asks the candidate when the form rejects a saved answer, instead of retrying it forever (Twilio, 2026-11-17)", async () => {
+    const bank = new InMemoryAnswerBankStore([{ id: "saved-veteran", key: answerBankKey("Protected Veteran Status", "Twilio"), question: "Protected Veteran Status", value: "I am not a protected veteran", tier: "low", source: "slack", recordedAt: capturedAt }]);
+    let runs = 0;
+    const stubborn: ApplicationExecutor = {
+      id: "stubborn-form",
+      executionMode: () => "preparation_only",
+      async execute(): Promise<ApplicationExecutorResult> {
+        runs += 1;
+        if (runs > 10) throw new Error("loop: the saved answer was retried more than 10 times");
+        return {
+          state: "requires_human",
+          blocker: {
+            kind: "unknown_form_field", unit: "submission", questionProvenance: "ATS_FORM", field: "veteran", question: "Protected Veteran Status",
+            reason: "The value did not match exactly one option.",
+            evidence: ["executor:test", "field-id:veteran", "field-type:select", "field-required:true",
+              "options:I am not a protected veteran|I identify as a veteran but not a protected veteran", "question-prompt:Protected Veteran Status"],
+            resumeAfterHuman: true,
+          },
+        };
+      },
+    };
+    const { service, campaign, notifications } = setup(["Twilio"], stubborn, bank);
+    await service.runCampaign(campaign.id);
+    expect(runs).toBe(2);
+    expect(notifications.publishedEvents.map((event) => event.question?.prompt)).toEqual(["Protected Veteran Status"]);
+    const blocker = service.listJobs(campaign.id)[0]!.blockers.find((candidate) => candidate.field === "veteran")!;
+    expect(blocker.status).toBe("open");
+    expect(blocker.evidence).toContain("answer-bank:rejected-by-form");
+    expect(await service.answerWaitingQuestionsFromBank()).toEqual([]);
+  });
+
   it("gives a lone acknowledgement checkbox Yes and No buttons (Twilio, 2026-11-17)", () => {
     const created = attentionEventForCareerBlocker({
       campaignId: "c", jobId: "j", createdAt: capturedAt, createId: (prefix) => `${prefix}-1`,

@@ -127,6 +127,9 @@ import { isVerifiedLeverApplicationUrl, isVerifiedLeverHostedUrl } from "../doma
 
 let fallbackId = 0;
 
+/** Evidence on a question whose saved answer the form already rejected once. */
+export const ANSWER_BANK_REJECTED = "answer-bank:rejected-by-form";
+
 export type LiveSearchPolicy = Partial<Pick<SearchCriteria, "companyApplicationLimit" | "excludedCompanies" | "maxYearsExperience" | "excludedLanguages">>;
 
 export interface CareerAgentServiceOptions {
@@ -3520,7 +3523,7 @@ export class CareerAgentService {
       const blocker = current.blockers.find(
         (candidate) => candidate.status === "open" && careerBlockerKey(candidate) === careerBlockerKey(draft),
       );
-      if (!blocker) continue;
+      if (!blocker || blocker.evidence.includes(ANSWER_BANK_REJECTED)) continue;
       let entries;
       try { entries = this.answerBank.entries(); } catch { return current; }
       const match = await findAnswerBankMatch(entries, questionFromBlocker(blocker), this.answerBankMatcher,
@@ -3575,6 +3578,7 @@ export class CareerAgentService {
       const carried: string[] = [];
       for (const blocker of waitingJob.blockers) {
         if (blocker.status !== "open" || blocker.unit !== "submission" || questionProvenanceForBlocker(blocker) !== "ATS_FORM" || isPostSubmitHumanCheck(blocker)) continue;
+        if (blocker.evidence.includes(ANSWER_BANK_REJECTED)) continue;
         const question = questionFromBlocker(blocker);
         let answer: AnswerValue | undefined;
         let evidence: string[] = [];
@@ -3639,6 +3643,7 @@ export class CareerAgentService {
       const answered: string[] = [];
       for (const blocker of job.blockers) {
         if (blocker.status !== "open" || blocker.unit !== "submission" || questionProvenanceForBlocker(blocker) !== "ATS_FORM") continue;
+        if (blocker.evidence.includes(ANSWER_BANK_REJECTED)) continue;
         const match = await findAnswerBankMatch(entries, questionFromBlocker(blocker), this.answerBankMatcher,
           standingRecordsFromJobs(this.careerRepository.listJobs(), current.id));
         if (!match) continue;
@@ -5810,6 +5815,11 @@ export class CareerAgentService {
       }
       consumed.add(key);
       if (current.status === "resolved") {
+        // The form asked again after a saved answer was used: the form didn't
+        // take it. Mark it so the bank never answers this question on this
+        // job again; it goes to the candidate instead. Without this, Twilio's
+        // veteran question was answered and re-asked 39 times (2026-11-17).
+        const bankAnswerRejected = current.evidence.some((item) => item === "answer-provider:answer-bank" || item === ANSWER_BANK_REJECTED);
         return {
           ...current,
           kind: draft.kind,
@@ -5818,7 +5828,7 @@ export class CareerAgentService {
           ...(draft.field ? { field: draft.field } : {}),
           question: draft.question,
           reason: draft.reason,
-          evidence: [...draft.evidence],
+          evidence: [...draft.evidence, ...(bankAnswerRejected ? [ANSWER_BANK_REJECTED] : [])],
           ...(draft.resumeAfterHuman !== undefined ? { resumeAfterHuman: draft.resumeAfterHuman } : {}),
           status: "open" as const,
           resolvedAt: undefined,
