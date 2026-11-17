@@ -188,9 +188,24 @@ listener for about a minute until `contract-to-hire` was dropped ("contract" alr
   - **Standing topic `knows_employee`** ("Do you know anyone who works at X?"). It is **not set
     yet**: waiting for Nate's answer, then run
     `npm run career-agent:answers -- --set-standing knows_employee=No`.
+- **The answer bank is in SQLite (0f097d7, migrated 14:54).** It is the `answer_bank` table in
+  state.db, one row per answer, keyed by `(owner_id, key)` with owner `local`.
+  - `AnswerBankStore.update(change)` replaced `save(list)`. Each change is one `BEGIN IMMEDIATE`
+    transaction that writes only changed rows and never deletes a row it can't parse.
+  - `openAnswerBankStore()` is the only way to open the bank.
+  - The 52 entries were imported and match the backup exactly. The JSON was renamed
+    `answer-bank.json.moved-to-state-db-1794945214950`, with backups
+    `answer-bank.json.pre-sqlite-20261117-145327.backup` and
+    `state.db.pre-answer-bank-20261117-145327.backup`.
+  - Edit the bank with `career-agent:answers -- --set/--disable/--enable/--remove/--export`
+    (`--help` lists them). The browser host doesn't use the bank, so only the listener was
+    restarted.
+  - Fixed today: the Arize human-check answer had been saved as "100 lol" and is now "100".
+    `knows_employee=No` is set.
 - **Waiting at end of session:**
   - Twilio: its window was closed by the restart, and its next answer reopens it.
-  - Smartsheet SE I: its question was posted before the buttons existed, so type the answer.
+  - Smartsheet SE I: answered at 14:38, and its window is open at needs_input with new
+    questions.
 - **Seen in passing:**
   - The Muse source returns 404.
   - The inbox check read a Langfuse webinar email as an interview. No row matched, so nothing

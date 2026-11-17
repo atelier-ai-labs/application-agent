@@ -122,6 +122,42 @@ so I fixed retrieval before touching the prompt. Every change is now a before-an
 
 ---
 
+## 2026-11-17 — The same bug, one file over: moving the answer bank into SQLite
+
+**What I found.** On 2026-11-10 I fixed a lost update in the agent's state by moving it to SQLite
+(the entry below). The answer bank, where the agent keeps my reusable answers, was still a JSON
+file with the same pattern: read the whole file, change it, write it all back. Two programs saving
+at once could lose an answer. There was a worse failure too: a hand edit that broke the JSON was
+read as an empty bank, and the next answer saved would overwrite the file with just that one
+answer. That would wipe all 52.
+
+**What I changed.**
+- **A table instead of a file:** the bank is now the `answer_bank` table in the same SQLite
+  database as the rest of the state, with one row per answer.
+- **No "save the whole list" anymore:** a change is a function from the current answers to the
+  new ones. The store runs it inside one `BEGIN IMMEDIATE` transaction against what is stored
+  *now*, then writes only the rows that changed. A program holding an out-of-date copy can't erase
+  anything, because its change is applied to the fresh rows.
+- **Fail closed:** a row the code can't read is skipped, never deleted. The one-time import
+  refuses a broken JSON file rather than starting with an empty bank.
+- **Commands instead of hand edits:** `--set`, `--disable`, `--remove`, `--export`. Each is one
+  atomic change, so they're safe while the agent is running.
+- **An `owner_id` column:** it costs nothing today, and it's what separates users' answers once
+  there are several (see the entry above).
+
+**The migration, done like a production change.** I stopped the one process that writes the
+bank, backed up both the file and the database, imported, and checked that the database matched
+the backup entry for entry. Then I restarted on the new code and confirmed the form replay still
+used the saved answers.
+
+**How I'd say it in an interview.** "I found the lost-update bug I'd already fixed once, in a
+second file. Rather than patching it, I moved that data into the same transactional store and
+changed the interface, so 'save everything' isn't possible anymore. Every write is a change
+function applied atomically to the current rows. I also made it fail closed, so unreadable data
+is never treated as empty."
+
+---
+
 ## 2026-11-10 — A lost update between two processes
 
 **What happened.** I approved three Upstart applications from Slack at the same moment. Two
