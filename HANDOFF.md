@@ -239,8 +239,23 @@ listener for about a minute until `contract-to-hire` was dropped ("contract" alr
 
   Re-posted clean. **The host still runs the old classification**: restart it once no windows are
   open (Twilio's was open at 15:46).
-- **Waiting at end of session:** Twilio's candidate-guidelines acknowledgement (Yes/No, no draft).
-  Its window is open at needs_input, and a tap resumes it.
+- **Veteran match (d18217a).** "No, I am not a protected veteran" matched both "I am not a
+  protected veteran" and "I identify as a veteran but not a protected veteran", so the agent
+  asked. Labels that identify as a veteran are no longer a "no", and among several matches the
+  word-for-word one wins. `optionValue` is now exported for tests.
+- **39-cycle loop (c7420ff).** From 15:57 to 16:08 the host still ran the old veteran code. Each
+  run raised the veteran question, the bank answered it (exact entry), the job resumed, and the
+  host failed again. When `mergeBlockers` reopens a question that a saved answer had resolved, it
+  now adds `answer-bank:rejected-by-form`. The bank, `answerWaitingQuestionsFromBank` and
+  `carryAnswerToWaitingJobs` skip marked questions, so they go to Slack. The test fails without
+  the fix (11 runs).
+- **Ollama keep_alive 2h (843deed).** The default 5-minute unload plus a 37 s reload against the
+  15 s matcher timeout meant every bank check after idle timed out. That's also why the listener
+  took 95 s to start. Configurable with `ATELIER_CAREER_AGENT_OLLAMA_KEEP_ALIVE`.
+- **One-off scripts:** run them in the background, or with a long timeout. A `timeout 120` killed
+  one mid-poll and left Twilio's job record stuck at "executing" while the host had moved on.
+- **Waiting at end of session:** Twilio was reopened at about 16:15 on all of today's fixes
+  (`restart-existing`).
 - **Seen in passing:**
   - The Muse source returns 404.
   - The inbox check read a Langfuse webinar email as an interview. No row matched, so nothing
