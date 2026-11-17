@@ -306,6 +306,9 @@ function eventMessageBody(
         .filter(Boolean)
         .join("\n\n")
     : "";
+  // The browser stopped for safety (wrong site, no form found): the prompt is
+  // the explanation, and there is nothing to reply (Figma, 2026-11-17).
+  const safetyStop = event.questionProvenance === "POLICY" && event.blockerType === "unknown_form_field" && event.question.kind === "free_text";
   const questionFraming =
     event.questionProvenance === "ATS_FORM"
       ? "Application question:"
@@ -317,7 +320,7 @@ function eventMessageBody(
   const questionDetails = [
     event.questionProvenance === "ATS_FORM" ? requiredness : "",
     salaryContext,
-    `${questionFraming}\n\"${question}\"`,
+    safetyStop ? question : `${questionFraming}\n\"${question}\"`,
     answerOptions,
     draftReview,
     event.blockerType === "salary" ? "What should I enter?" : "",
@@ -327,7 +330,9 @@ function eventMessageBody(
   const optionalNote = event.question.required === false && event.question.kind === "free_text"
     ? " This question is optional: reply SKIP to leave it blank."
     : "";
-  const replyInstruction = (event.draft
+  const replyInstruction = safetyStop
+    ? "\n\n_Nothing to answer here. Open the posting link to check, and apply there by hand if you still want this job._"
+    : (event.draft
     ? "\n\nTap *Approve draft* (or reply APPROVE) to use this draft, or reply with your edited answer. The draft is never used without your explicit approval."
     : event.question.kind === "free_text"
       ? "\n\nReply in this Slack thread with one grounded answer."

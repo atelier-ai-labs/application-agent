@@ -1093,6 +1093,37 @@ function formBlocker(
   };
 }
 
+/**
+ * A safety stop is not a question: there is nothing to answer, so Slack shows
+ * the plain explanation (as the question prompt) instead of the field label.
+ * "Greenhouse form action / reply with one grounded answer" told Nate nothing
+ * (Figma, 2026-11-17).
+ */
+function safetyStop(blocker: CareerBlockerDraft, explanation: string): CareerBlockerDraft {
+  // Attention prompts are capped at 240 characters; Slack adds "nothing to answer".
+  return { ...blocker, evidence: [...blocker.evidence, `question-prompt:${explanation.slice(0, 240)}`] };
+}
+
+/**
+ * Greenhouse moved its boards from boards.greenhouse.io to
+ * job-boards.greenhouse.io and redirects old links, so a form on the new host
+ * is still Greenhouse. Treating it as an unrelated site stopped Figma's
+ * application before anything was filled (2026-11-17).
+ */
+export function sameProviderOrigin(actual: string, expected: string): boolean {
+  if (actual === expected) return true;
+  try {
+    const a = new URL(actual);
+    const b = new URL(expected);
+    const greenhouse = (host: string) => host === "greenhouse.io" || host.endsWith(".greenhouse.io");
+    return a.protocol === "https:" && b.protocol === "https:" && greenhouse(a.hostname) && greenhouse(b.hostname);
+  } catch {
+    return false;
+  }
+}
+
+const hostOf = (origin: string) => { try { return new URL(origin).hostname; } catch { return origin; } };
+
 function boundaryBlocker(boundary: BrowserHumanBoundary, executor = "lever-browser"): CareerBlockerDraft {
   return {
     kind: boundary.kind,
@@ -3673,8 +3704,9 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         });
       }
       if (target.provider === "generic" && !(await state.session.verifyPageIdentity?.(request.careerJob.job.company, request.careerJob.job.title))) {
-        const blocker = formBlocker({ id: "application-page", label: "direct application page", type: "unknown", required: true, classification: "unknown" },
-          "The rendered page did not visibly identify the expected company and role; preparation stopped.", "unknown_form_field", "POLICY", executorEvidenceLabel(target.provider));
+        const blocker = safetyStop(formBlocker({ id: "application-page", label: "direct application page", type: "unknown", required: true, classification: "unknown" },
+          "The rendered page did not visibly identify the expected company and role; preparation stopped.", "unknown_form_field", "POLICY", executorEvidenceLabel(target.provider)),
+          `Stopped before filling anything: the page didn't show ${request.careerJob.job.company.slice(0, 60)} and the job title, so the agent couldn't be sure it was the right form.`);
         return finish({ target, session: state.session, fields: [], inspection: inspection("unsupported", [], startedAt, this.now(), {
           blockers: [blocker], unresolvedFields: ["application page identity"], evidence: [...commonEvidence, "navigation:page-identity-unverified", "submit:not-clicked"],
         }) });
@@ -3682,9 +3714,10 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       const formActionOrigin = await state.session.formActionOrigin?.();
       if (formActionOrigin) {
         const expectedOrigin = new URL(target.applicationUrl).origin;
-        if (formActionOrigin !== expectedOrigin) {
-          const blocker = formBlocker({ id: "application-form", label: `${providerLabel(target.provider)} form action`, type: "unknown", required: true, classification: "unknown" },
-            "The rendered form submits to an unrelated origin; preparation stopped.", "unknown_form_field", "POLICY", executorEvidenceLabel(target.provider));
+        if (!sameProviderOrigin(formActionOrigin, expectedOrigin)) {
+          const blocker = safetyStop(formBlocker({ id: "application-form", label: `${providerLabel(target.provider)} form action`, type: "unknown", required: true, classification: "unknown" },
+            "The rendered form submits to an unrelated origin; preparation stopped.", "unknown_form_field", "POLICY", executorEvidenceLabel(target.provider)),
+            `Stopped before filling anything: this form sends applications to ${hostOf(formActionOrigin).slice(0, 60)}, not ${hostOf(expectedOrigin).slice(0, 60)}, and the agent won't send your details to a site it can't verify.`);
           return finish({ target, session: state.session, fields: [], inspection: inspection("unsupported", [], startedAt, this.now(), {
             blockers: [blocker], unresolvedFields: ["application form destination"], evidence: [...commonEvidence, "navigation:form-action-cross-origin", "submit:not-clicked"],
           }) });
@@ -3714,13 +3747,14 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         });
       }
       if (descriptors.length === 0) {
-        const blocker = formBlocker({
+        const blocker = safetyStop(formBlocker({
           id: "application-form",
           label: `${providerLabel(target.provider)} application form`,
           type: "unknown",
           required: true,
           classification: "unknown",
-        }, "No supported application fields were found on the verified page.", "unknown_form_field", "POLICY", executorEvidenceLabel(target.provider));
+        }, "No supported application fields were found on the verified page.", "unknown_form_field", "POLICY", executorEvidenceLabel(target.provider)),
+          "Stopped: the job page opened, but the agent found no application form on it (it may need an Apply click or a sign-in first).");
         diagnostic = {
           stage: "controls_inspection",
           reasonCode: "unsupported_page",
