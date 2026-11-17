@@ -40,6 +40,7 @@ export type ApplicationFieldType =
 export type ApplicationFieldClassification =
   | "contact"
   | "linkedin"
+  | "github"
   | "website"
   | "resume_upload"
   | "location"
@@ -83,6 +84,8 @@ export interface ApplicationFieldQuestionDescriptor {
 
 /** Serializable description of a form field. It intentionally contains no field value. */
 export interface ApplicationFieldDescriptor {
+  /** Untruncated question title when the bounded label cut it off; read by answer rules. */
+  fullPrompt?: string;
   id: string;
   label: string;
   type: ApplicationFieldType;
@@ -303,6 +306,14 @@ export interface LeverBrowserSession {
   detectUnavailablePage?(): Promise<BrowserUnavailablePage | null>;
   /** Clicks one uniquely identified public-listing Apply control and returns the resulting URL. */
   discoverApplicationRoute?(company: string, role: string): Promise<BrowserApplicationRouteDiscovery>;
+  /**
+   * Vaia's Easy Apply wizard gates its contact form behind an email step and a
+   * résumé-upload step. Completes only those two intro steps on the verified
+   * page so the details form can be inspected; never advances past details.
+   */
+  prepareVaiaApplication?(input: { email: string; resumePath: string; company: string; role: string }): Promise<void>;
+  /** Clicks Vaia's details-step Continue once, after preparation, and stops on the next (review) step. */
+  advanceVaiaToReview?(): Promise<void>;
   inspectFields(): Promise<readonly LeverBrowserField[]>;
   /** Read-only origin of the page form action, when present. */
   formActionOrigin?(): Promise<string | null>;
@@ -327,6 +338,32 @@ export interface LeverBrowserSession {
   handoffScreenshot?(): Promise<Buffer>;
   handoffControls?(): Promise<readonly BrowserHandoffControl[]>;
   activateHandoffControl?(controlId: string, point?: { x: number; y: number }): Promise<void>;
+  /** Forwards one remote-viewer tap, keystroke, or scroll to the page. */
+  handoffInput?(input: BrowserHandoffInput): Promise<void>;
+}
+
+/** One remote-viewer input, in CSS pixels of the page viewport. */
+export type BrowserHandoffInput =
+  | { type: "tap"; x: number; y: number }
+  | { type: "type"; text: string }
+  | { type: "key"; key: HandoffKey }
+  | { type: "scroll"; dy: number };
+
+export const HANDOFF_KEYS = ["Enter", "Tab", "Shift+Tab", "Backspace", "Escape", "Space", "ArrowUp", "ArrowDown"] as const;
+export type HandoffKey = typeof HANDOFF_KEYS[number];
+export const HANDOFF_MAX_TEXT = 500;
+
+/** Rejects anything but a bounded tap, short text, an allowed key, or a scroll. */
+export function parseHandoffInput(value: unknown): BrowserHandoffInput | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const finite = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n);
+  if (input.type === "tap" && finite(input.x) && finite(input.y) && input.x >= 0 && input.y >= 0) return { type: "tap", x: input.x, y: input.y };
+  if (input.type === "type" && typeof input.text === "string" && input.text.length > 0 && input.text.length <= HANDOFF_MAX_TEXT &&
+    !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(input.text)) return { type: "type", text: input.text };
+  if (input.type === "key" && HANDOFF_KEYS.includes(input.key as HandoffKey)) return { type: "key", key: input.key as HandoffKey };
+  if (input.type === "scroll" && finite(input.dy) && Math.abs(input.dy) <= 3_000) return { type: "scroll", dy: input.dy };
+  return undefined;
 }
 
 export interface BrowserHandoffControl {
@@ -355,6 +392,11 @@ export interface BrowserExecutionTelemetry {
   captcha?: BrowserCaptchaDiagnostics;
 }
 
+export interface ExecutionReviewEntry {
+  label: string;
+  value: string;
+}
+
 export interface ExecutionInspection {
   status: ExecutionInspectionStatus;
   fields: readonly ApplicationFieldDescriptor[];
@@ -362,6 +404,8 @@ export interface ExecutionInspection {
   unresolvedFields: readonly string[];
   blockers: readonly CareerBlockerDraft[];
   resumeUsed?: string;
+  /** Read-back of what the executor filled, for the candidate's pre-submit review. */
+  reviewSummary?: readonly ExecutionReviewEntry[];
   evidence: readonly string[];
   /** Active inspection duration, excluding any human wait between attempts. */
   durationMs?: number;
@@ -422,6 +466,7 @@ export interface ApplicationExecutor {
     screenshot(): Promise<Buffer>;
     controls(): Promise<readonly BrowserHandoffControl[]>;
     activate(controlId: string, point?: { x: number; y: number }): Promise<void>;
+    input?(input: BrowserHandoffInput): Promise<void>;
   } | undefined;
 }
 
@@ -526,3 +571,10 @@ export class UnavailableApplicationExecutor implements ApplicationExecutor {
     };
   }
 }
+
+/**
+ * Stored answer for an optional ATS question the user chose to skip (Slack
+ * reply "SKIP"). It is never typed into a form; it only stops the question
+ * from being asked again for that application.
+ */
+export const OPTIONAL_ANSWER_SKIPPED = "__atelier_optional_answer_skipped__";

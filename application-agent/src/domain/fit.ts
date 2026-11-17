@@ -99,7 +99,36 @@ function isPartialMatch(jobSkill: string, candidateKeys: ReadonlySet<string>): b
   return (RELATED_SKILLS[normalized] ?? []).some((related) => candidateKeys.has(related));
 }
 
-function selectResumeFamily(job: JobPosting, profile: CandidateProfile): {
+/**
+ * The posting's own words, without the agent's bookkeeping lines. "Found by
+ * career-agent discover (...)" once counted "agent" as an AI signal and put the
+ * AI resume on a Full Stack role; the "Resume Version:" line is the queue's hint,
+ * which is weighed separately, not posting evidence.
+ */
+export function postingDescription(description: string): string {
+  return description
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*(?:found by career-agent\b|resume version:|priority:|fit:)/i.test(line))
+    .join("\n");
+}
+
+/**
+ * The posting matches two or more résumés equally. The caller settles it with
+ * the tracker's Resume Version or by asking the candidate; it never guesses.
+ */
+export class ResumeFamilyTieError extends Error {
+  constructor(readonly tiedFamilies: readonly ResumeFamilyId[]) {
+    super(`Resume family selection requires review because the posting ties between: ${tiedFamilies.join(", ")}.`);
+    this.name = "ResumeFamilyTieError";
+  }
+}
+
+export interface AssessFitOptions {
+  /** Breaks a tie between equally matching résumés; it never overrides a clear winner. */
+  preferredResumeFamily?: ResumeFamilyId;
+}
+
+function selectResumeFamily(job: JobPosting, profile: CandidateProfile, preferred?: ResumeFamilyId): {
   family: ResumeFamily;
   reason: string;
 } {
@@ -107,7 +136,8 @@ function selectResumeFamily(job: JobPosting, profile: CandidateProfile): {
     throw new Error("Candidate profile must define at least one resume family.");
   }
 
-  const jobText = `${job.title} ${job.description} ${job.requiredSkills.join(" ")} ${job.preferredSkills.join(" ")}`.toLowerCase();
+  const description = postingDescription(job.description);
+  const jobText = `${job.title} ${description} ${job.requiredSkills.join(" ")} ${job.preferredSkills.join(" ")}`.toLowerCase();
   const ranked = profile.resumeFamilies.map((family, index) => ({
     family,
     index,
@@ -121,10 +151,25 @@ function selectResumeFamily(job: JobPosting, profile: CandidateProfile): {
   // details; those are supporting signals when the title/description is
   // clearly about agents, models, or AI platforms.
   const title = job.title.toLowerCase();
-  const descriptionAndSkills = `${job.description} ${job.requiredSkills.join(" ")} ${job.preferredSkills.join(" ")}`.toLowerCase();
+  const descriptionAndSkills = `${description} ${job.requiredSkills.join(" ")} ${job.preferredSkills.join(" ")}`.toLowerCase();
+  // The kind of engineer the posting asks for, in its own words. Mercury's
+  // "1-4 years of backend or full-stack development experience" counted for
+  // nothing, so its React/TypeScript skill list sent it to the frontend résumé.
+  // With no backend résumé, backend work goes to the cloud/platform résumé,
+  // which leads with the FastAPI backend.
+  // An AI title ("Backend Engineer, AI (Agent Systems)") stays an AI role; the
+  // role words only sort out titles that don't name the lane.
+  const aiTitle = /\b(?:ai|ml|llm|agentic|agents?|machine learning|genai|generative ai)\b/.test(title);
+  const count = (pattern: RegExp) => aiTitle ? 0 : (descriptionAndSkills.match(pattern) ?? []).length + (title.match(pattern) ?? []).length * 2;
+  const backendWords = count(/\bback[- ]?end\b|\bserver[- ]side\b|\bdistributed systems?\b/g);
+  const fullStackWords = count(/\bfull[- ]?stack\b/g);
+  const frontendWords = count(/\bfront[- ]?end\b|\buser interfaces?\b|\bui\b|\bcss\b|\bdesign systems?\b/g);
   const familyScore = (family: ResumeFamily): number => {
     const id = family.id;
     const configured = family.focusKeywords.filter((keyword) => containsKeyword(jobText, keyword)).length;
+    // "Full stack" alone leans frontend (it usually means a React UI on top);
+    // naming backend work tips it to the backend-leaning résumé.
+    if (id === "frontend-software") return configured + frontendWords * 2 + fullStackWords * 2;
     if (id === "ai-platform-agentic") {
       const titleSignals = (title.match(/\b(?:ai|ml|machine learning|llm|agentic|agents?|genai|generative ai)\b/g) ?? []).length;
       const roleSignals = (title.match(/\b(?:ai|ml|agentic|llm)\s+platform\b/g) ?? []).length * 2;
@@ -134,14 +179,26 @@ function selectResumeFamily(job: JobPosting, profile: CandidateProfile): {
     if (id === "cloud-platform") {
       const titleSignals = (title.match(/\b(?:cloud|infrastructure|devops|platform)\b/g) ?? []).length;
       const bodySignals = (descriptionAndSkills.match(/\b(?:aws|azure|gcp|kubernetes|terraform|cloudformation|infrastructure|devops|observability|ci\/cd)\b/g) ?? []).length;
-      return configured + titleSignals * 3 + bodySignals;
+      return configured + titleSignals * 3 + bodySignals + backendWords * 3 + fullStackWords;
     }
     return configured;
   };
   for (const candidate of ranked) candidate.score = familyScore(candidate.family);
 
+  // A React skill on an AI or platform role ("AI Engineer – Agentic
+  // Automation" listing React) does not make it a frontend posting; the
+  // title decides when it names other work.
+  const otherLaneTitle = /\b(?:ai|ml|llm|agentic|agents?|machine learning|devops|cloud|infrastructure|platform|sre|site reliability|data)\b/i.test(job.title);
+  const frontendMatch = (candidate: (typeof ranked)[number]) =>
+    candidate.matches.some((match) => /frontend|react|typescript|javascript|web|software/i.test(match));
+  // A React skill on a neutral title ("Software Engineer" listing React as a
+  // bonus) only makes it a frontend posting when the frontend résumé is also
+  // the strongest match. Outmarket's RAG/agents role was forced onto the
+  // frontend résumé because React was in its skill list.
+  const bestFrontend = Math.max(-1, ...ranked.filter(frontendMatch).map((candidate) => candidate.score));
+  const bestOther = Math.max(-1, ...ranked.filter((candidate) => !frontendMatch(candidate)).map((candidate) => candidate.score));
   const frontendPosting = /\b(frontend|front[- ]end|ui|web|react)\b/i.test(job.title) ||
-    job.requiredSkills.concat(job.preferredSkills).some((skill) => /\b(frontend|react|web)\b/i.test(skill));
+    (!otherLaneTitle && job.requiredSkills.concat(job.preferredSkills).some((skill) => /\b(frontend|react|web)\b/i.test(skill)) && bestFrontend >= bestOther);
   if (frontendPosting && !ranked.some((candidate) => candidate.matches.some((match) =>
     /frontend|react|typescript|javascript|web|software/i.test(match)))) {
     throw new Error("No verified frontend/software resume family is available for this frontend posting.");
@@ -151,12 +208,18 @@ function selectResumeFamily(job: JobPosting, profile: CandidateProfile): {
     ? ranked.filter((candidate) => candidate.matches.some((match) => /frontend|react|typescript|javascript|web|software/i.test(match)))
     : ranked;
   eligible.sort((a, b) => b.score - a.score || b.matches.length - a.matches.length || a.index - b.index);
-  const selected = eligible[0] ?? ranked[0];
-  if (!selected) throw new Error("No verified resume family is available for this posting.");
-  const tied = eligible.filter((candidate) => candidate.score === selected.score && candidate.score > 0);
+  const top = eligible[0] ?? ranked[0];
+  if (!top) throw new Error("No verified resume family is available for this posting.");
+  const tied = eligible.filter((candidate) => candidate.score === top.score && candidate.score > 0);
+  const chosen = tied.length > 1 ? tied.find((candidate) => candidate.family.id === preferred) : top;
+  if (!chosen) throw new ResumeFamilyTieError(tied.map((candidate) => candidate.family.id as ResumeFamilyId));
   if (tied.length > 1) {
-    throw new Error(`Resume family selection requires review because the posting ties between: ${tied.map((candidate) => candidate.family.id).join(", ")}.`);
+    return {
+      family: chosen.family,
+      reason: `${chosen.family.label} was chosen by the tracker's Resume Version because the posting matches ${tied.map((candidate) => candidate.family.id).join(" and ")} equally.`,
+    };
   }
+  const selected = chosen;
   const semanticSignals = selected.family.id === "cloud-platform"
     ? [
         /\b(?:cloud|infrastructure|devops|platform)\b/i.test(title) ? "platform/infrastructure role" : "",
@@ -177,7 +240,7 @@ function selectResumeFamily(job: JobPosting, profile: CandidateProfile): {
   return { family: selected.family, reason };
 }
 
-export function assessFit(job: JobPosting, profile: CandidateProfile): FitAssessment {
+export function assessFit(job: JobPosting, profile: CandidateProfile, options: AssessFitOptions = {}): FitAssessment {
   const candidateKeys = profileSkillKeys(profile);
   const strongMatches: string[] = [];
   const partialMatches: string[] = [];
@@ -224,7 +287,7 @@ export function assessFit(job: JobPosting, profile: CandidateProfile): FitAssess
     classification = "weak";
   }
 
-  const { family, reason } = selectResumeFamily(job, profile);
+  const { family, reason } = selectResumeFamily(job, profile, options.preferredResumeFamily);
   const applicationRecommendation = classification === "strong" || classification === "good"
     ? "proceed"
     : classification === "stretch"

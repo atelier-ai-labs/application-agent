@@ -166,22 +166,27 @@ export function buildBraveSearchQueries(
     }
   }
   const remoteRequested = criteria.remoteOnly || searchIntent?.remotePreference === "remote_only" || searchIntent?.remotePreference === "remote_preferred";
-  const configuredLocations = searchIntent?.locations ?? criteria.locations;
-  const location = configuredLocations.map(normalizedTerm).find(Boolean);
+  const configuredLocations = (searchIntent?.locations ?? criteria.locations).map(normalizedTerm).filter(Boolean);
+  // A country scopes the remote search; a city ("Pittsburgh, PA") also gets
+  // its own on-site/hybrid search without "remote".
+  const isCountry = (value: string) => /^(?:united states|us|usa|u\.s\.a?\.?|america)$/i.test(value);
+  const location = configuredLocations.find(isCountry) ?? configuredLocations[0];
+  const localLocations = configuredLocations.filter((value) => !isCountry(value) && value !== location);
   const seen = new Set<string>();
   const queries: string[] = [];
-
-  for (const base of orderedBases) {
-    const parts = [base];
-    if (remoteRequested && !/\bremote\b/i.test(base)) parts.push("remote");
-    if (location && !base.toLowerCase().includes(location.toLowerCase())) parts.push(location);
-    if (!hasJobWord(base)) parts.push("jobs");
+  const add = (parts: string[]) => {
     const query = normalizedTerm(parts.join(" "));
     const key = query.toLowerCase();
-    if (query && !seen.has(key)) {
+    if (query && !seen.has(key) && queries.length < maxQueries) {
       seen.add(key);
       queries.push(query);
     }
+  };
+
+  for (const base of orderedBases) {
+    const jobs = hasJobWord(base) ? [] : ["jobs"];
+    add([base, ...(remoteRequested && !/\bremote\b/i.test(base) ? ["remote"] : []), ...(location && !base.toLowerCase().includes(location.toLowerCase()) ? [location] : []), ...jobs]);
+    for (const local of localLocations) add([base, local, ...jobs]);
     if (queries.length >= maxQueries) break;
   }
   return queries;

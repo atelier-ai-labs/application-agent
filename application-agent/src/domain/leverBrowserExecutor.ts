@@ -1,10 +1,12 @@
 import type {
+  BrowserHandoffInput,
   ApplicationExecutionRequest,
   ApplicationExecutor,
   ApplicationFieldClassification,
   ApplicationFieldDescriptor,
   ApplicationFieldOption,
   ApplicationFieldType,
+  ExecutionReviewEntry,
   BrowserHumanBoundary,
   BrowserCaptchaDiagnostics,
   BrowserExecutionBoundaryState,
@@ -22,6 +24,7 @@ import type {
 import {
   BrowserExecutionDiagnosticError,
   browserDiagnosticForError,
+  OPTIONAL_ANSWER_SKIPPED,
   safeBrowserDiagnosticMessage,
 } from "./executor";
 import type {
@@ -43,7 +46,9 @@ import {
   leverSourceId,
 } from "./leverJobSource";
 import {
+  greenhouseEmbedApplicationUrl,
   isVerifiedGreenhouseApplicationUrl,
+  isVerifiedGreenhouseEmbedUrl,
   isVerifiedGreenhouseHostedUrl,
 } from "./greenhouseJobSource";
 import {
@@ -62,6 +67,9 @@ import {
   isVerifiedGustoHostedUrl,
   isVerifiedGustoApplicationUrl,
   gustoPostingId,
+  isVerifiedVaiaApplicationUrl,
+  vaiaPostingId,
+  canonicalVaiaApplicationUrl,
   matlenPostingId,
   protagonaPostingId,
   youHiredPostingId,
@@ -72,7 +80,7 @@ import { monotonicNow } from "./executionTrace";
 export interface LeverBrowserExecutorOptions {
   sessionFactory: LeverBrowserSessionFactory;
   /** Defaults to Lever for backwards compatibility; auto accepts verified ATS destinations. */
-  provider?: "lever" | "greenhouse" | "rippling" | "ashby" | "workday" | "youhired" | "matlensilver" | "protagona" | "gusto" | "generic" | "auto";
+  provider?: "lever" | "greenhouse" | "rippling" | "ashby" | "workday" | "youhired" | "matlensilver" | "protagona" | "gusto" | "vaia" | "generic" | "auto";
   /** Local/private resume artifacts keyed by the selected family. Never persisted by the domain. */
   resumePaths?: Partial<Record<ResumeFamilyId, string>>;
   /** The concrete host may check a path before the browser attempts upload. */
@@ -90,7 +98,7 @@ interface SessionState {
 }
 
 interface TrustedTarget {
-  provider: "lever" | "greenhouse" | "rippling" | "ashby" | "workday" | "youhired" | "matlensilver" | "protagona" | "gusto" | "generic";
+  provider: "lever" | "greenhouse" | "rippling" | "ashby" | "workday" | "youhired" | "matlensilver" | "protagona" | "gusto" | "vaia" | "generic";
   site: string;
   postingId?: string;
   applicationUrl: string;
@@ -178,6 +186,12 @@ function normalizedTokens(value: string): readonly string[] {
     .filter((token) => token.length > 1);
 }
 
+/** The form section a control sits in ("Education", "References"), when the page names one. */
+function sectionTitleOf(field: Pick<LeverBrowserField, "id" | "label" | "section">): string {
+  const descriptor = (field as { questionDescriptor?: { sectionTitle?: string } }).questionDescriptor;
+  return normalized([descriptor?.sectionTitle, field.section].filter(Boolean).join(" "));
+}
+
 function fieldText(field: Pick<LeverBrowserField, "id" | "label" | "section">): string {
   return normalized([field.id, field.label, field.section].filter(Boolean).join(" "));
 }
@@ -195,6 +209,7 @@ function inspectedPromptText(field: Pick<LeverBrowserField, "id" | "label" | "se
     field.id,
     field.label,
     field.section,
+    (field as { fullPrompt?: string }).fullPrompt,
     contextualField.questionDescriptor?.promptText,
     contextualField.questionDescriptor?.accessibleName,
     contextualField.questionDescriptor?.nearbyInstructionText,
@@ -225,16 +240,19 @@ function directFieldPromptText(field: Pick<LeverBrowserField, "id" | "label" | "
   ].filter(Boolean).join(" "));
 }
 
-type ProfileFactField = "linkedin" | "website" | "desired_work_location" | "start_availability";
+type ProfileFactField = "linkedin" | "github" | "website" | "desired_work_location" | "start_availability";
 
 function profileFactField(field: Pick<LeverBrowserField, "id" | "label" | "section">): ProfileFactField | undefined {
   const text = inspectedPromptText(field).replace(/[_-]+/g, " ");
   if (hasPhrase(text, /linkedin|linked in/)) return "linkedin";
+  if (hasPhrase(text, /\bgit ?hub\b/)) return "github";
   if (hasPhrase(text, /website|personal site|web site/)) return "website";
   if (hasPhrase(text, /(?:desired|preferred|target) (?:work )?location|location preference|where do you prefer to work|where would you like to work/)) {
     return "desired_work_location";
   }
   if (hasPhrase(text, /employ|employer|company|work history|job history|position held|job title|occupation/)) return undefined;
+  // School attendance dates ("Attendance Start Date") are not job availability.
+  if (hasPhrase(text, /\beducation\b|\battend[ae]nce\b|\benrolled\b|\binstitution\b|\bschool\b|\bdegree\b/)) return undefined;
   if (hasPhrase(text, /(?:available|availability|start|commence|join|begin).{0,24}(?:date|when)|(?:date|when).{0,24}(?:available|availability|start|commence|join|begin)/)) {
     return "start_availability";
   }
@@ -261,7 +279,22 @@ function isBackgroundCheckConsentField(field: Pick<LeverBrowserField, "id" | "la
  * phone-number or work-authorization fact. The candidate has explicitly
  * opted out, so this narrow rule always supplies No for these prompts.
  */
-function isSmsConsentField(field: Pick<LeverBrowserField, "id" | "label" | "section">): boolean {
+/**
+ * The profile phone, with "+1" when the prompt asks for the international
+ * country code ("starting with '+'", Instructure) and the candidate is in the US.
+ */
+function phoneAsPromptAsks(profile: CandidateProfile | undefined, text: string, value: string): string {
+  const phone = value.trim();
+  if (!profile || !phone || phone.startsWith("+") || !/^[\d\s().-]{7,}$/.test(phone)) return value;
+  const wantsCountryCode = /\b(?:international |country )(?:dialing |calling )?code\b|\bstarting with ['"]?\+|\binclude (?:the )?\+/.test(text);
+  const location = normalized(profile.identity.location ?? profile.location ?? "");
+  return wantsCountryCode && /\b(?:usa|united states|u s a?)$/.test(location) ? `+1 ${phone}` : phone;
+}
+
+function isSmsConsentField(field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[] }): boolean {
+  // Ashby labels its text-message consent radio just "Phone"; the options say what it is.
+  const options = (field.options ?? []).map((option) => normalized(option.label)).join(" ");
+  if (/\bconsent to receiv\w* text messages?\b/.test(options) && /\bdo not consent\b/.test(options)) return true;
   const text = directFieldPromptText(field);
   return /\b(?:sms|text\s*messages?|text-message)\b/.test(text) &&
     /\b(?:consent|agree(?:ment)?|opt\s*(?:in|out)|receive|updates?|messages?)\b/.test(text);
@@ -297,6 +330,20 @@ function approvedDemographicValueForField(
   if (/\bsexual orientation\b|\bsexuality\b/.test(text)) return approved.sexual_orientation?.trim();
   if (/\bdisability\b|\bdisabled\b/.test(text)) return approved.disability_status?.trim();
   if (/\b(?:protected\s+)?veteran\b|\bmilitary service\b/.test(text)) return approved.veteran_status?.trim();
+  // "I identify as a first-generation professional" (Gusto, 2026-11-10): Nate
+  // declines it, so pick the form's own decline option instead of asking.
+  // "Pronouns" (Affirm, 2026-11-10): the option that starts with the saved
+  // pronouns ("He/him" matches "He/him/his"); ask when none or several match.
+  if (/\bpronouns?\b/.test(text) && approved.pronouns?.trim()) {
+    const squash = (value: string) => normalized(value).replace(/\s+/g, "");
+    const saved = squash(approved.pronouns);
+    const matches = (field.options ?? []).filter((option) => squash(option.label).startsWith(saved));
+    return field.options?.length ? (matches.length === 1 ? matches[0]!.label : undefined) : approved.pronouns.trim();
+  }
+  if (/\bfirst[- ]generation\b/.test(text)) {
+    const declines = (field.options ?? []).filter((option) => /\b(?:don'?t|do not) wish to (?:answer|disclose|say)|\bprefer not\b|\bdecline\b/.test(normalized(option.label)));
+    return declines.length === 1 ? declines[0]!.label : undefined;
+  }
   if (/\bhow do you describe your gender identity\b/.test(text)) return approved.gender_identity?.trim();
   // Ashby can expose a second, custom gender question whose inspected label is
   // only the currently rendered option (for example "Female"). The option
@@ -311,6 +358,11 @@ function approvedDemographicValueForField(
   // Hispanic/Latino is an ethnicity subtype, not the general race/ethnicity
   // answer. Check it before the broader race matcher so the White answer can
   // never be consumed by this control.
+  // Ashby's "Race" question carries the "Hispanic or Latino - A person of ..."
+  // definitions as nearby text, so decide by the question's own title first.
+  const title = normalized([field.id, field.label, (field as { questionDescriptor?: { promptText?: string } }).questionDescriptor?.promptText]
+    .filter(Boolean).join(" ")).replace(/[_-]+/g, " ");
+  if (/\brace\b/.test(title) && !/\bhispanic\b|\blatin[oax]\b/.test(title)) return approved.race_ethnicity?.trim();
   if (/\bhispanic\b|\blatino\b|\blatina\b|\blatinx\b/.test(text)) return approved.hispanic_latino?.trim();
   if (/\brace\b|\bethnic(?:ity| origin)?\b/.test(text)) return approved.race_ethnicity?.trim();
   if (/\bdemographic\b.{0,32}\b(?:consent|data)\b|\b(?:consent|data)\b.{0,32}\bdemographic\b/.test(text)) {
@@ -327,6 +379,50 @@ function approvedDemographicValueForField(
  * controls with an unambiguous demographic option label; unrelated optional
  * checkboxes remain untouched.
  */
+/**
+ * A "select all that apply" checkbox group asked as one question: the group's
+ * shared prompt, with each box's label as a choice (Gusto, 2026-11-10: each box
+ * was asked on its own with no choices, and a saved "Job Board" answer fit no
+ * box, so it looped).
+ */
+function checkboxGroupDescriptor(group: string, boxes: readonly ApplicationFieldDescriptor[]): ApplicationFieldDescriptor {
+  const first = boxes[0]!;
+  return {
+    ...first,
+    id: group,
+    label: first.questionDescriptor?.promptText ?? first.label,
+    type: "radio",
+    classification: "unknown",
+    required: boxes.some((box) => box.required),
+    options: boxes.map((box) => ({ label: box.label, value: box.label })),
+  };
+}
+
+/** The answered choice for a checkbox group, only when it names exactly one of its boxes. */
+function checkboxGroupChoice(group: string, boxes: readonly ApplicationFieldDescriptor[], request: ApplicationExecutionRequest): string | undefined {
+  const answered = request.careerJob.blockers
+    .filter((blocker) => blocker.status === "resolved" && blocker.field === group && typeof blocker.value === "string" && blocker.value !== OPTIONAL_ANSWER_SKIPPED)
+    .sort((left, right) => (right.resolvedAt ?? "").localeCompare(left.resolvedAt ?? ""))[0];
+  if (!answered) return undefined;
+  const matches = boxes.filter((box) => normalized(box.label) === normalized(String(answered.value)));
+  return matches.length === 1 ? matches[0]!.label : undefined;
+}
+
+/** The shared name of a multi-choice checkbox group ("question_1[]_42" → "question_1[]"). */
+function checkboxGroupKey(field: Pick<LeverBrowserField, "id" | "type">): string | undefined {
+  if (field.type !== "checkbox") return undefined;
+  return /^(.+\[\])_[^_]+$/.exec(field.id)?.[1];
+}
+
+function remotePreferenceCheckboxValue(
+  field: Pick<LeverBrowserField, "id" | "label" | "section" | "type">,
+): boolean | undefined {
+  if (field.type !== "checkbox") return undefined;
+  const prompt = inspectedPromptText(field);
+  if (!/\blocation preferences?\b|\bpreferred (?:work )?locations?\b|\bwhere (?:would you like|do you prefer|do you want) to work\b|\b(?:desired|preferred) work (?:location|arrangement)\b/.test(prompt)) return undefined;
+  return /\bremote\b/.test(normalized(field.label ?? ""));
+}
+
 function approvedDemographicCheckboxValueForField(
   field: Pick<LeverBrowserField, "id" | "label" | "section">,
   profile: CandidateProfile,
@@ -364,7 +460,7 @@ function approvedDemographicCheckboxValueForField(
  * answered with the generic source value.
  */
 function approvedJobSourceValueForField(
-  field: Pick<LeverBrowserField, "id" | "label" | "section">,
+  field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[] },
   profile: CandidateProfile,
 ): string | undefined {
   const text = inspectedPromptText(field);
@@ -372,7 +468,223 @@ function approvedJobSourceValueForField(
   if (!/\bhow did you (?:hear|learn)\b|\bwhere did you hear\b|\bhow did you discover\b|\b(?:job|role|opportunity) source\b|\bsource of (?:this )?(?:job|role|opportunity)\b/.test(text)) {
     return undefined;
   }
-  return profile.approvedReusableAnswers.job_source?.trim();
+  // job_source may rank several wordings ("Another job site|Job board|Internet");
+  // a dropdown takes the first one it offers, free text takes the first.
+  const preferences = (profile.approvedReusableAnswers.job_source ?? "").split("|").map((value) => value.trim()).filter(Boolean);
+  if (!field.options?.length) return preferences[0];
+  for (const preference of preferences) {
+    const option = field.options.find((candidate) => normalized(candidate.label) === normalized(preference));
+    if (option) return option.label;
+  }
+  // None of the ranked wordings is offered: a plain "Other" is a safe answer
+  // to a marketing question and never claims a specific source.
+  return field.options.find((candidate) => /^other\b/.test(normalized(candidate.label)))?.label;
+}
+
+/**
+ * "Have you been employed by <company> before?" is No when that employer is
+ * not in the candidate's work history; a match stays a question for the user.
+ */
+/**
+ * "Are you currently based in the U.S.?" is Yes when the profile's own
+ * location is in the United States; any other location stays a question.
+ */
+/** The job is in the US: "Remote — U.S.", "United States", "New York, NY, USA". */
+function isUnitedStatesJobLocation(location: string | null | undefined): boolean {
+  const lower = (location ?? "").toLowerCase();
+  return /\bu\.?\s?s\.?a?\b|\bunited states\b|\bus[- ]remote\b/.test(lower) && !/\b(?:canada|uk|united kingdom|europe|india|mexico|brazil)\b/.test(lower);
+}
+
+/**
+ * "What is your current work authorization status in the country where this
+ * position is located?" with a Citizen option: answered only from the
+ * profile's recorded citizenship of the job's country, and only when exactly
+ * one option says citizen.
+ */
+function citizenshipStatusValueForField(
+  field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[]; type?: string },
+  profile: CandidateProfile,
+  jobLocation: string | null | undefined,
+): string | undefined {
+  if (!field.options?.length) return undefined;
+  const text = inspectedPromptText(field);
+  // "This position is open to U.S. citizens only. Are you a U.S. citizen?" (Yes/No)
+  if (/\bare you an? (?:u\.?\s?s\.?a?|united states) citizen\b/.test(text)) {
+    const citizenOfUs = (profile.workAuthorization.citizenship ?? []).some((country) => /\bu\.?\s?s\.?a?\b|\bunited states\b/i.test(country));
+    const yes = field.options.filter((option) => /^yes\b/.test(normalized(option.label)));
+    return citizenOfUs && yes.length === 1 ? yes[0]!.label : undefined;
+  }
+  if (!/\b(?:work authori[sz]ation|citizenship|immigration|residency) status\b/.test(text)) return undefined;
+  const asksUs = /\b(?:u\.?\s?s\.?a?|united states)\b/.test(text) ||
+    (/\bthe country where (?:this|the) (?:position|role|job) is (?:located|based)\b/.test(text) && isUnitedStatesJobLocation(jobLocation));
+  if (!asksUs) return undefined;
+  const citizenOf = profile.workAuthorization.citizenship ?? [];
+  if (!citizenOf.some((country) => /\bu\.?\s?s\.?a?\b|\bunited states\b/i.test(country))) return undefined;
+  const citizen = field.options.filter((option) => /^(?:(?:u\.?\s?s\.?|united states) )?citizen\b/.test(normalized(option.label)));
+  return citizen.length === 1 ? citizen[0]!.label : undefined;
+}
+
+function basedInUsValueForField(
+  field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[] },
+  profile: CandidateProfile,
+  jobLocation?: string | null,
+): string | undefined {
+  const text = inspectedPromptText(field);
+  const namesUs = /\b(?:are you|currently|i confirm(?: that)?(?: i)?)\b.{0,40}\b(?:based|located|living|residing|reside)\b.{0,20}\b(?:in )?(?:the )?(?:u\.?\s?s\.?a?|united states)\b/.test(text);
+  // "I confirm that I reside in the US." (Samsara, 2026-11-12) is the same fact.
+  // "Do you currently reside in the country where this position is located?"
+  // (Instructure) names the job's country instead; it is the US when the job is.
+  const namesJobCountry = /\b(?:are you|do you|currently)\b.{0,40}\b(?:based|located|living|residing|reside|live)\b.{0,20}\bin the country where (?:this|the) (?:position|role|job) is (?:located|based)\b/.test(text) &&
+    isUnitedStatesJobLocation(jobLocation);
+  if (!namesUs && !namesJobCountry) return undefined;
+  const location = normalized(profile.identity.location ?? profile.location ?? "");
+  if (!/\b(?:usa|united states|u s a?)$/.test(location)) return undefined;
+  const yes = field.options?.find((option) => normalized(option.label) === "yes" || /^yes\b/.test(normalized(option.label)));
+  return field.options?.length ? yes?.label : "Yes";
+}
+
+/** US state names, longest first, so "west virginia" wins over "virginia". */
+function usStateNamesLongestFirst(): readonly string[] {
+  return Object.keys(US_STATE_CODES).sort((a, b) => b.length - a.length);
+}
+
+/** Every US state a text names, by full name or a parenthesized "(PA)" code. */
+function usStatesNamedIn(text: string): Set<string> {
+  let rest = normalized(text);
+  const found = new Set<string>();
+  for (const name of usStateNamesLongestFirst()) {
+    const pattern = new RegExp(`\\b${name}\\b`, "g");
+    if (pattern.test(rest)) {
+      found.add(name);
+      rest = rest.replace(pattern, " ");
+    }
+  }
+  for (const [name, code] of Object.entries(US_STATE_CODES)) {
+    if (new RegExp(`\\(${code}\\)`).test(rest)) found.add(name);
+  }
+  return found;
+}
+
+/** The candidate's US state from the profile location ("Pittsburgh, Pennsylvania, USA" or "Pittsburgh, PA"). */
+function profileUsState(profile: CandidateProfile): string | undefined {
+  const location = normalized(profile.identity.location ?? profile.location ?? "");
+  if (!location) return undefined;
+  const named = [...usStatesNamedIn(location)];
+  if (named.length === 1) return named[0];
+  if (named.length > 1) return undefined;
+  const code = /,\s*([a-z]{2})(?:\s*,|\s*$|\s+\d{5})/.exec(location)?.[1];
+  return code ? Object.entries(US_STATE_CODES).find(([, value]) => value === code)?.[0] : undefined;
+}
+
+/**
+ * "Select the location you intend to work from" picks the one option naming
+ * the profile's state; zero or several matching options stay a question.
+ */
+function workLocationStateValueForField(
+  field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[] },
+  profile: CandidateProfile,
+): string | undefined {
+  if (!field.options?.length) return undefined;
+  const text = inspectedPromptText(field);
+  if (!/\b(?:intend|plan|will|going|expect)\b.{0,30}\bwork (?:from|in)\b|\bwork(?:ing)? from\b.{0,60}\b(?:location|state)\b|\b(?:which|what) (?:state|location)\b.{0,60}\b(?:work|live|reside|located|based)\b|\bstate of residence\b/.test(text)) return undefined;
+  const state = profileUsState(profile);
+  if (!state) return undefined;
+  const matches = field.options.filter((option) => {
+    const named = usStatesNamedIn(option.label);
+    return named.size === 1 && named.has(state);
+  });
+  return matches.length === 1 ? matches[0]!.label : undefined;
+}
+
+/**
+ * "We are hiring in these states: ... Do you live in one of these?" is Yes when
+ * the list names the profile's state. A list without it stays a question.
+ */
+function residesInListedStatesValueForField(
+  field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[] },
+  profile: CandidateProfile,
+): string | undefined {
+  const text = inspectedPromptText(field);
+  if (!/\b(?:live|reside|residing|located|based)\b.{0,30}\b(?:in )?(?:one of )?(?:these|the following|the listed|those|any of (?:these|the))\b.{0,10}\bstates?\b|\bfollowing states\b.{0,400}\b(?:live|reside|located|based)\b/.test(text)) return undefined;
+  const listed = usStatesNamedIn(text);
+  const state = profileUsState(profile);
+  if (listed.size < 2 || !state || !listed.has(state)) return undefined;
+  const yes = field.options?.find((option) => normalized(option.label) === "yes" || /^yes\b/.test(normalized(option.label)));
+  return field.options?.length ? yes?.label : undefined;
+}
+
+/**
+ * "Which of these locations will you be working from? North America / South
+ * America / Europe" picks North America when the profile lives in the US.
+ */
+function workRegionValueForField(
+  field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[] },
+  profile: CandidateProfile,
+): string | undefined {
+  const option = field.options?.find((candidate) => normalized(candidate.label) === "north america");
+  if (!option) return undefined;
+  const text = inspectedPromptText(field);
+  if (!/\b(?:work(?:ing)?|located|based|live|living|reside|residing)\b.{0,20}\b(?:from|in)\b|\b(?:region|continent)\b/.test(text)) return undefined;
+  const location = normalized(profile.identity.location ?? profile.location ?? "");
+  if (!/\b(?:usa|united states|u s a?)$/.test(location) && !profileUsState(profile)) return undefined;
+  return option.label;
+}
+
+/** Degree levels, lowest to highest, with the words a form or profile uses for each. */
+const EDUCATION_LEVELS: readonly (readonly [number, RegExp])[] = [
+  [1, /\bhigh school\b|\bged\b|\bsecondary\b/],
+  [2, /\bassociate'?s?\b|\ba\.?\s?[as]\.?\b|\btwo[- ]year\b/],
+  [3, /\bbachelor'?s?\b|\bb\.?\s?[as]\.?\b|\bundergraduate\b/],
+  [4, /\bmaster'?s?\b|\bm\.?\s?[as]\.?\b|\bmba\b|\bgraduate degree\b/],
+  [5, /\bdoctor(?:ate|al)?\b|\bph\.?\s?d\b/],
+];
+
+function educationLevel(text: string): number | undefined {
+  return EDUCATION_LEVELS.find(([, pattern]) => pattern.test(text))?.[0];
+}
+
+/**
+ * "Highest completed level of education" picks the option at the level of the
+ * highest completed degree in the profile (an associate degree matches
+ * "Associate's Degree"); no profile degree or no single matching option asks.
+ */
+function highestEducationValueForField(
+  field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[] },
+  profile: CandidateProfile,
+): string | undefined {
+  if (!/\bhighest\b.{0,30}\b(?:education|degree)\b|\blevel of education\b/.test(inspectedPromptText(field))) return undefined;
+  const levels = profile.education.filter((record) => record.completionDate).map((record) => educationLevel(normalized(record.degree))).filter((level): level is number => level !== undefined);
+  if (levels.length === 0 || !field.options?.length) return undefined;
+  const highest = Math.max(...levels);
+  const matches = field.options.filter((option) => educationLevel(normalized(option.label)) === highest && !/\bsome\b|\bin progress\b|\bpursuing\b/.test(normalized(option.label)));
+  return matches.length === 1 ? matches[0]!.label : undefined;
+}
+
+function previousEmployerValueForField(
+  field: Pick<LeverBrowserField, "id" | "label" | "section"> & { options?: readonly ApplicationFieldOption[] },
+  request: ApplicationExecutionRequest,
+): string | undefined {
+  const text = inspectedPromptText(field);
+  // "Have you ever, or are you currently working at Gusto..." (Gusto, 2026-11-10).
+  const everOrCurrently = /\bhave you ever\b.{0,40}\b(?:currently )?(?:working|worked|employed)\b (?:at|by|for|with)\b/.test(text);
+  if (!everOrCurrently && !/\b(?:have|had) you\b.{0,30}\b(?:employed|worked)\b.{0,60}\bbefore\b|\b(?:previously|ever) (?:been )?(?:employed|worked) (?:by|at|for|with)\b|\bformer employee\b|\bare you (?:a )?current\b.{0,30}\bemployee\b/.test(text)) {
+    return undefined;
+  }
+  // "Gusto, Inc." is asked about as "Gusto": drop punctuation and the legal suffix.
+  const company = normalized(request.careerJob.job.company ?? "").replace(/[.,]/g, " ")
+    .replace(/\b(?:inc|llc|ltd|corp|corporation|co|plc|gmbh)\b/g, " ").replace(/\s+/g, " ").trim();
+  // Forms often shorten the name ("a current Stack employee" for Stack AV).
+  const firstWord = company.split(" ")[0] ?? "";
+  const plainText = text.replace(/[.,]/g, " ").replace(/\s+/g, " ");
+  if (!company || !plainText.includes(company) && !(firstWord.length >= 4 && plainText.includes(firstWord)) && !/\b(?:us|this company|our company)\b/.test(text)) return undefined;
+  const employers = request.profile?.employmentHistory.map((record) => normalized(record.employer ?? "")) ?? [];
+  if (employers.some((employer) => employer && (employer.includes(company) || company.includes(employer)))) return undefined;
+  // "I have not previously been employed at Affirm" (Affirm, 2026-11-10) is the No.
+  const nos = field.options?.filter((option) => normalized(option.label) === "no" ||
+    /^no\b/.test(normalized(option.label)) ||
+    /\b(?:have not|haven'?t|never|not)\b.{0,30}\b(?:been )?(?:employed|worked)\b/.test(normalized(option.label))) ?? [];
+  const exactNo = field.options?.find((option) => normalized(option.label) === "no");
+  return field.options?.length ? exactNo?.label ?? (nos.length === 1 ? nos[0]!.label : undefined) : "No";
 }
 
 /**
@@ -420,6 +732,43 @@ function approvedAcknowledgmentValueForField(
     return profile.identity.fullName?.trim() || undefined;
   }
   return undefined;
+}
+
+/**
+ * "I certify the information in this application is true and complete." The
+ * candidate approved checking this on every application (2026-11-04): it only
+ * vouches for answers they gave. Anything that also signs away a right, consents
+ * to a check, or stands in for a signature still goes to the candidate.
+ */
+export function isTruthfulnessCertification(text: string): boolean {
+  const lower = normalized(text);
+  return /\b(?:certif(?:y|ies)|attest|affirm|acknowledge|confirm|declare)\b/.test(lower) &&
+    /\b(?:true|accurate|correct|complete|truthful)\b/.test(lower) &&
+    /\b(?:information|answers|statements|application|responses)\b/.test(lower) &&
+    !/\b(?:arbitrat\w*|waive\w*|release|indemn\w*|non ?compete|background|drug|credit|consent|authori[sz]\w*|e ?sign\w*|electronic signature|signature|sign|type your (?:full )?name|terms of (?:use|service)|privacy|sms|text messages?|marketing|at will|at-will)\b/.test(lower);
+}
+
+function truthfulnessCertificationValue(field: ApplicationFieldDescriptor): AnswerValue | undefined {
+  if (!isTruthfulnessCertification(inspectedPromptText(field))) return undefined;
+  if (field.type === "checkbox") return true;
+  if (field.type === "radio" || field.type === "select") {
+    const affirmative = field.options?.filter((option) =>
+      /^(?:yes|i agree|agree|i certify|i acknowledge|acknowledged?|i confirm|confirm(?:ed)?|i understand)\b/.test(normalized(option.label)));
+    return affirmative?.length === 1 ? affirmative[0]!.label : undefined;
+  }
+  return undefined;
+}
+
+/** Greenhouse's redirect for a closed posting: the board root with `error=true`. */
+export function isGreenhouseClosedPostingRedirect(url: string, site: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return /(?:^|\.)greenhouse\.io$/.test(parsed.hostname) &&
+      parsed.pathname.replace(/\/+$/, "").toLowerCase() === `/${site.toLowerCase()}` &&
+      parsed.searchParams.get("error") === "true";
+  } catch {
+    return false;
+  }
 }
 
 /** Ashby can expose a privacy-policy continuation as a radio control whose
@@ -479,7 +828,8 @@ export function looksLikeInternationalDialingOptions(
   let dialing = 0;
   for (const option of options) {
     const sample = `${option.label} ${option.value}`.trim();
-    if (/^\+\d{1,4}\b/.test(sample) || (/\b\+\d{1,4}\b/.test(sample) && /[A-Z]{2}\s*-/.test(sample))) {
+    // "+1 US - United States" (Rippling) or "United States +1" (Greenhouse).
+    if (/^\+\d{1,4}\b/.test(sample) || /\s\+\d{1,4}$/.test(option.label.trim()) || (/\b\+\d{1,4}\b/.test(sample) && /[A-Z]{2}\s*-/.test(sample))) {
       dialing += 1;
     }
   }
@@ -520,6 +870,13 @@ function isAmbiguousYesNoControl(
   return label === "yes" || label === "no";
 }
 
+function isResumeMentioningQuestion(field: Pick<LeverBrowserField, "label" | "type"> & { questionDescriptor?: LeverBrowserField["questionDescriptor"] }): boolean {
+  if (field.type === "file") return false;
+  if (field.type === "textarea") return true;
+  const prompt = (field.questionDescriptor?.promptText ?? field.label ?? "").replace(/\s+/g, " ").trim();
+  return prompt.length > 40 || /\?/.test(prompt);
+}
+
 function binaryQuestionClassification(
   field: Pick<LeverBrowserField, "id" | "label" | "section" | "type"> & {
     questionDescriptor?: LeverBrowserField["questionDescriptor"];
@@ -540,6 +897,12 @@ export function classifyLeverApplicationField(
     questionDescriptor?: LeverBrowserField["questionDescriptor"];
   },
 ): ApplicationFieldClassification {
+  // A dropdown or radio group with listed choices is a choice question, never
+  // an essay: Samsara's "Where have you learned about Samsara?", "AI Policy for
+  // Interviewers" and years-of-experience dropdowns got essay drafts and no
+  // buttons in Slack (2026-11-12).
+  const hasChoices = (field.type === "select" || field.type === "radio") && (field.options?.length ?? 0) > 0;
+  const asFreeText = (): ApplicationFieldClassification => (hasChoices ? "unknown" : "free_text");
   // Prefer inspected prompt/accessible text over opaque DOM labels (Rippling
   // often exposes "Search" / "textbox" / random ids as the control label).
   // Most generated Yes/No radios expose only the option label as their DOM
@@ -560,14 +923,19 @@ export function classifyLeverApplicationField(
   // the candidate's full name.
   if (field.id.trim().toLowerCase() === "_systemfield_name") return "contact";
   if (compactId.includes("firstname") || compactId.includes("lastname")) return "contact";
+  // "Legal First Name" is the candidate's name, not a legal statement to attest.
+  if (/^legal (?:first |last |full |given |family )?name\s*\*?$/.test(normalized(field.questionDescriptor?.promptText ?? field.label))) return "contact";
   if (isPhoneCountrySelector(field)) return "location";
-  if (hasPhrase(text, /resume|résumé|cv|curriculum vitae/)) return "resume_upload";
+  // A text box that mentions résumés ("We know resumes only tell part of the
+  // story...") is a question, not the upload; only a file control or a short
+  // "Resume/CV" field is the upload.
+  if (hasPhrase(text, /resume|résumé|cv|curriculum vitae/) && !isResumeMentioningQuestion(field)) return "resume_upload";
   // Rippling's native resume dropzone exposes only its accepted extensions
   // ("Drop or select (.doc / .docx / .pdf)") and no Resume/CV text.
   if (field.type === "file" && hasPhrase(text, /drop\s+or\s+select|\.docx?|\.pdf/)) return "resume_upload";
   if (field.type === "file" && hasPhrase(text, /attachment|file upload|upload (?:a )?file|upload (?:a )?document/)) return "resume_upload";
   const genderOptions = field.options?.map((option) => normalized(option.label)).filter(Boolean) ?? [];
-  if (hasPhrase(text, /demographic|\bgender\b|transgender|sexual orientation|sexuality|race|ethnicity|hispanic|latino|veteran|disability|voluntary self/) ||
+  if (hasPhrase(text, /demographic|\bgender\b|transgender|sexual orientation|sexuality|race|ethnicity|hispanic|latino|veteran|disability|voluntary self|first[- ]generation/) || (field.type !== "textarea" && /\bpronouns?\b/.test(text)) ||
     (genderOptions.includes("male") && genderOptions.includes("female") && genderOptions.some((option) => option === "non-binary" || option === "nonbinary"))) return "demographic";
   if (hasPhrase(text, /how did you hear|how did you learn|where did you hear|how did you discover|(?:job|role|opportunity) source|source of (?:this )?(?:job|role|opportunity)/)) return "unknown";
   if (smsConsent) return "legal_attestation";
@@ -575,29 +943,42 @@ export function classifyLeverApplicationField(
   // name" in a referral prompt must never cause the candidate's own name to
   // be copied into that field.
   if (isReferralField(field)) return "unknown";
-  if (hasPhrase(text, /work authorization|authorized to work|legally authorized|right to work|eligible to work/)) return "work_authorization";
+  if (hasPhrase(text, /work authorization|authorized to work|legally authorized|right to work|eligible to work|\bauthorized\b.{0,50}\bto work\b/)) return "work_authorization";
   if (isExactAcknowledgmentPrompt(text) || isPrivacyAcknowledgmentPrompt(text)) return "legal_attestation";
   // The visa disclaimer contains sponsorship language but is a legal
   // acknowledgment, not the candidate's sponsorship-required answer.
   if (hasPhrase(text, /sponsor|visa|immigration status/)) return "sponsorship";
+  // "Degree or Certification Earned" names a credential, not a statement to certify.
+  if (/\beducation\b/.test(sectionTitleOf(field)) || hasPhrase(text, /\binstitution\b|\bdegree or certification\b|\b(?:degree|certification) earned\b/)) return "education";
   if (hasPhrase(text, /\blegal\b|attest|certif(?:y|ication)|agree to|authorize|terms|accurate and complete|sign your name for acknowledgement/)) return "legal_attestation";
-  if (hasPhrase(text, /\bmost interesting problem\b|\byour take\b|\bwhy does it pull you in\b/)) return "free_text";
-  if (hasPhrase(text, /\b(?:ai|ml|machine\s+learning|aws|terraform|cloudformation|startup|early[ -]stage|production)\b/)) return "free_text";
-  if (hasPhrase(text, /salary|compensation|pay expectation|desired pay|desired annual compensation/)) return "salary";
+  if (hasPhrase(text, /\bmost interesting problem\b|\byour take\b|\bwhy does it pull you in\b/)) return asFreeText();
+  if (hasPhrase(text, /\b(?:ai|ml|machine\s+learning|aws|terraform|cloudformation|startup|early[ -]stage|production)\b/)) return asFreeText();
+  if (hasPhrase(text, /salary|compensation|pay expectation|desired pay|desired annual compensation/)) {
+    // "Do you accept the listed salary range?" with Yes/No is a yes/no question,
+    // not an amount: filling the salary figure into it failed and re-asked it
+    // after every answer (Samsara, 2026-11-12).
+    const labels = (field.options ?? []).map((option) => normalized(option.label));
+    const yesNo = labels.length > 0 && labels.length <= 3 && labels.some((label) => /^yes\b/.test(label)) && labels.some((label) => /^no\b/.test(label));
+    return yesNo ? "unknown" : "salary";
+  }
+  // Overall experience ("total work experience in a similar role") is a résumé
+  // summary for a reviewed draft; years with one named system stays unknown.
+  if (hasPhrase(text, /\b(?:total|overall|relevant|prior) (?:work |professional )?experience\b/)) return asFreeText();
   if (hasPhrase(text, /relocat/)) return "relocation";
   if (hasPhrase(text, /travel/)) return "travel";
   if (hasPhrase(text, /education|degree|university|college|school|major|study/)) return "education";
-  if (hasPhrase(text, /why|interest|motivat|cover letter|tell us|anything else|additional information/)) return "free_text";
+  if (hasPhrase(text, /why|interest|motivat|cover letter|tell us|anything else|additional information/)) return asFreeText();
   if (factField) return factField;
   if (hasPhrase(text, /employ|employer|company|work history|job history|position held|job title|occupation|start date|end date/)) return "employment_history";
   // Contact (incl. email/e-mail) must win over bare "address" in location (e.g. "Email address").
   if (hasPhrase(text, /first name|given name|last name|family name|surname|full name|your name|applicant name|email|e-mail|phone|telephone|mobile|linkedin|portfolio|website/)) return "contact";
-  if (hasPhrase(text, /location|city|state|country|address|postal|zip|phone country|dialing code|country code/)) return "location";
+  // Whole words only: "capacity" contains "city" and "statement" contains "state".
+  if (hasPhrase(text, /\b(?:location|city|state|country|address|postal|zip)\b|phone country|dialing code|country code/)) return "location";
   // Opaque widget labels with a real question prompt are treated by prompt semantics above;
   // remaining long free-response prompts stay free_text rather than unknown.
   const prompt = field.questionDescriptor?.promptText?.trim();
-  if (!isAmbiguousYesNoControl(field) && prompt && prompt.length >= 24 && /[?]/.test(prompt)) return "free_text";
-  if (field.type === "textarea") return "free_text";
+  if (!isAmbiguousYesNoControl(field) && prompt && prompt.length >= 24 && /[?]/.test(prompt)) return asFreeText();
+  if (field.type === "textarea") return asFreeText();
   return "unknown";
 }
 
@@ -616,8 +997,13 @@ function descriptor(field: LeverBrowserField): ApplicationFieldDescriptor {
     label,
     type: field.type,
     required: field.required,
-    ...(field.options && field.options.length > 0 ? { options: field.options.map((option) => ({ ...option })) } : {}),
+    // An empty-value option (Vaia's "Prefer not to say") is the select's
+    // unselected state; it is not a choice the executor can make.
+    ...(field.options?.some((option) => option.label.trim() && option.value.trim())
+      ? { options: field.options.filter((option) => option.label.trim() && option.value.trim()).map((option) => ({ ...option })) }
+      : {}),
     ...(field.section ? { section: field.section } : {}),
+    ...(field.fullPrompt ? { fullPrompt: field.fullPrompt } : {}),
     ...(field.sourceSelector ? { sourceSelector: field.sourceSelector } : {}),
     ...(field.questionDescriptor ? {
       questionDescriptor: { ...field.questionDescriptor },
@@ -741,6 +1127,7 @@ function inspection(
     unresolvedFields?: readonly string[];
     blockers?: readonly CareerBlockerDraft[];
     resumeUsed?: string;
+    reviewSummary?: readonly ExecutionReviewEntry[];
     evidence?: readonly string[];
     durationMs?: number;
     domInspectionCount?: number;
@@ -757,6 +1144,7 @@ function inspection(
     unresolvedFields: values.unresolvedFields ?? [],
     blockers: values.blockers ?? [],
     ...(values.resumeUsed ? { resumeUsed: values.resumeUsed } : {}),
+    ...(values.reviewSummary && values.reviewSummary.length > 0 ? { reviewSummary: values.reviewSummary } : {}),
     evidence: values.evidence ?? [],
     ...(values.durationMs !== undefined ? { durationMs: Math.max(0, Math.round(values.durationMs)) } : {}),
     ...(values.domInspectionCount !== undefined ? { domInspectionCount: Math.max(0, Math.round(values.domInspectionCount)) } : {}),
@@ -841,6 +1229,20 @@ function valueAsString(value: AnswerValue | undefined): string | undefined {
  * candidate's authorized amount exact while normalizing only the presentation
  * syntax accepted by a numeric input.
  */
+/**
+ * "Start two weeks from when I apply": with availabilityNoticeDays set, the
+ * start date is that many days after the day this form is filled (local
+ * date, YYYY-MM-DD), so it never goes stale like a fixed date does.
+ */
+export function withNoticePeriodStartDate(profile: CandidateProfile | undefined, now: string): CandidateProfile | undefined {
+  const days = profile?.workPreferences.availabilityNoticeDays;
+  const at = Date.parse(now);
+  if (!profile || typeof days !== "number" || !Number.isInteger(days) || days < 0 || days > 180 || !Number.isFinite(at)) return profile;
+  const start = new Date(at + days * 86_400_000);
+  const date = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, "0")}-${String(start.getDate()).padStart(2, "0")}`;
+  return { ...profile, workPreferences: { ...profile.workPreferences, availabilityStartDate: date } };
+}
+
 export function normalizeNumericSalaryValue(value: string): string | undefined {
   const compact = value.replace(/\bUSD\b/gi, "").replace(/[\s$,]/g, "").trim();
   return /^\d+(?:\.\d{1,2})?$/.test(compact) ? compact : undefined;
@@ -980,7 +1382,12 @@ function groundedWorkAuthorizationValue(
   const prompt = inspectedPromptText(field);
   const isUnitedStates = (value: string): boolean =>
     /\bunited states(?: of america)?\b|\bu\.s\.?\b|\busa\b|\bus\b/.test(normalized(value));
-  const workCountry = prompt.match(/\bwork in (?:the )?([a-z][a-z .'-]*?)(?:\?|$)/)?.[1]?.trim();
+  const named = prompt.match(/\bwork in (?:the )?([a-z][a-z .'-]*?)(?:\?|$)/)?.[1]?.trim();
+  // "in this location" / "in this country" means the posting's location. The
+  // agent only applies to postings open where the candidate may work, so it
+  // names no other country.
+  // "in the country where you are applying" (Gusto, 2026-11-10) means the same.
+  const workCountry = named && /^(?:(?:this|that|the) (?:location|country|role'?s? location|job'?s? location)|country (?:where|in which)\b.*)(?: (?:where|in which)\b.*)?$/.test(named) ? undefined : named;
   if (workCountry && !profile.workAuthorization.countries.some((country) =>
     isUnitedStates(workCountry) ? isUnitedStates(country) : normalized(country) === normalized(workCountry))) {
     return undefined;
@@ -993,9 +1400,33 @@ function groundedWorkAuthorizationValue(
   const isAffirmative = /^(?:yes|true|authorized|eligible|permitted|lawfully authorized)$/.test(normalizedStatus) ||
     /(?:authorized|eligible|permitted) to work/.test(normalizedStatus);
   if ((field.type === "select" || field.type === "radio" || field.type === "checkbox") && isAffirmative) {
+    // Some forms fold sponsorship into the choice: "Yes, and I will not require
+    // sponsorship..." vs "Yes, but I will require sponsorship...".
+    const sponsorshipChoices = (field.options ?? []).filter((option) => /^yes\b/.test(normalized(option.label)) && /sponsor/.test(normalized(option.label)));
+    if (sponsorshipChoices.length > 0) {
+      const needs = profile.workAuthorization.sponsorshipRequired;
+      if (needs === null || needs === undefined) return undefined;
+      const declines = (label: string) => /\b(?:not|no|never|without)\b[^.]*\bsponsor|\bsponsor\w*\b[^.]*\bnot (?:be )?(?:required|needed)/.test(normalized(label));
+      const match = sponsorshipChoices.filter((option) => declines(option.label) === !needs);
+      return match.length === 1 ? match[0]!.label : undefined;
+    }
     return field.type === "checkbox" ? true : "Yes";
   }
   return status;
+}
+
+/**
+ * A date written the way the prompt asks: "(MM/YYYY)" needs a month, so a
+ * year-only record ("2024") cannot fill it and stays a question.
+ */
+function datePerPrompt(value: string | null | undefined, text: string): string | undefined {
+  const date = nonEmpty(value);
+  if (!date) return undefined;
+  if (/\bmm\s*\/\s*yyyy\b/.test(text)) {
+    const match = /^(\d{4})[-/](\d{1,2})\b/.exec(date);
+    return match ? `${match[2]!.padStart(2, "0")}/${match[1]}` : undefined;
+  }
+  return date;
 }
 
 function groundedDatePart(value: string | null | undefined, part: "month" | "year"): string | undefined {
@@ -1018,8 +1449,11 @@ function answerAliases(classification: ApplicationFieldClassification, text: str
     case "contact":
       if (hasPhrase(text, /email|e-mail/)) return ["email"];
       if (hasPhrase(text, /phone|telephone|mobile/)) return ["phone"];
-      if (hasPhrase(text, /location|city|state|country/)) return ["location"];
-      return ["name"];
+      if (hasPhrase(text, /\b(?:location|city|state|country)\b/)) return ["location"];
+      // Only a field that asks for a name gets the full name: an unmatched
+      // contact field (a reference's email, "Preferred first name") does not.
+      if (hasPhrase(text, /\bpreferred\b|\bnickname\b/)) return [];
+      return hasPhrase(text, /\bfull name\b|^name\b|\byour name\b|\blegal name\b/) ? ["name"] : [];
     case "employment_history": return ["employment_history"];
     case "location": return ["location"];
     default: return [];
@@ -1029,6 +1463,7 @@ function answerAliases(classification: ApplicationFieldClassification, text: str
 function profileFactAnswerAliases(factField: ProfileFactField): readonly string[] {
   switch (factField) {
     case "linkedin": return ["linkedin", "linkedin_url", "linkedinUrl"];
+    case "github": return ["github", "github_url", "githubUrl"];
     case "website": return ["website", "website_url", "websiteUrl", "personal_website"];
     case "desired_work_location": return ["preferred_work_location", "preferredWorkLocation", "desired_work_location"];
     case "start_availability": return ["availability_start_date", "availabilityStartDate", "start_availability", "available_start_date"];
@@ -1039,30 +1474,36 @@ function answerForField(
   field: ApplicationFieldDescriptor,
   answers: readonly ApplicationAnswer[],
 ): ApplicationAnswer | undefined {
+  // A reference's or referrer's details are someone else's, never a prepared answer.
+  if (/\breferences?\b/.test(sectionTitleOf(field)) ||
+    hasPhrase(inspectedPromptText(field), /\breferr(?:ed|al)\b|\breferences?\b|\bsupervisors?\b|\bemergency contact\b/)) return undefined;
   const text = normalized(`${field.id} ${field.label}`);
   const aliases = new Set(answerAliases(field.classification, text));
   const direct = answers.find((answer) => aliases.has(answer.field) &&
     (field.classification !== "free_text" || subjectiveAnswerMatchesPrompt(field, answer)));
   if (direct) return direct;
 
-  // Free-text drafts are question-specific. Once the exact prompt has been
-  // inspected, never let loose token matching reuse a generic draft for a
-  // different behavioral or personalized employer question.
-  if (field.classification === "free_text") return undefined;
-
-  // Consequential categories may only use their exact answer alias (and the
-  // resolved blocker path); loose token matching can cross-match unrelated
-  // prepared answers such as employment summaries.
-  if (["work_authorization", "sponsorship", "salary", "relocation", "travel", "demographic", "legal_attestation"].includes(field.classification)) {
+  // A shared word is not the same question: substring matching once typed the
+  // skills list into "Do you hold an active security clearance? If yes..." and
+  // the candidate's name into "the name of your first pet". Only a custom
+  // prepared answer whose own key names the field ("marketing" for "Marketing
+  // consent") may match, as whole words; the standard profile answers above
+  // reach a field only through their explicit aliases.
+  if (["free_text", "work_authorization", "sponsorship", "salary", "relocation", "travel", "demographic", "legal_attestation"].includes(field.classification)) {
     return undefined;
   }
-
-  const tokens = normalizedTokens(text);
+  const words = ` ${normalizedTokens(text).join(" ")} `;
   return answers.find((answer) => {
-    const answerText = normalized(`${answer.field} ${answer.question ?? ""}`);
-    return tokens.length > 0 && tokens.some((token) => answerText.includes(token));
+    if (STANDARD_PREPARED_ANSWERS.has(answer.field)) return false;
+    const key = normalizedTokens(answer.field.replace(/_/g, " ")).join(" ");
+    return key.length > 2 && words.includes(` ${key} `);
   });
 }
+
+const STANDARD_PREPARED_ANSWERS = new Set([
+  "name", "email", "phone", "location", "employment_history", "verified_skills", "why_company", "cover_letter",
+  "salary_expectations", "relocation", "travel", "sponsorship", "demographic_disclosure", "legal_attestations",
+]);
 
 function subjectiveAnswerMatchesPrompt(
   field: ApplicationFieldDescriptor,
@@ -1089,7 +1530,19 @@ function careerBlockerMatchesField(blocker: CareerBlocker, field: ApplicationFie
   if (blocker.kind !== "unknown_form_field") return true;
   const expectedPrompt = blockerEvidenceValue(blocker, "question-prompt:");
   const actualPrompt = field.questionDescriptor?.promptText;
-  if (!expectedPrompt || !actualPrompt || normalized(expectedPrompt) !== normalized(actualPrompt)) return false;
+  if (!expectedPrompt && !actualPrompt) {
+    // Some controls never expose a prompt container (Greenhouse custom text
+    // questions report question-source:unavailable). Without this branch the
+    // candidate's answer could never match: the agent re-asked the Sparksoft
+    // clearance question after every reply. The same control id, exact label
+    // and type identify the same question.
+    const expectedLabel = blockerEvidenceValue(blocker, "field-label:");
+    const expectedType = blockerEvidenceValue(blocker, "field-type:");
+    if (blocker.field !== field.id || !expectedLabel || normalized(expectedLabel) !== normalized(field.label) ||
+      (expectedType !== undefined && expectedType !== field.type)) return false;
+  } else if (!expectedPrompt || !actualPrompt || normalized(expectedPrompt) !== normalized(actualPrompt)) {
+    return false;
+  }
 
   const expectedSection = blockerEvidenceValue(blocker, "question-section:");
   if (expectedSection) {
@@ -1119,10 +1572,15 @@ function resolvedCareerValue(
   field: ApplicationFieldDescriptor,
   request: ApplicationExecutionRequest,
 ): AnswerValue | undefined {
+  // A file comes from the configured resume artifacts, never from a reply
+  // ("DONE" after attaching a dropped resume by hand is not a file path).
+  if (field.type === "file") return undefined;
+  // Newest answer first: when a question was asked again because the form
+  // rejected the earlier answer, the later reply is the one to use.
   const candidates = request.careerJob.blockers.filter(
-    (blocker) => blocker.status === "resolved" && isAnswerValuePresent(blocker.value) &&
+    (blocker) => blocker.status === "resolved" && isAnswerValuePresent(blocker.value) && blocker.value !== OPTIONAL_ANSWER_SKIPPED &&
       (field.classification !== "unknown" || blocker.kind === "unknown_form_field"),
-  );
+  ).sort((left, right) => (right.resolvedAt ?? "").localeCompare(left.resolvedAt ?? ""));
   const exact = candidates.find((blocker) => blocker.field === field.id);
   if (exact && careerBlockerMatchesField(exact, field)) return exact.value;
   const byQuestion = candidates.find((blocker) => normalized(blocker.question) === normalized(field.label));
@@ -1196,6 +1654,8 @@ function explicitValueForField(
     return { value: "Yes", explicit: true };
   }
   if (request.profile) {
+    const remotePreference = remotePreferenceCheckboxValue(field);
+    if (remotePreference !== undefined) return { value: remotePreference, explicit: true };
     const ageBracket = approvedAgeBracketValueForField(field, request.profile);
     if (ageBracket) return { value: ageBracket, explicit: true };
     if (field.classification === "demographic" && field.type === "checkbox") {
@@ -1204,10 +1664,30 @@ function explicitValueForField(
     }
     const approvedSource = approvedJobSourceValueForField(field, request.profile);
     if (approvedSource) return { value: approvedSource, explicit: true };
+    const highestEducation = highestEducationValueForField(field, request.profile);
+    if (highestEducation) return { value: highestEducation, explicit: true };
+    const basedInUs = basedInUsValueForField(field, request.profile, request.careerJob.job.location);
+    if (basedInUs) return { value: basedInUs, explicit: true };
+    const citizenship = citizenshipStatusValueForField(field, request.profile, request.careerJob.job.location);
+    if (citizenship) return { value: citizenship, explicit: true };
+    const workLocationState = workLocationStateValueForField(field, request.profile);
+    if (workLocationState) return { value: workLocationState, explicit: true };
+    const residesInListedStates = residesInListedStatesValueForField(field, request.profile);
+    if (residesInListedStates) return { value: residesInListedStates, explicit: true };
+    const workRegion = workRegionValueForField(field, request.profile);
+    if (workRegion) return { value: workRegion, explicit: true };
+    const previousEmployer = previousEmployerValueForField(field, request);
+    if (previousEmployer) return { value: previousEmployer, explicit: true };
   }
   if (field.classification === "legal_attestation" && request.profile) {
     const acknowledgment = approvedAcknowledgmentValueForField(field, request.profile);
     if (acknowledgment) return { value: acknowledgment, explicit: true };
+  }
+  // The checkbox label is often just "I Acknowledge", so this reads the whole
+  // prompt rather than waiting for a legal_attestation classification.
+  if (request.profile) {
+    const certification = truthfulnessCertificationValue(field);
+    if (certification !== undefined) return { value: certification, explicit: true };
   }
   if (isBackgroundCheckConsentField(field) && request.profile?.answerPolicies.background_check === "auto") {
     const approved = request.profile.approvedReusableAnswers.background_check?.trim();
@@ -1271,16 +1751,25 @@ function profileValueForField(
   profile: CandidateProfile | undefined,
 ): AnswerValue | undefined {
   if (!profile) return undefined;
+  // A References section asks about other people; the candidate's own name,
+  // email, and phone must never fill it.
+  if (/\breferences?\b/.test(sectionTitleOf(field))) return undefined;
   const text = fieldText(field);
   const factField = profileFactField(field);
   if (isPreferredNameField(field)) return profile.identity.preferredName ?? undefined;
   if (factField === "linkedin") return profile.identity.linkedinUrl ?? undefined;
+  if (factField === "github") return profile.identity.githubUrl ?? undefined;
   if (factField === "website") return profile.identity.websiteUrl ?? undefined;
   if (factField === "desired_work_location") return profile.workPreferences.preferredWorkLocation ?? undefined;
   if (factField === "start_availability") {
     const availability = profile.workPreferences.availabilityStartDate;
     if (hasPhrase(text, /\byear\b/)) return groundedDatePart(availability, "year");
     if (hasPhrase(text, /\bmonth\b/)) return groundedDatePart(availability, "month");
+    // A typed box that names its format: "MM/DD/YYYY" or "MM/YYYY".
+    const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(availability ?? "");
+    const hint = fieldText(field);
+    if (iso && /\bmm\s*\/\s*dd\s*\/\s*yyyy\b/.test(hint)) return `${iso[2]}/${iso[3]}/${iso[1]}`;
+    if (iso && /\bmm\s*\/\s*yyyy\b/.test(hint)) return `${iso[2]}/${iso[1]}`;
     return availability ?? undefined;
   }
   const name = splitFullName(profile.identity.fullName ?? undefined);
@@ -1294,6 +1783,9 @@ function profileValueForField(
     if (namePart === "last") return name.last;
     if (hasPhrase(text, /email|e-mail/)) return profile.identity.email ?? undefined;
     if (hasPhrase(text, /phone|telephone|mobile/)) return profile.identity.phone ?? undefined;
+    // "Full Name (Preferred)" with help text "What preferred first and last
+    // name do you go by?" asks for the whole name, not the last one.
+    if (hasPhrase(fieldText(field), /\bfull name\b/) || hasPhrase(text, /\bfirst and last name\b/)) return name.full;
     if (hasPhrase(text, /last name|family name|surname/)) return name.last;
     if (hasPhrase(text, /first name|given name/)) return name.first;
     return name.full;
@@ -1303,11 +1795,24 @@ function profileValueForField(
     if (isPhoneCountrySelector(field)) {
       return groundedPhoneCountryFromProfile(profile) ?? groundedCountryFromLocation(location);
     }
+    // "Anticipated Work Location (City, Country)" asks for both parts.
+    if (hasPhrase(inspectedPromptText(field), /\bcity\b\s*(?:,|\/|&|and|or)?\s*\bcountry\b/) && !(field.options && field.options.length > 0)) {
+      const city = groundedCityFromLocation(location);
+      const country = groundedCountryFromLocation(location);
+      if (city && country) return `${city}, ${country}`;
+    }
     if (hasPhrase(inspectedPromptText(field), /\bcountry\b|phone country|dialing code|country code/) || hasPhrase(text, /\bcountry\b/)) {
       return groundedCountryFromLocation(location);
     }
     if (hasPhrase(text, /listed states we hire in/)) {
       return groundedStateEligibilityFromLocation(text, location);
+    }
+    // "Current location (city, state)" asks for both parts, not the state alone.
+    if (hasPhrase(text, /\bcity\b\s*(?:,|\/|&|and|or)?\s*\bstate\b/)) {
+      const city = groundedCityFromLocation(location);
+      const state = groundedStateFromLocation(location);
+      const code = state ? US_STATE_ABBREVIATIONS[normalized(state)] ?? (/^[a-z]{2}$/i.test(state) ? state : undefined) : undefined;
+      if (city && code && !(field.options && field.options.length > 0)) return `${city}, ${code.toUpperCase()}`;
     }
     if (hasPhrase(text, /\bstates?\b/)) {
       const state = groundedStateFromLocation(location);
@@ -1316,13 +1821,24 @@ function profileValueForField(
       if (!US_STATE_ABBREVIATIONS[normalizedState] && !/^[a-z]{2}$/i.test(state)) return undefined;
       return field.options && field.options.length > 0
         ? state
-        : US_STATE_ABBREVIATIONS[normalizedState] ?? state;
+        // A typed text box gets "PA"; a select whose options load later keeps the
+        // provider's lowercase option value ("pa").
+        : field.type === "text" ? (US_STATE_ABBREVIATIONS[normalizedState] ?? state).toUpperCase() : US_STATE_ABBREVIATIONS[normalizedState] ?? state;
     }
-    if (hasPhrase(text, /\bcity\b/)) return groundedCityFromLocation(location);
-    if (hasPhrase(text, /\bpostal\b|\bzip\b/)) {
+    // Hosts that label controls through aria-labelledby (Vaia: id "f-plz",
+    // placeholder "10001", accessible name "ZIP code") expose the component
+    // only in the inspected prompt, so match against both.
+    // Section titles ("ADDRESS") are deliberately excluded: they describe the
+    // group, not this control.
+    const ownPrompt = (field as { questionDescriptor?: { accessibleName?: string; promptText?: string } }).questionDescriptor;
+    const componentText = normalized([text, ownPrompt?.accessibleName, ownPrompt?.promptText].filter(Boolean).join(" "));
+    if (hasPhrase(componentText, /\bcity\b/)) return groundedCityFromLocation(location);
+    if (hasPhrase(componentText, /\bpostal\b|\bzip\b/)) {
       return profile.identity.postalCode ?? groundedPostalFromLocation(location);
     }
-    if (hasPhrase(text, /\baddress\b|\bstreet\b/)) return profile.identity.streetAddress ?? undefined;
+    if (hasPhrase(componentText, /\baddress\b|\bstreet\b/)) return profile.identity.streetAddress ?? undefined;
+    // A full location string is never a city, ZIP, or street component.
+    if (hasPhrase(componentText, /\bcity\b|\bpostal\b|\bzip\b|\baddress\b|\bstreet\b/)) return undefined;
     return location ?? undefined;
   }
   if (factField === "desired_work_location") return profile.workPreferences.preferredWorkLocation ?? undefined;
@@ -1334,6 +1850,8 @@ function profileValueForField(
     }
     const employment = employmentForField(field, profile);
     if (!employment) return undefined;
+    // "Employer Phone Number" is a contact detail the profile does not hold, never the employer's name.
+    if (hasPhrase(text, /\b(?:phone|telephone|fax|email|e-mail|supervisor|manager|reason for leaving|salary|pay|wage)\b/)) return undefined;
     if (hasPhrase(text, /\bmonth\b/)) {
       return groundedDatePart(hasPhrase(text, /end|to date/) ? employment.endDate : employment.startDate, "month");
     }
@@ -1342,18 +1860,24 @@ function profileValueForField(
     }
     if (hasPhrase(text, /employer|company/)) return employment.employer;
     if (hasPhrase(text, /job title|position|role|occupation/)) return employment.title;
-    if (hasPhrase(text, /start date|started|from/)) return employment.startDate;
-    if (hasPhrase(text, /end date|ended|to date/)) return employment.endDate ?? undefined;
+    if (hasPhrase(text, /start date|started|from/)) return datePerPrompt(employment.startDate, text);
+    if (hasPhrase(text, /end date|ended|to date/)) return datePerPrompt(employment.endDate, text);
     return undefined;
   }
   if (field.classification === "education") {
     const education = firstEducation(profile);
     if (!education) return undefined;
+    // The profile holds no school address or start date; those stay questions.
+    if (hasPhrase(text, /\b(?:location|city|state|country|address)\b/)) return undefined;
+    if (hasPhrase(text, /\b(?:start|began|begin|from)\b/) && hasPhrase(text, /\b(?:date|year|month|mm)\b/)) return undefined;
+    if (hasPhrase(text, /\bend date\b|\battend[ae]nce end\b/)) return datePerPrompt(education.completionDate, text);
     if (hasPhrase(text, /\bmonth\b/)) return groundedDatePart(education.completionDate, "month");
     if (hasPhrase(text, /\byear\b/)) return groundedDatePart(education.completionDate, "year");
     if (hasPhrase(text, /university|college|school|institution/)) return education.institution;
     if (hasPhrase(text, /degree/)) return education.degree;
-    if (hasPhrase(text, /major|field|study/)) return education.field ?? undefined;
+    // Bare "field" also matches generated ids such as `cards[…][field6]`.
+    if (hasPhrase(text, /\badditional\b|\bother training\b|\bcertifications\b/)) return undefined;
+    if (hasPhrase(text, /\bmajor\b|\bfield of study\b|\bstudy\b|\bconcentration\b/)) return education.field ?? undefined;
     if (hasPhrase(text, /completion|graduat/)) return education.completionDate ?? undefined;
     return undefined;
   }
@@ -1389,7 +1913,7 @@ function optionValue(
   const demographicAliases = field.classification === "demographic"
     ? (() => {
         const candidate = normalized(valueAsString(value));
-        if (/not\s+a\s+protected\s+veteran|do\s+not\s+have\s+(?:a\s+)?disability|no\b/.test(candidate)) return ["no", "false"];
+        if (/not\s+a\s+protected\s+veteran|(?:do\s+not|don['’]?t)\s+have\s+(?:a\s+)?disability|no\b/.test(candidate)) return ["no", "false"];
         if (/protected\s+veteran|have\s+(?:a\s+)?disability|yes\b/.test(candidate)) return ["yes", "true"];
         return [];
       })()
@@ -1413,6 +1937,8 @@ function optionValue(
   const smsAliases = isSmsConsentField(field) && desired === "no"
     ? ["no", "false"]
     : [];
+  const countryList = field.classification === "location" || looksLikeInternationalDialingOptions(field.options) ||
+    /\bcountry\b/.test(fieldText(field));
   const matches = field.options.filter((candidate) => {
     const labels = [normalized(candidate.value), normalized(candidate.label)];
     const rawLabels = [candidate.value, candidate.label];
@@ -1421,14 +1947,20 @@ function optionValue(
       demographicTextAliases.some((alias) => labels.some((label) => label === alias || label.startsWith(`${alias} `) || label.includes(`/${alias}`))) ||
       demographicGenderAliases.some((alias) => labels.includes(alias)) ||
       smsAliases.some((alias) => labels.includes(alias)) ||
-      (demographicAliases.includes("no") && labels.some((label) => /not\s+(?:a\s+)?protected\s+veteran|do\s+not\s+have\s+(?:a\s+)?disability/.test(label))) ||
+      // Ashby: "No - I do not consent to receiving text messages".
+      (smsAliases.length > 0 && labels.some((label) => /^no\b/.test(label) && /\bdo not consent\b/.test(label))) ||
+      // "No, I am not a veteran" (Gusto) as well as "...not a protected veteran".
+      // ...and "No, I don’t have a disability" (Samsara, curly apostrophe).
+      (demographicAliases.includes("no") && labels.some((label) => /not\s+(?:a\s+)?(?:protected\s+)?veteran|(?:do\s+not|don['’]?t)\s+have\s+(?:a\s+)?disability/.test(label))) ||
       // Greenhouse's phone-country control appends the dialing code to the
       // grounded country name (for example, "United States +1"). Preserve
       // exact option selection while accepting that display form.
       labels.some((label) => desiredAliases.some((alias) =>
         label.startsWith(`${alias}+`) || label.startsWith(`${alias} +`))) ||
-      // Rippling dialing lists look like "+1 US - United States".
-      rawLabels.some((label) => desiredAliases.some((alias) => optionMatchesCountryLabel(label, alias))) ||
+      // Rippling dialing lists look like "+1 US - United States". Only for
+      // country/phone lists: on Samsara's gender question "Man" also matched
+      // "Cis-man" (it ends in "-man") and the run crashed (2026-11-12).
+      (countryList && rawLabels.some((label) => desiredAliases.some((alias) => optionMatchesCountryLabel(label, alias)))) ||
       booleanAliases.some((alias) => labels.includes(alias));
   });
   // Ashby native radios frequently give every option the same value (`on`).
@@ -1470,6 +2002,30 @@ function booleanAnswer(value: AnswerValue | undefined): boolean | undefined {
   if (text === "yes" || text === "true") return true;
   if (text === "no" || text === "false") return false;
   return undefined;
+}
+
+/**
+ * An optional field that is a real essay question ("Please highlight which
+ * requirement you have the least experience in…") is worth answering, so it
+ * is asked in Slack as optional. Generic boxes ("Anything else?") are not.
+ */
+function isOptionalEssayQuestion(field: ApplicationFieldDescriptor): boolean {
+  if (field.required || field.classification !== "free_text" || (field.type !== "textarea" && field.type !== "text")) return false;
+  const prompt = (field.questionDescriptor?.promptText ?? field.label ?? "").replace(/\s+/g, " ").trim();
+  if (prompt.length < 15) return false;
+  if (/\b(?:anything else|additional (?:information|comments)|other comments|cover letter|website|portfolio|linkedin|github|twitter|referr)/i.test(prompt)) return false;
+  // Follow-ups to another answer ("If other, please specify") and short facts are not essays.
+  if (/^if (?:other|so|yes|no|applicable|selected)\b|please specify|pronoun|pronunciation|preferred name|nickname|hear about|heard about/i.test(prompt)) return false;
+  // Short essay prompts ("What made you decide to apply?", "Why Mercury?") name what they want.
+  if (/\b(?:why|what (?:made|makes|excites|draws|drew|interests|motivates)|tell us|describe|explain|walk us through|hard(?:est)? problem|proud|excited|mission|interest(?:s|ed)? you)\b/i.test(prompt)) return true;
+  if (prompt.length < 60) return false;
+  return /\?|\b(?:please|tell us|describe|share|highlight|explain|walk us through)\b/i.test(prompt);
+}
+
+/** True when the user replied SKIP to this optional question for this application. */
+function optionalQuestionSkipped(field: ApplicationFieldDescriptor, request: ApplicationExecutionRequest): boolean {
+  return request.careerJob.blockers.some((blocker) => blocker.status === "resolved" && blocker.value === OPTIONAL_ANSWER_SKIPPED &&
+    (blocker.field === field.id || normalized(blocker.question) === normalized(field.questionDescriptor?.promptText ?? field.label)));
 }
 
 function missingFieldDecision(
@@ -1521,6 +2077,9 @@ function decisionForField(
   }
 
   if (supplied.value === undefined) {
+    if (isOptionalEssayQuestion(field) && !optionalQuestionSkipped(field, request)) {
+      return { explicit: false, blocker: formBlocker(field, "Optional question worth answering; reply SKIP to leave it blank.", "subjective_answer", "ATS_FORM", executor) };
+    }
     if (isReferralField(field)) {
       return missingFieldDecision(
         field,
@@ -1576,6 +2135,9 @@ function decisionForField(
   const stringValue = valueAsString(supplied.value);
   if (!stringValue) {
     return missingFieldDecision(field, "The verified value was empty; no replacement was invented.", undefined, executor);
+  }
+  if (field.classification === "contact" && (field.type === "tel" || hasPhrase(fieldText(field), /phone|telephone|mobile/))) {
+    return { value: phoneAsPromptAsks(request.profile, inspectedPromptText(field), stringValue), explicit: supplied.explicit };
   }
   return { value: stringValue, explicit: supplied.explicit };
 }
@@ -1657,6 +2219,16 @@ function groundedLocationValueMatches(
   return matchingOptions.length === 1;
 }
 
+const US_STATE_CODES: Readonly<Record<string, string>> = {
+  alabama: "al", alaska: "ak", arizona: "az", arkansas: "ar", california: "ca", colorado: "co", connecticut: "ct", delaware: "de",
+  florida: "fl", georgia: "ga", hawaii: "hi", idaho: "id", illinois: "il", indiana: "in", iowa: "ia", kansas: "ks", kentucky: "ky",
+  louisiana: "la", maine: "me", maryland: "md", massachusetts: "ma", michigan: "mi", minnesota: "mn", mississippi: "ms", missouri: "mo",
+  montana: "mt", nebraska: "ne", nevada: "nv", "new hampshire": "nh", "new jersey": "nj", "new mexico": "nm", "new york": "ny",
+  "north carolina": "nc", "north dakota": "nd", ohio: "oh", oklahoma: "ok", oregon: "or", pennsylvania: "pa", "rhode island": "ri",
+  "south carolina": "sc", "south dakota": "sd", tennessee: "tn", texas: "tx", utah: "ut", vermont: "vt", virginia: "va",
+  washington: "wa", "west virginia": "wv", wisconsin: "wi", wyoming: "wy", "district of columbia": "dc",
+};
+
 function groundedLocationStringsMatch(current: string, groundedLocation: string): boolean {
   const normalize = (value: string) => value.replace(/\s+/g, " ").trim().toLowerCase();
   const aliases: Readonly<Record<string, readonly string[]>> = {
@@ -1674,7 +2246,10 @@ function groundedLocationStringsMatch(current: string, groundedLocation: string)
   return grounded.slice(1).every((part, index) => {
     const candidate = currentParts[index + 1];
     if (!candidate) return false;
-    return normalize(part) === candidate || (aliases[normalize(part)] ?? [normalize(part)]).includes(candidate);
+    const wanted = normalize(part);
+    // "Pennsylvania" and "PA" name the same state (Lever shows "McDonald, PA, USA").
+    return wanted === candidate || (aliases[wanted] ?? [wanted]).includes(candidate) ||
+      US_STATE_CODES[wanted] === candidate || US_STATE_CODES[candidate] === wanted;
   });
 }
 
@@ -1722,6 +2297,7 @@ function providerLabel(provider: TrustedTarget["provider"]): string {
   if (provider === "matlensilver") return "Matlen Silver";
   if (provider === "protagona") return "Protagona";
   if (provider === "gusto") return "Gusto";
+  if (provider === "vaia") return "Vaia";
   return "Lever";
 }
 
@@ -1735,6 +2311,7 @@ function executorEvidenceLabel(provider: TrustedTarget["provider"]): string {
   if (provider === "matlensilver") return "matlen-browser";
   if (provider === "protagona") return "protagona-browser";
   if (provider === "gusto") return "gusto-browser";
+  if (provider === "vaia") return "vaia-browser";
   return "lever-browser";
 }
 
@@ -1745,7 +2322,8 @@ function sameApplicationPage(value: string, target: TrustedTarget): boolean {
       return url.protocol === "https:" && url.toString() === new URL(target.applicationUrl).toString();
     }
     if (target.provider === "greenhouse") {
-      return url.protocol === "https:" && isVerifiedGreenhouseApplicationUrl(url.toString(), target.site, target.postingId ?? "");
+      return url.protocol === "https:" && (isVerifiedGreenhouseApplicationUrl(url.toString(), target.site, target.postingId ?? "") ||
+        isVerifiedGreenhouseEmbedUrl(url.toString(), target.site, target.postingId ?? ""));
     }
     if (target.provider === "rippling") {
       return url.protocol === "https:" && isVerifiedRipplingApplicationUrl(url.toString()) &&
@@ -1780,6 +2358,10 @@ function sameApplicationPage(value: string, target: TrustedTarget): boolean {
       return url.protocol === "https:" && isVerifiedGustoApplicationUrl(url.toString()) &&
         gustoPostingId(url.toString()) === target.postingId;
     }
+    if (target.provider === "vaia") {
+      return url.protocol === "https:" && isVerifiedVaiaApplicationUrl(url.toString()) &&
+        vaiaPostingId(url.toString()) === target.postingId;
+    }
     return url.protocol === "https:" && isVerifiedLeverApplicationUrl(url.toString(), target.site, target.postingId ?? "");
   } catch {
     return false;
@@ -1789,7 +2371,7 @@ function sameApplicationPage(value: string, target: TrustedTarget): boolean {
 /** Automatic proof requires a provider-owned confirmation route, not generic text. */
 export function isTrustedAutomaticConfirmation(
   result: BrowserSubmissionResult,
-  target: Pick<TrustedTarget, "provider" | "applicationUrl" | "postingId">,
+  target: Pick<TrustedTarget, "provider" | "applicationUrl" | "postingId"> & { site?: string },
 ): boolean {
   if (!result.confirmed || !result.externalApplicationId || !result.confirmationOrigin || !result.confirmationUrl || !target.postingId) return false;
   let expected: URL;
@@ -1800,6 +2382,25 @@ export function isTrustedAutomaticConfirmation(
   } catch {
     return false;
   }
+  // Vaia renders its Done step in place on the same apply-form URL, so the
+  // session proves it from the verified route plus the rendered Done state.
+  if (target.provider === "vaia") {
+    return observed.origin === expected.origin && result.confirmationOrigin === observed.origin &&
+      vaiaPostingId(observed.toString()) === target.postingId &&
+      result.evidence.includes("submit:clicked; confirmation:vaia-done");
+  }
+  // Ashby renders its success panel in place: the URL stays on this posting's
+  // /<org>/<posting>/application route, so the session proves it from that
+  // route plus Ashby's own success state (panel, or submission wording with
+  // the form's Submit control gone). Outmarket, 2026-11-06, asked for DONE
+  // although the page said the application was submitted.
+  if (target.provider === "ashby" && /confirmation:ashby-(?:success|form-replaced)\b/.test(result.evidence)) {
+    const segments = observed.pathname.split("/").filter(Boolean).map((segment) => segment.toLowerCase());
+    return observed.origin === expected.origin && result.confirmationOrigin === observed.origin &&
+      observed.hostname.toLowerCase() === "jobs.ashbyhq.com" &&
+      segments.includes(target.postingId.toLowerCase()) && segments.at(-1) === "application" &&
+      result.evidence.startsWith("submit:clicked;");
+  }
   if (observed.origin !== expected.origin || result.confirmationOrigin !== observed.origin || !/confirmation|success|thank[-_]?you/i.test(observed.pathname)) return false;
   const decodedSegments = observed.pathname.split("/").filter(Boolean).map((segment) => {
     try { return decodeURIComponent(segment); } catch { return ""; }
@@ -1807,6 +2408,12 @@ export function isTrustedAutomaticConfirmation(
   const correlationKeys = new Set(["job", "jobId", "posting", "postingId", "gh_jid", "lever_job_id"]);
   const correlatedQuery = [...observed.searchParams.entries()].some(([key, value]) =>
     correlationKeys.has(key) && value === target.postingId,
+  ) || (
+    // Greenhouse's embed form keeps the posting in `token` (and the board in
+    // `for`): /embed/job_app/confirmation?for=upstart&token=8030908.
+    target.provider === "greenhouse" &&
+    observed.searchParams.get("token") === target.postingId &&
+    (!target.site || (observed.searchParams.get("for") ?? "").toLowerCase() === target.site.toLowerCase())
   );
   if (!decodedSegments.includes(target.postingId) && !correlatedQuery) return false;
   if (!result.evidence.includes("submit:clicked; confirmation:url")) return false;
@@ -1849,6 +2456,7 @@ function trustedTarget(
       isVerifiedMatlenApplicationUrl(posting.applicationUrl) ? "matlensilver" :
       isVerifiedProtagonaApplicationUrl(posting.applicationUrl) ? "protagona" :
       isVerifiedGustoApplicationUrl(posting.applicationUrl) ? "gusto" :
+      isVerifiedVaiaApplicationUrl(posting.applicationUrl) ? "vaia" :
       job.destinationResolution?.status === "resolved" && job.destinationResolution.actionable === true ? "generic" : undefined
     : configuredProvider;
 
@@ -2134,6 +2742,32 @@ function trustedTarget(
     };
   }
 
+  if (provider === "vaia") {
+    const postingId = vaiaPostingId(posting.applicationUrl);
+    if (!postingId || posting.sourceUrl !== posting.applicationUrl) {
+      return { reason: "The Vaia source and application URL must be the same verified apply-form route." };
+    }
+    const resolution = job.destinationResolution;
+    const destinationMatches = resolution?.status === "resolved" &&
+      resolution.actionable === true &&
+      resolution.ats === "Custom" &&
+      resolution.destinationUrl === posting.applicationUrl;
+    const directCuratedSource = sourceId === "curated-live" && job.sourceRecordId === `vaia:${postingId}`;
+    if (!destinationMatches && !directCuratedSource) {
+      return { reason: "The Vaia destination is not independently verified for this posting." };
+    }
+    return {
+      target: {
+        provider,
+        site: "partner.studysmarter.de",
+        postingId,
+        // Vaia redirects /apply-form (no slash) to a blank form without the
+        // job_id, so always open the slash form with only the identity params.
+        applicationUrl: canonicalVaiaApplicationUrl(posting.applicationUrl) ?? posting.applicationUrl,
+      },
+    };
+  }
+
   return { reason: "No supported browser executor is configured for this application destination." };
 }
 
@@ -2158,6 +2792,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
               options.provider === "matlensilver" ? "matlen-browser-executor" :
               options.provider === "protagona" ? "protagona-browser-executor" :
                   options.provider === "gusto" ? "gusto-browser-executor" :
+                  options.provider === "vaia" ? "vaia-browser-executor" :
                     options.provider === "generic" ? "page-first-browser-executor" : "lever-browser-executor";
   }
 
@@ -2192,6 +2827,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       screenshot: () => session.handoffScreenshot!(),
       controls: () => session.handoffControls!(),
       activate: (controlId: string, point?: { x: number; y: number }) => session.activateHandoffControl!(controlId, point),
+      ...(session.handoffInput ? { input: (input: BrowserHandoffInput) => session.handoffInput!(input) } : {}),
     };
   }
 
@@ -2259,7 +2895,9 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
 
   async execute(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult> {
     const startedAt = this.now();
-    const observed = await this.inspectForm(request, startedAt, "executor");
+    const profile = withNoticePeriodStartDate(request.profile, startedAt);
+    if (profile) request = { ...request, profile };
+    let observed = await this.inspectForm(request, startedAt, "executor");
     if (observed.inspection.status === "failed") {
       return failedResult(
         observed.inspection.evidence.find((item) => item.startsWith("error:"))?.slice("error:".length) ?? `${providerLabel(observed.target.provider)} form inspection failed.`,
@@ -2309,150 +2947,219 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
     const orderedFields = [...observed.fields].sort((left, right) =>
       Number(descriptor(left).classification === "resume_upload") -
       Number(descriptor(right).classification === "resume_upload"));
-    for (const field of orderedFields) {
-      const fieldDescriptor = descriptor(field);
-      let current: string | boolean | null | undefined;
-      try {
-        current = field.readValue ? await field.readValue() : undefined;
-      } catch {
-        current = undefined;
-      }
-      const effectiveCurrent = isUnansweredCustomSelectValue(fieldDescriptor, current) ? null : current;
-      if (fieldDescriptor.classification === "resume_upload" && /uploaded\s+successfully/i.test(fieldDescriptor.label)) {
-        fieldsFilled.add(fieldDescriptor.id);
-        resumeAlreadyUploaded = true;
-        resumeUsed = request.application.resume?.familyId;
-        evidence.push(`resume-existing:${fieldDescriptor.id}`);
-        continue;
-      }
-      if (meaningfulCurrentValue(effectiveCurrent) && verifiedCommittedCurrentValue(
-        fieldDescriptor,
-        effectiveCurrent,
-        request.profile?.identity.location ?? request.profile?.location ?? undefined,
-      )) {
-        fieldsFilled.add(fieldDescriptor.id);
-        if (fieldDescriptor.classification === "resume_upload") {
-          resumeUsed = request.application.resume?.familyId;
-        }
-        continue;
-      }
-      const groundedLocation = request.profile?.identity.location ?? request.profile?.location ?? undefined;
-      // Ashby's location autocomplete can hide its options after a committed
-      // value is re-inspected. When the existing value is still positively
-      // tied to the grounded profile location, reselect that same value
-      // through the normal typeahead/commit path so the browser can re-open
-      // and verify the live option. Never use this recovery for another ATS,
-      // an arbitrary value, or a control with an available option snapshot.
-      if (observed.target.provider === "ashby" &&
-        fieldDescriptor.classification === "location" &&
-        fieldDescriptor.type === "select" &&
-        (!fieldDescriptor.options || fieldDescriptor.options.length === 0) &&
-        groundedLocation &&
-        typeof effectiveCurrent === "string" &&
-        groundedLocationStringsMatch(effectiveCurrent, groundedLocation)) {
+    // Answering one question can reveal another: Greenhouse renders "Please
+    // identify your race" only after Hispanic/Latino is answered. After each
+    // pass, re-read the form and fill any newly revealed controls (bounded).
+    const formFields = [...observed.fields];
+    observed = { ...observed, fields: formFields };
+    let pending: readonly LeverBrowserField[] = orderedFields;
+    for (let pass = 0; pass < 3 && pending.length > 0; pass += 1) {
+      for (const field of pending) {
+        const fieldDescriptor = descriptor(field);
+        let current: string | boolean | null | undefined;
         try {
-          await field.select(groundedLocation, { groundedLocation });
-          const recommitted = field.readValue ? await field.readValue() : undefined;
-          if (typeof recommitted === "string" && groundedLocationStringsMatch(recommitted, groundedLocation)) {
+          current = field.readValue ? await field.readValue() : undefined;
+        } catch {
+          current = undefined;
+        }
+        const effectiveCurrent = isUnansweredCustomSelectValue(fieldDescriptor, current) ? null : current;
+        if (fieldDescriptor.classification === "resume_upload" && /uploaded\s+successfully/i.test(fieldDescriptor.label)) {
+          fieldsFilled.add(fieldDescriptor.id);
+          resumeAlreadyUploaded = true;
+          resumeUsed = request.application.resume?.familyId;
+          evidence.push(`resume-existing:${fieldDescriptor.id}`);
+          continue;
+        }
+        if (meaningfulCurrentValue(effectiveCurrent) && verifiedCommittedCurrentValue(
+          fieldDescriptor,
+          effectiveCurrent,
+          request.profile?.identity.location ?? request.profile?.location ?? undefined,
+        )) {
+          fieldsFilled.add(fieldDescriptor.id);
+          if (fieldDescriptor.classification === "resume_upload") {
+            resumeUsed = request.application.resume?.familyId;
+          }
+          continue;
+        }
+        const groundedLocation = request.profile?.identity.location ?? request.profile?.location ?? undefined;
+        // Ashby's location autocomplete can hide its options after a committed
+        // value is re-inspected. When the existing value is still positively
+        // tied to the grounded profile location, reselect that same value
+        // through the normal typeahead/commit path so the browser can re-open
+        // and verify the live option. Never use this recovery for another ATS,
+        // an arbitrary value, or a control with an available option snapshot.
+        if (observed.target.provider === "ashby" &&
+          fieldDescriptor.classification === "location" &&
+          fieldDescriptor.type === "select" &&
+          (!fieldDescriptor.options || fieldDescriptor.options.length === 0) &&
+          groundedLocation &&
+          typeof effectiveCurrent === "string" &&
+          groundedLocationStringsMatch(effectiveCurrent, groundedLocation)) {
+          try {
+            await field.select(groundedLocation, { groundedLocation });
+            const recommitted = field.readValue ? await field.readValue() : undefined;
+            if (typeof recommitted === "string" && groundedLocationStringsMatch(recommitted, groundedLocation)) {
+              fieldsFilled.add(fieldDescriptor.id);
+              evidence.push(`reselected-grounded-location:${fieldDescriptor.id}`);
+              continue;
+            }
+          } catch {
+            // Preserve the normal fail-closed blocker below when the live
+            // typeahead cannot expose and commit a unique option.
+          }
+        }
+        // A multi-select drops its picked options from the menu, so a resumed
+        // run sees "Man" as the value but not among the options. Accept it
+        // only when the normal decision, given that value as a candidate,
+        // chooses exactly it.
+        if (fieldDescriptor.type === "select" && typeof effectiveCurrent === "string" && effectiveCurrent.trim() &&
+          !fieldDescriptor.options?.some((option) => normalized(option.label) === normalized(effectiveCurrent))) {
+          const withCurrent = { ...fieldDescriptor, options: [...(fieldDescriptor.options ?? []), { label: effectiveCurrent, value: effectiveCurrent }] };
+          const decision = decisionForField(withCurrent, request, resumePath, executorEvidenceLabel(observed.target.provider));
+          if (typeof decision.value === "string" && normalized(decision.value) === normalized(effectiveCurrent)) {
             fieldsFilled.add(fieldDescriptor.id);
-            evidence.push(`reselected-grounded-location:${fieldDescriptor.id}`);
+            evidence.push(`existing-value-verified:${fieldDescriptor.id}`);
             continue;
           }
-        } catch {
-          // Preserve the normal fail-closed blocker below when the live
-          // typeahead cannot expose and commit a unique option.
         }
-      }
-      if (meaningfulCurrentValue(effectiveCurrent) && (fieldDescriptor.type === "select" || fieldDescriptor.type === "radio" || fieldDescriptor.type === "checkbox")) {
-        const blocker = formBlocker(fieldDescriptor, "The existing control value did not exactly match one verified option; it was left untouched.", "unknown_form_field", "ATS_FORM", executorEvidenceLabel(observed.target.provider));
-        blockers.push(blocker);
-        unresolvedFields.add(fieldDescriptor.label);
-        continue;
-      }
+        if (meaningfulCurrentValue(effectiveCurrent) && (fieldDescriptor.type === "select" || fieldDescriptor.type === "radio" || fieldDescriptor.type === "checkbox")) {
+          const blocker = formBlocker(fieldDescriptor, "The existing control value did not exactly match one verified option; it was left untouched.", "unknown_form_field", "ATS_FORM", executorEvidenceLabel(observed.target.provider));
+          blockers.push(blocker);
+          unresolvedFields.add(fieldDescriptor.label);
+          continue;
+        }
 
-      if (this.options.allowedFieldClassifications && !this.options.allowedFieldClassifications.includes(fieldDescriptor.classification)) {
-        if (fieldDescriptor.required || isReferralField(fieldDescriptor)) blockers.push(formBlocker(fieldDescriptor,
-          "This field requires human input under the current preparation restrictions.",
-          blockerKind(fieldDescriptor.classification), "ATS_FORM", executorEvidenceLabel(observed.target.provider)));
-        unresolvedFields.add(fieldDescriptor.label);
-        continue;
-      }
+        if (this.options.allowedFieldClassifications && !this.options.allowedFieldClassifications.includes(fieldDescriptor.classification)) {
+          if (fieldDescriptor.required || isReferralField(fieldDescriptor)) blockers.push(formBlocker(fieldDescriptor,
+            "This field requires human input under the current preparation restrictions.",
+            blockerKind(fieldDescriptor.classification), "ATS_FORM", executorEvidenceLabel(observed.target.provider)));
+          unresolvedFields.add(fieldDescriptor.label);
+          continue;
+        }
 
-      const decision = decisionForField(fieldDescriptor, request, resumePath, executorEvidenceLabel(observed.target.provider));
-      if (decision.blocker) {
-        blockers.push(decision.blocker);
-        unresolvedFields.add(fieldDescriptor.label);
-        continue;
-      }
-      if (decision.leaveUntouched || decision.value === undefined) {
-        unresolvedFields.add(fieldDescriptor.label);
-        continue;
-      }
+        const decision = decisionForField(fieldDescriptor, request, resumePath, executorEvidenceLabel(observed.target.provider));
+        // A box of a "select all that apply" group that would be asked on its
+        // own: answer the group once, checking only the chosen box.
+        const group = decision.blocker ? checkboxGroupKey(fieldDescriptor) : undefined;
+        const groupBoxes = group ? observed.fields.filter((candidate) => checkboxGroupKey(candidate) === group).map(descriptor) : [];
+        if (group && groupBoxes.length >= 2) {
+          const choice = checkboxGroupChoice(group, groupBoxes, request);
+          if (choice) {
+            if (normalized(choice) === normalized(fieldDescriptor.label)) {
+              try {
+                await field.setChecked(true);
+                fieldsFilled.add(fieldDescriptor.id);
+                evidence.push(`checkbox-group-choice:${group}`);
+              } catch {
+                blockers.push(formBlocker(checkboxGroupDescriptor(group, groupBoxes), "The chosen checkbox could not be checked.", "unknown_form_field", "ATS_FORM", executorEvidenceLabel(observed.target.provider)));
+              }
+            }
+            continue;
+          }
+          if (groupBoxes[0]!.id === fieldDescriptor.id && groupBoxes.some((box) => box.required)) {
+            blockers.push(formBlocker(checkboxGroupDescriptor(group, groupBoxes), "Choose one option for this checkbox group.", "unknown_form_field", "ATS_FORM", executorEvidenceLabel(observed.target.provider)));
+          }
+          unresolvedFields.add(fieldDescriptor.label);
+          continue;
+        }
+        if (decision.blocker) {
+          blockers.push(decision.blocker);
+          unresolvedFields.add(fieldDescriptor.label);
+          continue;
+        }
+        if (decision.leaveUntouched || decision.value === undefined) {
+          unresolvedFields.add(fieldDescriptor.label);
+          continue;
+        }
 
-      if (fieldDescriptor.classification === "resume_upload" && resumeAlreadyUploaded) {
-        // Never upload the selected resume into a second unlabeled attachment
-        // control once the primary Rippling resume is already present.
-        evidence.push(`resume-upload-skipped:${fieldDescriptor.id}`);
-        unresolvedFields.add(fieldDescriptor.label);
-        continue;
-      }
+        if (fieldDescriptor.classification === "resume_upload" && resumeAlreadyUploaded) {
+          // Never upload the selected resume into a second unlabeled attachment
+          // control once the primary Rippling resume is already present.
+          evidence.push(`resume-upload-skipped:${fieldDescriptor.id}`);
+          unresolvedFields.add(fieldDescriptor.label);
+          continue;
+        }
 
-      try {
-        if (fieldDescriptor.type === "file") {
-          const path = valueAsString(decision.value);
-          if (!path || (this.options.resumeFileExists && !(await this.options.resumeFileExists(path)))) {
-            const blocker = formBlocker(fieldDescriptor, "The configured resume artifact is not available at execution time.", "required_file_missing", "ATS_FORM", executorEvidenceLabel(observed.target.provider));
-            if (fieldDescriptor.required) blockers.push(blocker);
+        try {
+          if (fieldDescriptor.type === "file") {
+            const path = valueAsString(decision.value);
+            if (!path || (this.options.resumeFileExists && !(await this.options.resumeFileExists(path)))) {
+              const blocker = formBlocker(fieldDescriptor, "The configured resume artifact is not available at execution time.", "required_file_missing", "ATS_FORM", executorEvidenceLabel(observed.target.provider));
+              if (fieldDescriptor.required) blockers.push(blocker);
+              unresolvedFields.add(fieldDescriptor.label);
+              continue;
+            }
+            await field.uploadFile(path);
+            resumeUsed = request.application.resume?.familyId;
+            evidence.push(`resume-uploaded:${fieldDescriptor.id}`);
+          } else if (fieldDescriptor.type === "checkbox") {
+            const checked = checkboxValue(decision.value);
+            if (checked === undefined) throw new Error("Checkbox value was not boolean.");
+            await field.setChecked(checked);
+          } else if (fieldDescriptor.type === "select" || fieldDescriptor.type === "radio") {
+            const selected = optionValue(fieldDescriptor, decision.value);
+            // An answer that fits no single option is a question for the
+            // candidate, not a failed run (Samsara never reached Slack).
+            if (!selected) {
+              blockers.push(formBlocker(fieldDescriptor, "The answer did not match exactly one of the form's options.", "unknown_form_field", "ATS_FORM", executorEvidenceLabel(observed.target.provider)));
+              unresolvedFields.add(fieldDescriptor.label);
+              continue;
+            }
+            // A work-from state option ("Pennsylvania (PA)") is an exact listed
+            // choice, not the full grounded place, so it skips location matching.
+            await field.select(selected, fieldDescriptor.classification === "location" && request.profile &&
+              workLocationStateValueForField(fieldDescriptor, request.profile) !== selected
+              ? { groundedLocation: request.profile.identity.location ?? request.profile.location ?? undefined }
+              : undefined);
+          } else {
+            const value = valueAsString(decision.value);
+            if (!value) throw new Error("Text value was empty.");
+            const isSalary = fieldDescriptor.classification === "salary";
+            const fillValue = isSalary ? normalizeNumericSalaryValue(value) : value;
+            if (isSalary && !fillValue) throw new Error("The authorized salary value was not a supported numeric amount.");
+            await field.fill(fillValue ?? value);
+            const committed = field.readValue ? await field.readValue() : undefined;
+            const committedMatches = isSalary && typeof committed === "string"
+              ? salaryValuesEqual(fillValue ?? value, committed)
+              : committed === value ||
+                // A location typeahead commits its own spelling of the same place.
+                (fieldDescriptor.classification === "location" && typeof committed === "string" && groundedLocationStringsMatch(committed, value));
+            if (typeof committed === "string" && !committedMatches) {
+              throw new Error(`The value for ${fieldDescriptor.label} was not committed by the form.`);
+            }
+          }
+          fieldsFilled.add(fieldDescriptor.id);
+          evidence.push(`filled:${fieldDescriptor.id}`);
+        } catch (error) {
+          const reason = safeErrorMessage(error, "The field could not be filled.");
+          // A dropdown the form wouldn't take is a question for the candidate,
+          // not a failed application (Samsara, 2026-11-12). Its answer re-fills it.
+          if (fieldDescriptor.type === "select" || fieldDescriptor.type === "radio") {
+            blockers.push(formBlocker(fieldDescriptor, `The form did not take the answer (${reason.slice(0, 160)}).`, "unknown_form_field", "ATS_FORM", executorEvidenceLabel(observed.target.provider)));
             unresolvedFields.add(fieldDescriptor.label);
             continue;
           }
-          await field.uploadFile(path);
-          resumeUsed = request.application.resume?.familyId;
-          evidence.push(`resume-uploaded:${fieldDescriptor.id}`);
-        } else if (fieldDescriptor.type === "checkbox") {
-          const checked = checkboxValue(decision.value);
-          if (checked === undefined) throw new Error("Checkbox value was not boolean.");
-          await field.setChecked(checked);
-        } else if (fieldDescriptor.type === "select" || fieldDescriptor.type === "radio") {
-          const selected = optionValue(fieldDescriptor, decision.value);
-          if (!selected) throw new Error("Selected option was empty.");
-          await field.select(selected, fieldDescriptor.classification === "location" && request.profile
-            ? { groundedLocation: request.profile.identity.location ?? request.profile.location ?? undefined }
-            : undefined);
-        } else {
-          const value = valueAsString(decision.value);
-          if (!value) throw new Error("Text value was empty.");
-          const isSalary = fieldDescriptor.classification === "salary";
-          const fillValue = isSalary ? normalizeNumericSalaryValue(value) : value;
-          if (isSalary && !fillValue) throw new Error("The authorized salary value was not a supported numeric amount.");
-          await field.fill(fillValue ?? value);
-          const committed = field.readValue ? await field.readValue() : undefined;
-          const committedMatches = isSalary && typeof committed === "string"
-            ? salaryValuesEqual(fillValue ?? value, committed)
-            : committed === value;
-          if (typeof committed === "string" && !committedMatches) {
-            throw new Error(`The value for ${fieldDescriptor.label} was not committed by the form.`);
-          }
+          return failedResult(`Could not fill ${fieldDescriptor.label}: ${reason}`, startedAt, this.now(), inspection(
+            "failed",
+            observed.inspection.fields,
+            observed.inspection.startedAt,
+            this.now(),
+            {
+              fieldsFilled: [...fieldsFilled],
+              unresolvedFields: [...unresolvedFields],
+              blockers,
+              ...(resumeUsed ? { resumeUsed } : {}),
+              ...inspectionTelemetry(observed.inspection),
+              evidence: [...evidence, `error:${reason}`],
+            },
+          ), true, true);
         }
-        fieldsFilled.add(fieldDescriptor.id);
-        evidence.push(`filled:${fieldDescriptor.id}`);
-      } catch (error) {
-        const reason = safeErrorMessage(error, "The field could not be filled.");
-        return failedResult(`Could not fill ${fieldDescriptor.label}: ${reason}`, startedAt, this.now(), inspection(
-          "failed",
-          observed.inspection.fields,
-          observed.inspection.startedAt,
-          this.now(),
-          {
-            fieldsFilled: [...fieldsFilled],
-            unresolvedFields: [...unresolvedFields],
-            blockers,
-            ...(resumeUsed ? { resumeUsed } : {}),
-            ...inspectionTelemetry(observed.inspection),
-            evidence: [...evidence, `error:${reason}`],
-          },
-        ), true, true);
       }
+      const known = new Set(formFields.map((field) => field.id));
+      const revealed = (await observed.session.inspectFields().catch(() => [] as readonly LeverBrowserField[]))
+        .filter((field) => !known.has(field.id));
+      formFields.push(...revealed);
+      pending = revealed;
     }
 
     // A later React rerender can replace Ashby's canonical file input after
@@ -2460,7 +3167,23 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
     // ready; the immediate FileList/upload acknowledgement is not durable.
     if ((observed.target.provider === "ashby" || observed.target.provider === "rippling") && resumePath && resumeUsed && observed.session.verifyUploadedFile) {
       const resumeField = observed.fields.find((field) => descriptor(field).classification === "resume_upload");
-      const verified = await observed.session.verifyUploadedFile(resumePath).catch(() => false);
+      let verified = await observed.session.verifyUploadedFile(resumePath).catch(() => false);
+      if (!verified) {
+        // A rerender cleared the attachment. Attach it once more to the
+        // current resume control and check again before asking anyone.
+        const current = await observed.session.inspectFields().catch(() => [] as readonly LeverBrowserField[]);
+        const target = current.find((field) => field.type === "file" && descriptor(field).classification === "resume_upload");
+        if (target) {
+          try {
+            await target.uploadFile(resumePath);
+            evidence.push("resume-reupload:attempted");
+            verified = await observed.session.verifyUploadedFile(resumePath).catch(() => false);
+          } catch {
+            evidence.push("resume-reupload:failed");
+          }
+          if (verified) evidence.push("resume-verification:confirmed-after-reupload");
+        }
+      }
       if (!verified) {
         const fieldDescriptor = resumeField
           ? descriptor(resumeField)
@@ -2474,7 +3197,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         unresolvedFields.add(fieldDescriptor.label);
         blockers.push(formBlocker(
           fieldDescriptor,
-          `${observed.target.provider === "rippling" ? "Rippling" : "Ashby"} no longer shows the selected resume attached after the form finished rendering; it was left for review.`,
+          `${observed.target.provider === "rippling" ? "Rippling" : "Ashby"} dropped the attached resume after the form re-rendered, and attaching it again did not stick.`,
           "resume_missing",
           "ATS_FORM",
           executorEvidenceLabel(observed.target.provider),
@@ -2546,8 +3269,28 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       };
     }
 
+    // Greenhouse marks every box of a multi-choice group ("question_1[]_…")
+    // required; the group is answered once any one of its boxes is checked.
+    const checkedGroups = new Set<string>();
+    for (const field of observed.fields) {
+      const group = checkboxGroupKey(field);
+      if (group && field.readValue && await field.readValue().catch(() => null) === true) checkedGroups.add(group);
+    }
+    const askedGroups = new Set<string>();
     for (const field of observed.fields) {
       if (!field.required || !field.readValue) continue;
+      const group = checkboxGroupKey(field);
+      if (group && checkedGroups.has(group)) continue;
+      const groupBoxes = group ? observed.fields.filter((candidate) => checkboxGroupKey(candidate) === group).map(descriptor) : [];
+      if (group && groupBoxes.length >= 2) {
+        // One question for the whole unchecked group, not one per box.
+        if (!askedGroups.has(group)) {
+          askedGroups.add(group);
+          unresolvedFields.add(groupBoxes[0]!.questionDescriptor?.promptText ?? groupBoxes[0]!.label);
+          dedupedBlockers.push(formBlocker(checkboxGroupDescriptor(group, groupBoxes), "A required checkbox group is still unchecked after the safe fill pass.", "unknown_form_field", "ATS_FORM", executorEvidenceLabel(observed.target.provider)));
+        }
+        continue;
+      }
       let value: string | boolean | null = null;
       try {
         value = await field.readValue();
@@ -2576,6 +3319,23 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         blockers: blockedInspection.blockers,
         inspection: blockedInspection,
       };
+    }
+
+    // Read back before any provider step navigation hides the filled controls.
+    const reviewSummary = await reviewSummaryFor(observed.fields, new Set(fieldsFilled));
+    if (observed.target.provider === "vaia") {
+      const advanced = await (observed.session.advanceVaiaToReview
+        ? observed.session.advanceVaiaToReview().then(() => undefined, (error: unknown) => safeErrorMessage(error, "Vaia did not accept the details step."))
+        : Promise.resolve("This browser session cannot advance the Vaia details step."));
+      if (advanced) {
+        const blocker = boundaryBlocker({
+          kind: "external_verification",
+          question: "Review the Vaia details step in the open browser",
+          reason: `${advanced} Nothing was submitted.`,
+          evidence: ["vaia:details-not-advanced", "submit:not-clicked"],
+        }, executorEvidenceLabel(observed.target.provider));
+        return unsupportedResult("Vaia details step was not advanced to review", startedAt, this.now(), blocker, observed.inspection);
+      }
     }
 
     if (!(await observed.session.hasSubmitControl())) {
@@ -2619,6 +3379,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       fieldsFilled: [...fieldsFilled],
       unresolvedFields: [...unresolvedFields],
       ...(resumeUsed ? { resumeUsed } : {}),
+      ...(reviewSummary.length > 0 ? { reviewSummary } : {}),
       ...inspectionTelemetry(observed.inspection),
       evidence: submissionCapable
         ? [...evidence, "navigation:verified", "submit-control:detected", "submission:automatic-enabled"]
@@ -2748,7 +3509,22 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
     }
     if (!state.navigated) {
       await state.session.navigate(target.applicationUrl);
+      if (target.provider === "greenhouse" && isGreenhouseClosedPostingRedirect(await state.session.currentUrl(), target.site)) {
+        // Greenhouse sends a closed posting back to the company board with ?error=true.
+        throw new BrowserExecutionDiagnosticError({
+          stage: "navigation",
+          reasonCode: "posting_not_found",
+          message: "The posting is no longer open: Greenhouse redirected it to the company job board.",
+        });
+      }
+      // Some boards redirect the hosted page to the employer's careers site;
+      // the embed route is the same verified posting's form on greenhouse.io.
+      if (target.provider === "greenhouse" && target.postingId &&
+        !sameApplicationPage(await state.session.currentUrl(), target)) {
+        await state.session.navigate(greenhouseEmbedApplicationUrl(target.site, target.postingId));
+      }
       state.navigated = true;
+      if (target.provider === "vaia") await this.prepareVaiaWizard(request, state.session);
     }
     const currentUrl = await state.session.currentUrl();
     if (!sameApplicationPage(currentUrl, target)) {
@@ -2764,6 +3540,18 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       });
     }
     return state;
+  }
+
+  /** Runs Vaia's email and résumé intro steps with grounded profile data only. */
+  private async prepareVaiaWizard(request: ApplicationExecutionRequest, session: LeverBrowserSession): Promise<void> {
+    const email = request.profile?.identity.email?.trim();
+    const familyId = request.application.resume?.familyId;
+    const resumePath = familyId ? this.options.resumePaths?.[familyId] : undefined;
+    const failure = (message: string) => new BrowserExecutionDiagnosticError({ stage: "navigation", reasonCode: "unsupported_page", message });
+    if (!session.prepareVaiaApplication) throw failure("This browser session cannot run the Vaia application intro steps.");
+    if (!email) throw failure("The candidate profile has no email address for the Vaia email step.");
+    if (!resumePath) throw failure("No résumé file is configured for the selected résumé family; the Vaia upload step was not started.");
+    await session.prepareVaiaApplication({ email, resumePath, company: request.careerJob.job.company, role: request.careerJob.job.title });
   }
 
   private async inspectForm(
@@ -2800,6 +3588,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
                   this.options.provider === "matlensilver" ? "matlensilver" :
                     this.options.provider === "protagona" ? "protagona" :
                       this.options.provider === "gusto" ? "gusto" :
+                      this.options.provider === "vaia" ? "vaia" :
                         this.options.provider === "generic" ? "generic" : "lever",
           site: "unknown",
           applicationUrl: "",
@@ -2860,7 +3649,7 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       const commonEvidence = [
         `executor:${executorEvidenceLabel(target.provider)}`,
         `source:live/${target.provider}`,
-        `${target.provider === "greenhouse" ? "greenhouse-board" : target.provider === "rippling" ? "rippling-org" : target.provider === "ashby" ? "ashby-org" : target.provider === "workday" ? "workday-tenant" : target.provider === "youhired" ? "youhired-host" : target.provider === "matlensilver" ? "matlensilver-host" : target.provider === "protagona" ? "protagona-host" : target.provider === "gusto" ? "gusto-host" : "lever-site"}:${target.site}`,
+        `${target.provider === "greenhouse" ? "greenhouse-board" : target.provider === "rippling" ? "rippling-org" : target.provider === "ashby" ? "ashby-org" : target.provider === "workday" ? "workday-tenant" : target.provider === "youhired" ? "youhired-host" : target.provider === "matlensilver" ? "matlensilver-host" : target.provider === "protagona" ? "protagona-host" : target.provider === "gusto" ? "gusto-host" : target.provider === "vaia" ? "vaia-host" : "lever-site"}:${target.site}`,
         ...(target.postingId ? [`provider-job-id:${target.postingId}`] : []),
         "navigation:verified",
       ];
@@ -2980,7 +3769,8 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
         session: { currentUrl: () => "", navigate: async () => undefined, inspectFields: async () => [], detectHumanBoundary: async () => null, hasSubmitControl: async () => false, submit: async () => ({ clicked: false, confirmed: false, evidence: "submit:unavailable" }), close: async () => undefined },
         fields: [],
         inspection: inspection("failed", [], startedAt, this.now(), {
-          evidence: [`executor:${executorEvidenceLabel(target.provider)}`, `error:${reason}`],
+          evidence: [`executor:${executorEvidenceLabel(target.provider)}`, `error:${reason}`,
+            ...(derivedDiagnostic.reasonCode === "posting_not_found" || derivedDiagnostic.reasonCode === "posting_closed" ? ["posting:unavailable"] : [])],
           boundaries,
           ...(navigation ? { navigation } : {}),
           diagnostic,
@@ -2988,6 +3778,27 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
       });
     }
   }
+}
+
+/** Bounded read-back of filled controls; values come from the live page, not the plan. */
+async function reviewSummaryFor(fields: readonly LeverBrowserField[], filled: ReadonlySet<string>): Promise<ExecutionReviewEntry[]> {
+  const entries: ExecutionReviewEntry[] = [];
+  for (const field of fields) {
+    if (!filled.has(field.id) || entries.length >= 40) continue;
+    const rawLabel = (field.questionDescriptor?.accessibleName || field.label).replace(/\s+/g, " ").replace(/\*+$/, "").trim().slice(0, 80);
+    // Placeholder-only labels such as "(555) 123-4567" carry no field name.
+    const label = /[a-z]{2}/i.test(rawLabel) ? rawLabel
+      : field.type === "tel" ? "Phone" : field.type === "email" ? "Email" : field.id;
+    if (!label) continue;
+    if (field.type === "file") {
+      entries.push({ label, value: "file attached" });
+      continue;
+    }
+    const raw = await field.readValue?.().catch(() => null);
+    const value = typeof raw === "boolean" ? (raw ? "checked" : "unchecked") : (raw ?? "").replace(/\s+/g, " ").trim().slice(0, 120);
+    entries.push({ label, value });
+  }
+  return entries;
 }
 
 function dedupeBlockers(blockers: readonly CareerBlockerDraft[]): CareerBlockerDraft[] {

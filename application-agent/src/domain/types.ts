@@ -70,6 +70,8 @@ export interface CandidateIdentity {
   /** Optional explicit profile fact; never inferred from fullName or another URL. */
   linkedinUrl?: string | null;
   /** Optional explicit profile fact; never inferred from fullName or another URL. */
+  githubUrl?: string | null;
+  /** Optional explicit profile fact; never inferred from fullName or another URL. */
   websiteUrl?: string | null;
   email: string | null;
   phone: string | null;
@@ -127,12 +129,25 @@ export interface WorkPreferences {
   preferredWorkLocation?: string | null;
   /** Optional explicit authority for application availability/start-date questions. */
   availabilityStartDate?: string | null;
+  /**
+   * How to answer expected-compensation questions. "ask" (default) always
+   * asks; "posting_midpoint" answers with the middle of the pay range the
+   * posting lists, and still asks when it lists none.
+   */
+  salaryStrategy?: "ask" | "posting_midpoint";
+  /**
+   * Start date as a notice period: this many days after the day the form is
+   * filled (14 = "two weeks from when I apply"). Overrides availabilityStartDate.
+   */
+  availabilityNoticeDays?: number;
 }
 
 export interface WorkAuthorization {
   status: string | null;
   countries: readonly string[];
   sponsorshipRequired: boolean | null;
+  /** Countries the candidate is a citizen of; answers "Citizen" status questions. */
+  citizenship?: readonly string[];
 }
 
 export interface ResumeFamily {

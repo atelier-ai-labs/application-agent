@@ -25,7 +25,19 @@
     "test:watch": "vitest",
     "test:acceptance": "npm run build && vite-node application-agent/automation/acceptance/run.ts",
     "test:evals": "vite-node evals/run.ts",
-    "test:evals:negatives": "vite-node evals/runNegatives.ts"
+    "test:evals:negatives": "vite-node evals/runNegatives.ts",
+    "career-agent:resolve-links": "vite-node application-agent/automation/resolveTrackerLinksRun.ts",
+    "career-agent:check-open": "vite-node application-agent/automation/checkOpenRun.ts",
+    "career-agent:discover": "vite-node application-agent/automation/discoverJobsRun.ts",
+    "career-agent:inbox": "vite-node application-agent/automation/inboxRun.ts",
+    "career-agent:daily": "vite-node application-agent/automation/dailyRun.ts",
+    "career-agent:capture": "vite-node application-agent/automation/formSnapshots/captureCli.ts",
+    "career-agent:replay": "vite-node application-agent/automation/formSnapshots/replayCli.ts",
+    "career-agent:answers": "vite-node application-agent/automation/answerBankCli.ts",
+    "career-agent:questionnaire": "vite-node application-agent/automation/questionnaireCli.ts",
+    "career-agent:history": "vite-node application-agent/automation/historyRun.ts",
+    "career-agent:migrate-state": "vite-node application-agent/automation/runtime/migrateStateCli.ts",
+    "career-agent:eval-essays": "vite-node application-agent/automation/answerDraft/evalEssaysCli.ts"
   },
   "dependencies": {
     "react": "^19.1.1",

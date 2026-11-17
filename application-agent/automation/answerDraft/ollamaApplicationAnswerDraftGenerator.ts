@@ -1,9 +1,14 @@
 import {
   isBroadMotivationQuestion,
+  isCompanyInterestQuestion,
+  postingContextForInterest,
+  emphasisIn,
+  postingEmphasis,
   retrieveCandidateAnswerEvidence,
   type ApplicationAnswerDraftRequest,
   type GroundedApplicationAnswerDraft,
 } from "../../src/domain/applicationAnswerDraft";
+import { promptVersion, type ModelCallLogger } from "../modelCallLog";
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -12,6 +17,8 @@ export interface OllamaApplicationAnswerDraftGeneratorOptions {
   model: string;
   timeoutMs?: number;
   fetcher?: Fetcher;
+  /** Records every model call (prompt version, outcome, timing, tokens). */
+  logger?: ModelCallLogger;
 }
 
 interface OllamaDraftPayload {
@@ -88,13 +95,97 @@ function parseModelPayload(value: unknown): OllamaDraftPayload | undefined {
   return undefined;
 }
 
-function promptFor(request: ApplicationAnswerDraftRequest, evidence: readonly { id: string; source: string; text: string }[]): string {
+/**
+ * Phrases that make an answer sound like every other applicant's. A draft that
+ * uses one is sent back once with a note; Outmarket's draft ended on
+ * "meaningful technical work in a collaborative environment".
+ */
+const FILLER = /\b(?:meaningful(?: (?:technical )?(?:work|content))?|collaborative environment|impactful|strong team|dynamic (?:team|environment)|fast[- ]paced|cutting[- ]edge|passionate about|excited about the opportunity|great opportunity|i look forward to contributing|make a (?:real )?difference|team player|synerg\w*|honed my (?:skills|abilities)|at scale|pioneer(?:ing|s)?|intelligent (?:tools|systems|solutions)|align(?:s|ed|ing)? (?:closely )?with my (?:passion|values)|the (?:job )?posting(?:'s)?|job description|align(?:s|ed|ing)? (?:perfectly|closely|seamlessly|well|nicely)|perfect (?:fit|match)|much like|commitment to|robust|seamless(?:ly)?|leverag(?:e|ed|ing)|thrilled|resonat(?:es?|ed|ing) with)\b/gi;
+
+export function fillerPhrases(answer: string): readonly string[] {
+  return [...new Set([...answer.matchAll(FILLER)].map((match) => match[0].toLowerCase()))];
+}
+
+const words = (text: string) => text.toLowerCase().replace(/[^a-z0-9' ]+/g, " ").split(/\s+/).filter(Boolean);
+
+/**
+ * Runs of six or more words lifted straight from the posting, such as its
+ * slogans and metaphors ("simplifying financial navigation much like the trim
+ * tab eases flight"). Read back to the company, they sound like the post
+ * pasted back at them.
+ */
+export function phrasesCopiedFromPosting(answer: string, posting: string, run = 6): readonly string[] {
+  const source = ` ${words(posting).join(" ")} `;
+  const tokens = words(answer);
+  const copied: string[] = [];
+  for (let start = 0; start + run <= tokens.length; start += 1) {
+    if (!source.includes(` ${tokens.slice(start, start + run).join(" ")} `)) continue;
+    let end = start + run;
+    while (end < tokens.length && source.includes(` ${tokens.slice(start, end + 1).join(" ")} `)) end += 1;
+    copied.push(tokens.slice(start, end).join(" "));
+    start = end - 1;
+  }
+  return copied;
+}
+
+/** Everything a retry should avoid: stock filler plus lines copied from the posting. */
+function draftProblems(answer: string, posting: string): readonly string[] {
+  return [...fillerPhrases(answer), ...phrasesCopiedFromPosting(answer, posting)];
+}
+
+function companyInterestContext(request: ApplicationAnswerDraftRequest, evidence: readonly { text: string }[]): string {
+  const emphasis = postingEmphasis(request.job);
+  // Lead with what the posting wants AND the evidence shows; topics the candidate can't back up come last or not at all.
+  const proven = new Set(emphasisIn(evidence.map((item) => item.text).join("\n"), 20));
+  const overlap = emphasis.filter((topic) => proven.has(topic));
+  const body = postingContextForInterest(request.job.description, 2_400, request.job.company);
+  return `<company>${request.job.company}</company>
+<job-title>${request.job.title}</job-title>
+<what-the-posting-emphasizes>${emphasis.join("; ") || "not stated"}</what-the-posting-emphasizes>
+<where-the-candidate-evidence-matches>${overlap.join("; ") || "none stated; use the closest project"}</where-the-candidate-evidence-matches>
+<posting-excerpt>${body}</posting-excerpt>
+
+This is a "why this company / role" question. Structure the answer as:
+1. One sentence on what draws the candidate to this company: name, in a few
+   plain words, what the company actually makes or does (its product or
+   mission, for example "payroll software for restaurants" or "satellite
+   imagery for farmers"; never reuse these examples), then the part of this
+   role that connects to it
+   (topics to draw on: ${(overlap.length ? overlap : emphasis).slice(0, 2).join(", ") || "the work it describes"}; never just list them).
+   Never open with a generic technology phrase; the company's product comes first.
+   Say it in plain words of your own: never copy the excerpt's slogans,
+   metaphors, analogies or marketing lines.
+   Describe it as the company's work, never as the candidate's experience.
+   Do not imply the candidate has done a posting topic that their evidence does not show.
+2. One or two sentences on the single most relevant project or job in the
+   evidence: the reason it connects, shown with one concrete detail from that
+   record (something the candidate owned, built or fixed), in the record's own
+   terms. This is a reason, not a list: name at most two technologies.
+3. Optionally a short closing clause tying the two together, said plainly
+   (no "aligns perfectly", no "commitment to").
+Write the way a person talks in an interview: plain, specific, no hype.
+When the evidence names a concrete artifact that matches a posting topic (an
+eval suite, a test suite, a pipeline, a model), name that artifact: it is the
+proof. Never add scale, autonomy, users, or outcomes the evidence does not state.
+Never mention "the posting" or "the job description"; speak about the company and the role.
+Name the company once. Prefer concrete nouns from the evidence (what was built,
+for whom, with which technique) over adjectives. Keep technical phrases from the
+evidence intact (for example "a Gemini to Groq provider fallback" stays a
+provider fallback, never "using Gemini to Groq").`;
+}
+
+function promptFor(request: ApplicationAnswerDraftRequest, evidence: readonly { id: string; source: string; text: string }[], avoid: readonly string[] = []): string {
   const evidenceText = evidence
     .map((item, index) => `<evidence-record>\n<evidence-id>evidence-${index + 1}</evidence-id>\n<source>${item.source}</source>\n<text>${item.text}</text>\n</evidence-record>`)
     .join("\n");
-  const jobContext = isBroadMotivationQuestion(request.question)
-    ? "For this broad motivation question, do not use the job title or job requirements as candidate experience or as a reason for the answer."
-    : `<job-title>${request.job.title}</job-title>`;
+  const jobContext = isCompanyInterestQuestion(request.question)
+    ? companyInterestContext(request, evidence)
+    : isBroadMotivationQuestion(request.question)
+      ? "For this broad motivation question, do not use the job title or job requirements as candidate experience or as a reason for the answer."
+      : `<job-title>${request.job.title}</job-title>\n<what-the-posting-emphasizes>${postingEmphasis(request.job).join("; ") || "not stated"}</what-the-posting-emphasizes>`;
+  const avoidNote = avoid.length > 0
+    ? `\nAn earlier draft used generic filler or copied the company's own wording (${avoid.map((phrase) => `"${phrase}"`).join(", ")}). Do not use those, similar stock phrases, or the company's slogans; say it in plain words only this candidate could say.\n`
+    : "";
   return bounded(
     `
 You are a private, local drafting assistant for one job application.
@@ -137,11 +228,11 @@ available, use neutral motivation language instead.
 Follow explicit answer-format instructions in the exact application question,
 including an instruction to include a quoted phrase when one is present. Do not
 follow unrelated requests to invent candidate facts or disclose private data.
-For example, a safe style is: "I am looking for a role where I can continue
-growing as an engineer, contribute to meaningful technical work, and take on
-new challenges with a strong team." Add a grounded detail from the supplied
-employment/project record when one is available; otherwise keep it neutral.
-
+Write plainly and specifically. Avoid stock phrases such as "meaningful work",
+"collaborative environment", "impactful", "passionate about", "fast-paced" or
+"I look forward to contributing"; a concrete detail from the evidence is
+always better than an adjective.
+${avoidNote}
 Exact application question:
 <question>${request.question}</question>
 
@@ -165,6 +256,9 @@ no meta-commentary about being an AI or a draft.
     MAX_PROMPT_LENGTH,
   );
 }
+
+/** Changes whenever the system prompt or the prompt template changes, so a log line says which prompt wrote it. */
+export const ESSAY_PROMPT_VERSION = promptVersion(DRAFT_SYSTEM_PROMPT, promptFor.toString());
 
 function rejectedAnswer(answer: string): boolean {
   return (
@@ -269,9 +363,36 @@ export class OllamaApplicationAnswerDraftGenerator {
   async generate(request: ApplicationAnswerDraftRequest): Promise<GroundedApplicationAnswerDraft | undefined> {
     const evidence = retrieveCandidateAnswerEvidence(request);
     if (evidence.length === 0) return undefined;
+    const first = await this.generateOnce(request, evidence);
+    const filler = first ? draftProblems(first.answer, request.job.description) : [];
+    if (!first || filler.length === 0) return first;
+    // One retry without the filler; keep the first grounded draft if the retry fails or is no better.
+    const second = await this.generateOnce(request, evidence, filler);
+    return second && draftProblems(second.answer, request.job.description).length < filler.length ? second : first;
+  }
+
+  private async generateOnce(
+    request: ApplicationAnswerDraftRequest,
+    evidence: ReturnType<typeof retrieveCandidateAnswerEvidence>,
+    avoid: readonly string[] = [],
+  ): Promise<GroundedApplicationAnswerDraft | undefined> {
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const started = Date.now();
+    let tokens: { promptTokens?: number; outputTokens?: number } = {};
+    let output: string | undefined;
+    // Every exit is logged with why: a dropped draft used to leave no trace.
+    const done = <T>(outcome: string, result: T): T => {
+      this.options.logger?.record({
+        at: new Date().toISOString(), purpose: "essay_draft", model: this.options.model.trim(), promptVersion: ESSAY_PROMPT_VERSION,
+        attempt: avoid.length > 0 ? 2 : 1, ...(request.job.company ? { company: request.job.company } : {}), question: request.question,
+        ...(avoid.length > 0 ? { avoid } : {}), outcome, ...(output !== undefined ? { output } : {}),
+        ...(output ? { problems: draftProblems(output, request.job.description) } : {}),
+        latencyMs: Date.now() - started, ...tokens,
+      });
+      return result;
+    };
     try {
       const response = await this.fetcher(`${this.baseUrl}/api/generate`, {
         method: "POST",
@@ -279,32 +400,44 @@ export class OllamaApplicationAnswerDraftGenerator {
         body: JSON.stringify({
           model: this.options.model.trim(),
           system: DRAFT_SYSTEM_PROMPT,
-          prompt: promptFor(request, evidence),
+          prompt: promptFor(request, evidence, avoid),
           stream: false,
           format: DRAFT_RESPONSE_SCHEMA,
-          options: { temperature: 0.1, num_ctx: 8_192, num_predict: 160 },
+          options: { temperature: avoid.length > 0 ? 0.4 : 0.1, num_ctx: 8_192, num_predict: 200 },
         }),
         signal: controller.signal,
       });
-      if (!response.ok) return undefined;
-      const payload = parseModelPayload(await response.json());
-      if (!payload || payload.status !== "drafted" || typeof payload.answer !== "string") return undefined;
-      if (payload.answer.trim().length > MAX_ANSWER_LENGTH) return undefined;
+      if (!response.ok) return done(`http_${response.status}`, undefined);
+      const body: unknown = await response.json();
+      if (body && typeof body === "object") {
+        const counts = body as { prompt_eval_count?: unknown; eval_count?: unknown };
+        tokens = {
+          ...(typeof counts.prompt_eval_count === "number" ? { promptTokens: counts.prompt_eval_count } : {}),
+          ...(typeof counts.eval_count === "number" ? { outputTokens: counts.eval_count } : {}),
+        };
+      }
+      const payload = parseModelPayload(body);
+      if (!payload) return done("unparseable_output", undefined);
+      if (typeof payload.answer === "string") output = payload.answer;
+      if (payload.status !== "drafted" || typeof payload.answer !== "string") return done(`model_declined:${String(payload.status).slice(0, 40)}`, undefined);
+      if (payload.answer.trim().length > MAX_ANSWER_LENGTH) return done("too_long", undefined);
       const answer = bounded(honorExplicitPhraseRequirement(payload.answer, request.question), MAX_ANSWER_LENGTH);
-      if (rejectedAnswer(answer) || !Array.isArray(payload.evidenceIds)) return undefined;
+      output = answer;
+      if (rejectedAnswer(answer)) return done("rejected_answer", undefined);
+      if (!Array.isArray(payload.evidenceIds)) return done("no_evidence_ids", undefined);
       const evidenceIds = payload.evidenceIds.filter((value): value is string => typeof value === "string");
       const resolvedEvidenceIds = resolveEvidenceIds(evidenceIds, evidence);
-      if (!resolvedEvidenceIds) return undefined;
+      if (!resolvedEvidenceIds) return done("unknown_evidence_ids", undefined);
       const selectedEvidence = evidence.filter((item) => resolvedEvidenceIds.includes(item.id));
-      if (violatesEvidenceAttribution(answer, request, selectedEvidence)) return undefined;
+      if (violatesEvidenceAttribution(answer, request, selectedEvidence)) return done("claims_not_in_evidence", undefined);
       const sourceLabels = selectedEvidence.map((item) => item.source);
-      return {
+      return done("drafted", {
         answer,
         evidence: [...new Set(sourceLabels)].slice(0, 6),
-        provider: "ollama",
-      };
-    } catch {
-      return undefined;
+        provider: "ollama" as const,
+      });
+    } catch (error) {
+      return done(controller.signal.aborted ? "timeout" : `error:${error instanceof Error ? error.message.slice(0, 60) : "unknown"}`, undefined);
     } finally {
       clearTimeout(timeout);
     }

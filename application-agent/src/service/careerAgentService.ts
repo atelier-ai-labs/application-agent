@@ -10,23 +10,32 @@ import {
 } from "../domain/policies";
 import { assertCampaignTransition } from "../domain/campaignLifecycle";
 import { createApplicationService, type ApplicationService } from "./applicationService";
+import { ResumeFamilyTieError } from "../domain/fit";
 import type { DurableSubmissionAuthority } from "../../automation/executionHost/submissionAuthority";
 import { attentionCategoryForEvent, isAttentionWorthyEvent } from "../domain/notifications";
 import { isVerifiedOfficialEmployerCandidate, type ApplicationDestinationResolver, type DestinationCandidate, type DestinationResolutionRunResult } from "../domain/applicationDestinationResolver";
 import {
   attentionDescriptorSignature,
   attentionEventForConfiguration,
+  attentionEventForResumeChoice,
   attentionEventForCareerBlocker,
   isAttentionResponse,
+  optionIdForTypedAnswer,
+  parseNumberedReply,
   publicAttentionEvent,
+  questionForBlocker,
   questionProvenanceForBlocker,
+  type AttentionActorIdentity,
+  type AttentionBatchQuestion,
   type AttentionClosureReason,
+  type AttentionQuestion,
   type AttentionEvent,
   type AttentionResponse,
   type NotificationAdapter,
   type PersistedAttentionEvent,
 } from "../domain/attention";
 import type { ApplicationAnswerDraftGenerator } from "../domain/applicationAnswerDraft";
+import { OPTIONAL_ANSWER_SKIPPED } from "../domain/executor";
 import {
   EXECUTION_RUN_HISTORY_LIMIT,
   ExecutionTraceBuilder,
@@ -83,6 +92,7 @@ import type { ApplicationExecutor, ExecutionInspection } from "../domain/executo
 import { UnavailableApplicationExecutor, type ApplicationExecutionRequest, type ApplicationExecutorResult } from "../domain/executor";
 import { JobScout, canonicalJobUrl, jobDedupeKeys, jobKeysMatch, type ScoutedJob } from "../domain/scout";
 import { normalizeJobSearchIntent, searchCriteriaFromJobSearchIntent } from "../domain/searchIntent";
+import { companyLimitReached } from "../domain/companyLimit";
 import {
   UnavailableJobTracker,
   isJobTrackerResult,
@@ -100,6 +110,8 @@ import {
   isVerifiedGustoApplicationUrl,
   isVerifiedGustoHostedUrl,
   gustoPostingId,
+  isVerifiedVaiaApplicationUrl,
+  vaiaPostingId,
   isVerifiedWorkdayApplicationUrl,
   isVerifiedWorkdayHostedUrl,
   workdayPostingId,
@@ -109,6 +121,8 @@ import {
   youHiredPostingId,
 } from "../domain/jobUrlClassifier";
 import { isVerifiedAshbyApplicationUrl, isVerifiedAshbyHostedUrl } from "../domain/jobUrlClassifier";
+import { isPostSubmitHumanCheck } from "../domain/applicationReceipt";
+import { answerBankKey, answerRiskTier, findAnswerBankMatch, isBankableQuestion, questionFromBlocker, standingRecordsFromJobs, withRecordedAnswer, type AnswerBankSemanticMatcher, type AnswerBankStore } from "../domain/answerBank";
 import { isVerifiedLeverApplicationUrl, isVerifiedLeverHostedUrl } from "../domain/leverJobSource";
 
 let fallbackId = 0;
@@ -135,6 +149,18 @@ export interface CareerAgentDependencies {
   officialDestinationCandidates?: readonly DestinationCandidate[];
   /** Optional server-only generator for reviewable answers to exact ATS free-text questions. */
   applicationAnswerDraftGenerator?: ApplicationAnswerDraftGenerator;
+  /** Fetches a thin queue row's posting text (default: Ashby pages only). */
+  postingEnricher?: (input: JobIntakeInput) => Promise<JobIntakeInput>;
+  /**
+   * Records a user's DONE after an unconfirmed Submit as a manual Applied
+   * confirmation (through the durable submission fence). Without it, DONE
+   * falls back to re-checking the retained browser session.
+   */
+  confirmPostSubmitDone?: (campaignId: string, jobId: string) => Promise<CareerJob>;
+  /** Answers the candidate gave on earlier forms, reused before asking again. */
+  answerBank?: AnswerBankStore;
+  /** Optional local-model matcher for low-risk questions worded differently. */
+  answerBankMatcher?: AnswerBankSemanticMatcher;
 }
 
 export interface LegacyAttentionRepairResult {
@@ -189,7 +215,25 @@ interface CareerBlockerResolutionOptions {
 
 export type CareerAttentionResponseResult =
   | { status: "resolved"; event: AttentionEvent; careerJob: CareerJob }
-  | { status: "duplicate"; event: AttentionEvent; careerJob: CareerJob };
+  | { status: "duplicate"; event: AttentionEvent; careerJob: CareerJob }
+  /** A numbered reply that skipped question 1: the other answers are saved; question 1 is still open. */
+  | { status: "partial"; event: AttentionEvent; careerJob: CareerJob };
+
+/** A typed answer as this question's reply: the option id for a choice, the text itself otherwise. */
+function typedAnswerForQuestion(question: AttentionQuestion, text: string): string | undefined {
+  if (/^\s*skip\s*$/i.test(text)) return question.required === false ? "SKIP" : undefined;
+  return question.kind === "single_choice" ? optionIdForTypedAnswer(question.options, text) : text.trim() || undefined;
+}
+
+/** Generic preparation placeholders that the real form's questions replace for queue jobs. */
+const GENERIC_PREPARATION_FIELDS: ReadonlySet<string> = new Set(["salary_expectations", "relocation", "travel", "demographic_disclosure", "legal_attestations"]);
+
+/** Questions that need their own message: essays to review, browser handoffs, files. */
+const UNBATCHED_BLOCKER_KINDS: ReadonlySet<string> = new Set([
+  "subjective_answer", "captcha", "external_login", "external_verification", "resume_missing", "required_file_missing",
+  "submission_approval", "unsupported_widget",
+]);
+const MAX_BATCH_QUESTIONS = 8;
 
 /** A narrow, non-resuming correction for a response that was already persisted. */
 export interface ResolvedCareerAnswerRevision {
@@ -257,6 +301,14 @@ const APPLICATION_CAP_HOLD_REASON = "The campaign application cap has been reach
 const STALE_PRE_SUBMIT_EXECUTION_MS = 15 * 60 * 1000;
 
 export type StalePreSubmitHostUnavailable = "not_found" | "closed";
+
+/** Blocker kinds never carried to another application, even at the same employer. */
+const CARRY_OVER_EXCLUDED_KINDS: ReadonlySet<string> = new Set(["salary", "legal_attestation", "demographic_disclosure", "external_login", "external_verification", "captcha"]);
+
+/** Held-job reason for a résumé tie. Its wording keeps the queue row in Needs Input, not Skipped. */
+function resumeChoiceReason(error: ResumeFamilyTieError): string {
+  return `Résumé choice needed: this posting matches ${error.tiedFamilies.join(" and ")} equally. Pick one in Slack.`;
+}
 
 export function trustedQueueFitAssessment(
   fit: FitAssessment,
@@ -737,6 +789,10 @@ export class CareerAgentService {
   private readonly destinationResolver?: ApplicationDestinationResolver;
   private readonly officialDestinationCandidates: readonly DestinationCandidate[];
   private readonly applicationAnswerDraftGenerator?: ApplicationAnswerDraftGenerator;
+  private readonly postingEnricher: (input: JobIntakeInput) => Promise<JobIntakeInput>;
+  private readonly confirmPostSubmitDone?: (campaignId: string, jobId: string) => Promise<CareerJob>;
+  private readonly answerBank?: AnswerBankStore;
+  private readonly answerBankMatcher?: AnswerBankSemanticMatcher;
   private readonly attentionResponseInFlight = new Map<
     string,
     {
@@ -763,6 +819,10 @@ export class CareerAgentService {
     this.destinationResolver = dependencies.destinationResolver;
     this.officialDestinationCandidates = dependencies.officialDestinationCandidates ?? [];
     this.applicationAnswerDraftGenerator = dependencies.applicationAnswerDraftGenerator;
+    this.postingEnricher = dependencies.postingEnricher ?? ((input) => enrichAshbyJobIntake(input));
+    this.confirmPostSubmitDone = dependencies.confirmPostSubmitDone;
+    this.answerBank = dependencies.answerBank;
+    this.answerBankMatcher = dependencies.answerBankMatcher;
   }
 
   listCampaigns(): readonly Campaign[] {
@@ -800,7 +860,7 @@ export class CareerAgentService {
     if (job.campaignId !== campaign.id || !job.applicationId) return job;
     const application = this.applicationService.getApplication(job.applicationId);
     if (application.status === "needs_input") this.applicationService.deferGenericPreparationBlockersForInspection(application.id);
-    const genericFields = new Set(["salary_expectations", "relocation", "travel", "demographic_disclosure", "legal_attestations"]);
+    const genericFields = GENERIC_PREPARATION_FIELDS;
     const blockers = job.blockers.filter((blocker) => blocker.status !== "open" || !genericFields.has(blocker.field ?? ""));
     const updated = this.saveJob({
       ...job,
@@ -888,7 +948,7 @@ export class CareerAgentService {
     const campaign = this.getCampaign(campaignId);
     if (campaign.status !== "active") throw new Error("Start the campaign before evaluating a selected posting.");
 
-    const normalizedPosting = normalizeJobPosting(await enrichAshbyJobIntake(input), this.now());
+    const normalizedPosting = normalizeJobPosting(await this.postingEnricher(input), this.now());
     if (!normalizedPosting.sourceUrl || !normalizedPosting.applicationUrl) {
       throw new Error("A selected posting needs both its public source URL and application URL.");
     }
@@ -906,6 +966,7 @@ export class CareerAgentService {
     const isMatlen = classification.kind === "custom" && isVerifiedMatlenApplicationUrl(applicationUrl);
     const isProtagona = classification.kind === "custom" && isVerifiedProtagonaApplicationUrl(applicationUrl);
     const isGusto = classification.kind === "custom" && isVerifiedGustoApplicationUrl(applicationUrl);
+    const isVaia = classification.kind === "custom" && isVerifiedVaiaApplicationUrl(applicationUrl);
     const isGreenhouse = classification.kind === "greenhouse" &&
       Boolean(classification.siteIdentifier) &&
       Boolean(classification.postingIdentifier) &&
@@ -929,6 +990,10 @@ export class CareerAgentService {
     } else if (isGusto) {
       if (!gustoPostingId(applicationUrl)) {
         throw new Error("The selected Gusto application URL is missing its verified job identity.");
+      }
+    } else if (isVaia) {
+      if (!vaiaPostingId(applicationUrl)) {
+        throw new Error("The selected Vaia application URL is missing its verified job identity.");
       }
     } else if (isWorkday) {
       if (!classification.siteIdentifier || !workdayPostingId(applicationUrl)) {
@@ -976,6 +1041,9 @@ export class CareerAgentService {
     if (isProtagona && (sourceUrl !== applicationUrl || protagonaPostingId(applicationUrl) === undefined)) {
       throw new Error("The selected Protagona posting must retain the same verified job URL as its application destination.");
     }
+    if (isVaia && (sourceUrl !== applicationUrl || vaiaPostingId(applicationUrl) === undefined)) {
+      throw new Error("The selected Vaia posting must retain the same verified apply-form URL as its application destination.");
+    }
     if (isGusto && (!isVerifiedGustoHostedUrl(sourceUrl) || gustoPostingId(sourceUrl) !== gustoPostingId(applicationUrl))) {
       throw new Error("The selected Gusto posting and application URLs do not match the same verified posting.");
     }
@@ -1001,6 +1069,8 @@ export class CareerAgentService {
               ? `matlensilver:${matlenPostingId(applicationUrl)}`
               : isProtagona
                 ? `protagona:${protagonaPostingId(applicationUrl)}`
+                : isVaia
+                ? `vaia:${vaiaPostingId(applicationUrl)}`
                   : isWorkday
                   ? `workday:${workdayPostingId(applicationUrl)}`
                   : isGreenhouse
@@ -1081,7 +1151,9 @@ export class CareerAgentService {
       // was corrected, re-evaluate it under the current durable inputs rather
       // than allowing history dedupe to make the old decision permanent. The
       // existing job identity and source provenance remain unchanged.
-      if ((updated.status === "rejected" || updated.status === "held") && !updated.applicationId && updated.sourceId === CURATED_JOB_SOURCE_ID) {
+      // A résumé tie used to fail the job outright; it is now a held question, so look again.
+      const failedOnResumeTie = updated.status === "failed" && /^Resume family selection requires review because the posting ties/.test(updated.decisionReason ?? "");
+      if ((updated.status === "rejected" || updated.status === "held" || failedOnResumeTie) && !updated.applicationId && updated.sourceId === CURATED_JOB_SOURCE_ID) {
         return this.reconsiderRejectedCuratedJob(campaign, updated, destinationResolution, Boolean(input.queueSelected), input.resumeFamily, input.queueFit, input.queuePriority);
       }
       // A queue-selected retry may recover the same packet after a browser
@@ -1290,6 +1362,34 @@ export class CareerAgentService {
   }
 
   /** Re-delivers only durable open events that were not acknowledged by an adapter. */
+  /**
+   * Post the next question for recent waiting jobs whose question never
+   * reached Slack (for example, a job left waiting after an answer was carried
+   * over). Jobs untouched since `recentSince` are left alone, so long-stalled
+   * applications never flood the channel. Returns how many jobs were posted.
+   */
+  async publishUnaskedAttention(recentSince: string): Promise<number> {
+    // Close questions whose job has moved on (now ready to submit, applied or
+    // skipped), so a leftover message with live buttons doesn't linger.
+    for (const campaign of this.careerRepository.listCampaigns()) {
+      if (campaign.status === "active") await this.reconcileStaleAttentionEvents(campaign.id).catch(() => undefined);
+    }
+    let posted = 0;
+    for (const job of this.careerRepository.listJobs()) {
+      if (job.status !== "needs_input" || job.updatedAt < recentSince) continue;
+      // While the browser is still filling in an answer, nothing is unasked:
+      // re-posting mid-run duplicated a question just answered (Samsara, 2026-11-12).
+      if (job.execution?.mode === "real_local" && ["starting", "inspecting", "executing", "resuming"].includes(job.execution.status ?? "")) continue;
+      const campaign = this.getCampaign(job.campaignId);
+      if (campaign.status !== "active") continue;
+      if ((campaign.attentionEvents ?? []).some((event) => event.jobId === job.id && event.status === "open")) continue;
+      if (!this.nextAttentionBlocker(campaign, job)) continue;
+      await this.publishAttentionForJob(campaign, job);
+      posted += 1;
+    }
+    return posted;
+  }
+
   async publishPendingAttentionEvents(campaignId?: string): Promise<number> {
     const campaigns = this.careerRepository
       .listCampaigns()
@@ -1537,6 +1637,7 @@ export class CareerAgentService {
         jobId: job.id,
         blocker,
         postingCompensation: job.job.compensation,
+        postingUrl: job.job.sourceUrl ?? job.job.applicationUrl,
         createdAt: blocker.createdAt,
         createId: this.createId,
       });
@@ -1574,6 +1675,57 @@ export class CareerAgentService {
       }
     }
     return result;
+  }
+
+  /** Asks which résumé to use when a posting matches two equally; one open question per job. */
+  private async publishResumeChoice(campaignId: string, job: CareerJob, tiedFamilies: readonly ResumeFamilyId[]): Promise<void> {
+    const campaign = this.getCampaign(campaignId);
+    const existing = campaign.attentionEvents?.find((event) => event.type === "resume_choice" && event.status === "open" && event.jobId === job.id);
+    if (existing) {
+      await this.deliverAttentionRecord(existing);
+      return;
+    }
+    const families = tiedFamilies.map((id) => ({ id, label: this.profile.resumeFamilies.find((family) => family.id === id)?.label ?? id }));
+    const generated = attentionEventForResumeChoice({
+      campaignId, jobId: job.id, createdAt: this.now(), createId: this.createId,
+      company: job.job.company, role: job.job.title, families,
+    });
+    this.careerRepository.saveCampaign({ ...campaign, attentionEvents: [...(campaign.attentionEvents ?? []), generated.record], updatedAt: this.now() });
+    await this.deliverAttentionRecord(generated.record);
+  }
+
+  /**
+   * Records the tapped résumé as the job's queue résumé. The runtime then sets
+   * the queue row's Resume Version and puts it back to Ready, and the next run
+   * applies with that résumé (the tie is broken by it, see assessFit).
+   */
+  private resolveResumeChoice(campaign: Campaign, record: PersistedAttentionEvent, response: AttentionResponse): CareerAttentionResponseResult {
+    if (!record.jobId || !record.question) throw new AttentionResponseError("That attention event does not accept a response.");
+    const job = this.getJob(record.jobId);
+    if (record.status === "resolved") {
+      if (record.response?.selectedOption !== response.selectedOption) throw new AttentionResponseError("That attention event was already resolved with a different choice.");
+      return { status: "duplicate", event: publicAttentionEvent(record), careerJob: job };
+    }
+    if (record.status !== "open") throw new AttentionResponseError("That attention event is no longer open.");
+    const option = record.question.options.find((candidate) => candidate.id === response.selectedOption)
+      ?? record.question.options.find((candidate) => candidate.id === optionIdForTypedAnswer(record.question!.options, response.selectedOption));
+    if (!option) throw new AttentionResponseError("Choose one of the listed résumés.");
+    const updatedJob = this.saveJob({
+      ...job,
+      queueResumeFamily: option.id,
+      decisionReason: `Résumé chosen by you: ${option.label}. It starts on the next run.`,
+      updatedAt: this.now(),
+    });
+    const resolvedAt = this.now();
+    const resolved: PersistedAttentionEvent = { ...record, status: "resolved", resolvedAt, response, answerUsed: option.label };
+    const current = this.getCampaign(campaign.id);
+    this.careerRepository.saveCampaign({
+      ...current,
+      attentionEvents: (current.attentionEvents ?? []).map((event) => (event.id === record.id ? resolved : event)),
+      updatedAt: this.now(),
+    });
+    void this.notificationAdapter?.closeAttentionEvent?.(publicAttentionEvent(resolved))?.catch?.(() => undefined);
+    return { status: "resolved", event: publicAttentionEvent(resolved), careerJob: updatedJob };
   }
 
   private async publishConfigurationAttention(
@@ -1667,6 +1819,8 @@ export class CareerAgentService {
                 excludedTitleTerms: cleanList(input.searchCriteria.excludedTitleTerms),
               }
             : {}),
+          ...(input.searchCriteria?.maxYearsExperience !== undefined ? { maxYearsExperience: input.searchCriteria.maxYearsExperience } : {}),
+          ...(input.searchCriteria?.companyApplicationLimit ? { companyApplicationLimit: input.searchCriteria.companyApplicationLimit } : {}),
           ...(input.searchCriteria?.excludedCompanies
             ? {
                 excludedCompanies: cleanList(input.searchCriteria.excludedCompanies),
@@ -1699,6 +1853,9 @@ export class CareerAgentService {
         ...(input.applicationPolicy?.autoPrepare !== undefined ? { autoPrepare: input.applicationPolicy.autoPrepare } : {}),
         ...(input.applicationPolicy?.allowGroundedDrafts !== undefined
           ? { allowGroundedDrafts: input.applicationPolicy.allowGroundedDrafts }
+          : {}),
+        ...(input.applicationPolicy?.reviewModelDrafts !== undefined
+          ? { reviewModelDrafts: input.applicationPolicy.reviewModelDrafts }
           : {}),
         ...(input.applicationPolicy?.approvedResumeFamilies
           ? {
@@ -2249,9 +2406,15 @@ export class CareerAgentService {
       }
     }
 
+    // An older answer to the same form field (one the form rejected) must not
+    // outlive this one: drop it so a later rerun cannot pick it up again. The
+    // attention events keep the full answer history.
+    const superseded = (candidate: CareerBlocker) => candidate.id !== blocker.id &&
+      candidate.status === "resolved" && Boolean(blocker.field) && candidate.field === blocker.field &&
+      candidate.question.trim().toLowerCase() === blocker.question.trim().toLowerCase();
     const resolved: CareerJob = {
       ...job,
-      blockers: job.blockers.map((candidate) =>
+      blockers: job.blockers.filter((candidate) => !superseded(candidate)).map((candidate) =>
         candidate.id === blocker.id
           ? {
               ...candidate,
@@ -2268,6 +2431,7 @@ export class CareerAgentService {
     };
     this.careerRepository.saveJob(resolved);
     await this.recordAttentionResolution(campaign, resolved, blocker, value, options.attentionResponse);
+    if (options.attentionResponse) this.rememberAnswer(blocker, value, "slack");
 
     if (options.deferResume) return resolved;
 
@@ -2397,6 +2561,7 @@ export class CareerAgentService {
     const located = this.findAttentionRecord(response.eventId);
     if (!located) throw new AttentionResponseError("That attention event is unknown.");
     const { campaign, record } = located;
+    if (record.type === "resume_choice") return this.resolveResumeChoice(campaign, record, response);
     if (record.type !== "needs_input" || !record.applicationId || !record.jobId || !record.blockerId || !record.question) {
       throw new AttentionResponseError("That attention event does not accept a response.");
     }
@@ -2417,6 +2582,39 @@ export class CareerAgentService {
       throw new AttentionResponseError("That attention event is no longer open.");
     }
 
+    // One numbered reply answers the whole batch: keep the later answers for
+    // their own questions and continue with answer 1 as the reply to this one.
+    if (record.batch && record.batchBlockerIds && record.batch.length > 1) {
+      const parsed = parseNumberedReply(response.selectedOption, record.batch.length);
+      if (parsed.numbered) {
+        const later: Record<string, string> = {};
+        for (const [number, text] of parsed.answers) {
+          const blockerId = record.batchBlockerIds[number - 1];
+          if (number >= 2 && blockerId) later[blockerId] = text;
+        }
+        this.savePendingBatchAnswers(campaign.id, record.id, later, response.actorIdentity);
+        const first = parsed.answers.get(1);
+        if (first === undefined) {
+          await this.notificationAdapter?.publishInfoNotice?.(
+            `${record.context.company}: saved your answers to ${[...parsed.answers.keys()].sort((a, b) => a - b).join(", ")}. Question 1 still needs one: "${record.question.prompt.slice(0, 140)}". Reply with 1. and the answer.`,
+          ).catch(() => undefined);
+          return { status: "partial", event: publicAttentionEvent(record), careerJob: this.getJob(record.jobId) };
+        }
+        response = { ...response, selectedOption: first };
+      }
+    }
+    // A typed answer to a choice question in a batch names the option by its label.
+    if (record.batch && record.question.kind === "single_choice" && !record.question.options.some((option) => option.id === response.selectedOption)) {
+      const optionId = optionIdForTypedAnswer(record.question.options, response.selectedOption);
+      if (!optionId) {
+        await this.notificationAdapter?.publishInfoNotice?.(
+          `${record.context.company}: "${response.selectedOption.slice(0, 80)}" isn't one of the choices for "${record.question.prompt.slice(0, 120)}" (${record.question.options.map((option) => option.label).join(" / ")}). Reply in that question's thread with 1. and one of them.`,
+        ).catch(() => undefined);
+        throw new AttentionResponseError("That choice is not valid for this attention event.");
+      }
+      response = { ...response, selectedOption: optionId };
+    }
+
     const job = this.getJob(record.jobId);
     if (job.campaignId !== campaign.id || job.applicationId !== record.applicationId || job.status !== "needs_input") {
       throw new AttentionResponseError("That application is no longer eligible for this attention response.");
@@ -2433,6 +2631,10 @@ export class CareerAgentService {
     }
     const applicationPreparationResume = blocker.unit === "application_preparation";
     const hostExecutionResumable = job.execution?.mode === "real_local" && Boolean(job.execution.hostExecutionId);
+    // A refreshed packet (new resume family) has no browser yet. Keep the
+    // answer and start a fresh run instead of discarding the reply.
+    const freshHostStart = !hostExecutionResumable && job.execution?.mode === "real_local" &&
+      job.execution.status === "not_started" && !job.submissionProof && !job.manualSubmissionConfirmation;
     let preparationOnlyResume = false;
     if (!hostExecutionResumable) {
       try {
@@ -2448,7 +2650,7 @@ export class CareerAgentService {
         preparationOnlyResume = false;
       }
     }
-    if (!hostExecutionResumable && !preparationOnlyResume && !applicationPreparationResume) {
+    if (!hostExecutionResumable && !freshHostStart && !preparationOnlyResume && !applicationPreparationResume) {
       throw new AttentionResponseError("That application no longer has a resumable local browser execution.");
     }
 
@@ -2480,7 +2682,9 @@ export class CareerAgentService {
     // inspected option label/value rather than the synthetic Slack ID. Keep
     // canonical yes/no IDs stable for existing boolean answer semantics.
     const blockerValue =
-      record.draft && isDraftApprovalCommand(response.selectedOption)
+      record.question.required === false && /^\s*skip\s*$/i.test(response.selectedOption)
+        ? OPTIONAL_ANSWER_SKIPPED
+        : record.draft && isDraftApprovalCommand(response.selectedOption)
         ? record.draft.answer
         : record.question.kind === "single_choice" && option.id !== option.label.trim().toLowerCase()
           ? option.label
@@ -2490,6 +2694,17 @@ export class CareerAgentService {
     // The adapter keeps historical message timestamps/thread correlations, but
     // must not carry the previous question's root into the next publication.
     this.notificationAdapter?.startFreshApplicationReview?.(record.applicationId);
+    // The Slack prompt says "reply DONE and I'll mark it Applied": the user has
+    // seen the provider's success page, so record that confirmation directly.
+    // Re-inspecting the page instead finds no form (it is the success page)
+    // and turns the confirmation into a new, confusing question.
+    if (this.confirmPostSubmitDone && isPostSubmitHumanCheck(blocker) && response.selectedOption.trim().toUpperCase() === "DONE") {
+      const applied = await this.confirmPostSubmitDone(campaign.id, job.id);
+      await this.recordAttentionResolution(campaign, job, blocker, response.selectedOption, response);
+      this.markAttentionEventsForJob(campaign.id, job.id, "cancelled");
+      const confirmedRecord = this.getCampaign(campaign.id).attentionEvents?.find((candidate) => candidate.id === record.id) ?? record;
+      return { status: "resolved", event: publicAttentionEvent(confirmedRecord), careerJob: applied };
+    }
     const resolved = await this.resolveCareerBlocker(campaign.id, job.id, blocker.id, blockerValue, { attentionResponse: response });
     // Preparation-only background executors re-inspect through the existing
     // service resume path. A real execution host owns its live session and
@@ -2509,7 +2724,7 @@ export class CareerAgentService {
     // session after DONE. The durable submission fence remains authoritative:
     // any resumed execution that reaches the submission lane cannot claim or
     // cross an already-used fence, so this never creates a second Submit click.
-    if (hostExecutionResumable && (blocker.resumeAfterHuman !== false || postSubmitVerification)) {
+    if ((hostExecutionResumable || freshHostStart) && (blocker.resumeAfterHuman !== false || postSubmitVerification)) {
       const current = this.getJob(job.id);
       const nextBlocker = this.nextAttentionBlocker(this.getCampaign(campaign.id), current);
       if (nextBlocker) {
@@ -2523,6 +2738,11 @@ export class CareerAgentService {
           await this.notificationAdapter?.publishExpiredSessionNotice?.(publicAttentionEvent(record));
         }
       }
+    }
+    if (blockerValue !== OPTIONAL_ANSWER_SKIPPED) {
+      // One answer, every waiting form that asks it: carrying it over must
+      // never fail the answer that was just accepted.
+      await this.carryAnswerToWaitingJobs(campaign.id, job.id, blocker, blockerValue).catch(() => undefined);
     }
     const updatedCampaign = this.getCampaign(campaign.id);
     const updatedRecord = updatedCampaign.attentionEvents?.find((candidate) => candidate.id === record.id) ?? record;
@@ -2592,7 +2812,7 @@ export class CareerAgentService {
     const currentApplication = this.applicationService.getApplication(job.applicationId);
     if (currentApplication.submissionProof || currentApplication.status === "applied") throw new Error("A proof-bearing application cannot be refreshed.");
     const refreshedFit = trustedQueueFitAssessment(
-      await this.applicationService.assessJob(job.job),
+      await this.applicationService.assessJob(job.job, { preferredResumeFamily: canonicalQueueResumeFamily(job.queueResumeFamily) }),
       Boolean(job.queueSelected),
       job.queueFit,
       job.queuePriority,
@@ -2824,10 +3044,13 @@ export class CareerAgentService {
       throw new Error("Recovery is forbidden when any submission proof exists.");
     }
     if (application.status !== "ready_for_review") throw new Error("Recovery requires the application packet to remain ready for review.");
+    // The same explicit assertion also covers the safer case where the
+    // executor reports it never clicked Submit (a pre-click check stopped it).
     const blocker = job.blockers.find((candidate) => candidate.status === "open" &&
       candidate.kind === "external_verification" && candidate.unit === "submission" &&
       candidate.field === "submission-confirmation" && candidate.resumeAfterHuman === false &&
-      candidate.evidence.some((evidence) => evidence === "submit:clicked" || evidence.includes("submit:clicked;")));
+      candidate.evidence.some((evidence) => evidence === "submit:clicked" || evidence.includes("submit:clicked;") ||
+        evidence === "submit:not-clicked" || evidence.includes("submit:not-clicked;")));
     const execution = job.execution;
     const historicalBlocker = job.blockers.find((candidate) => candidate.status === "resolved" &&
       candidate.kind === "external_verification" && candidate.unit === "submission" &&
@@ -2993,14 +3216,21 @@ export class CareerAgentService {
    * manual Submit boundary. This is the only Career Agent path that turns a
    * ready-to-submit packet into Applied without executor submission proof.
    */
-  async confirmManualApplication(campaignId: string, jobId: string, submissionAuthority?: DurableSubmissionAuthority): Promise<CareerJob> {
+  /**
+   * `fromReceipt`: the employer's "thanks for applying" email is the proof.
+   * It also confirms a job still waiting on questions, which the candidate
+   * answered in the form themselves; those questions close as answered by
+   * hand and are never saved as reusable answers.
+   */
+  async confirmManualApplication(campaignId: string, jobId: string, submissionAuthority?: DurableSubmissionAuthority, options: { fromReceipt?: boolean } = {}): Promise<CareerJob> {
     const campaign = this.getCampaign(campaignId);
     const job = this.getJob(jobId);
     if (job.campaignId !== campaignId) throw new Error("That job does not belong to the selected campaign.");
     if (job.status === "applied") return job;
-    const ambiguousBlocker = job.blockers.find((candidate) => candidate.status === "open" && candidate.kind === "external_verification" && candidate.unit === "submission" && candidate.field === "submission-confirmation" && candidate.resumeAfterHuman === false);
+    const ambiguousBlocker = job.blockers.find((candidate) => candidate.status === "open" && isPostSubmitHumanCheck(candidate));
     const unknownRecovery = job.status === "needs_input" && Boolean(ambiguousBlocker);
-    if (job.status !== "ready_to_submit" && !unknownRecovery) throw new Error("Only a prepared or explicitly unknown application stopped at the manual Submit boundary can be marked Applied.");
+    const finishedByHand = options.fromReceipt === true && job.status === "needs_input" && !unknownRecovery;
+    if (job.status !== "ready_to_submit" && !unknownRecovery && !finishedByHand) throw new Error("Only a prepared or explicitly unknown application stopped at the manual Submit boundary can be marked Applied.");
     if (!job.applicationId) throw new Error("The career job has no application packet to mark Applied.");
 
     const application = this.applicationService.getApplication(job.applicationId);
@@ -3020,13 +3250,17 @@ export class CareerAgentService {
     const evidence = appliedApplication.manualSubmissionConfirmation;
     if (!evidence) throw new Error("The manual submission confirmation was not persisted.");
 
+    const openBeforeConfirm = new Set(job.blockers.filter((blocker) => blocker.status === "open").map((blocker) => blocker.id));
     let applied = this.saveJob({
       ...job,
       status: "applied",
       manualSubmissionConfirmation: evidence,
       blockers: this.mergeBlockers(job, [], application.id).map((blocker) => ambiguousBlocker && blocker.id === ambiguousBlocker.id
         ? { ...blocker, status: "resolved" as const, resolvedAt: this.now(), value: "user_confirmed_external_success" }
-        : blocker),
+        : finishedByHand && openBeforeConfirm.has(blocker.id)
+          ? { ...blocker, status: "resolved" as const, resolvedAt: this.now(), value: "answered_by_candidate_in_form",
+            evidence: [...blocker.evidence, "answer-provider:candidate-in-form"] }
+          : blocker),
       trackerFailureReason: undefined,
       trackerSync: {
         status: "pending",
@@ -3038,6 +3272,21 @@ export class CareerAgentService {
     this.appendEvent(campaign.id, "application.applied", careerEventMetadata(applied, undefined, "manual"));
     applied = await this.syncTrackerForAppliedJob(campaign, applied, appliedApplication, evidence, "tracker.update_started");
     return applied;
+  }
+
+  /**
+   * After a "thanks for applying" email confirmed a job, close its open Slack
+   * questions (the DONE prompt or the Submit review) and log which email it was.
+   */
+  recordReceiptConfirmation(campaignId: string, jobId: string, receipt: { subject: string; receivedAt: string }): void {
+    const job = this.getJob(jobId);
+    if (job.campaignId !== campaignId || job.status !== "applied") throw new Error("Only an Applied job can record a receipt confirmation.");
+    this.markAttentionEventsForJob(campaignId, jobId, "cancelled");
+    this.appendEvent(campaignId, "application.receipt_confirmed", {
+      ...careerEventMetadata(job),
+      emailSubject: receipt.subject.slice(0, 120),
+      emailReceivedAt: receipt.receivedAt,
+    });
   }
 
   /** Correct an explicitly identified false manual-submission confirmation. */
@@ -3108,6 +3357,13 @@ export class CareerAgentService {
         attentionEvents: updated,
         updatedAt: this.now(),
       });
+      // Take the buttons off the Slack message too: a cancelled question kept
+      // its live buttons (Samsara, 2026-11-12). Best effort.
+      for (const event of updated) {
+        if (event.status !== "open" && attentionEvents.find((before) => before.id === event.id)?.status === "open" && event.publishedAt) {
+          void this.notificationAdapter?.closeAttentionEvent?.(publicAttentionEvent(event))?.catch?.(() => undefined);
+        }
+      }
     }
   }
 
@@ -3207,13 +3463,160 @@ export class CareerAgentService {
     }
   }
 
+  /**
+   * Save the candidate's answer to an employer's form question so the next
+   * form asking the same thing is filled from it. High-risk questions,
+   * opaque labels, and essays are never saved.
+   */
+  private rememberAnswer(blocker: CareerBlocker, value: AnswerValue, source: "slack" | "history"): void {
+    if (!this.answerBank || blocker.unit !== "submission" || questionProvenanceForBlocker(blocker) !== "ATS_FORM") return;
+    const question = questionFromBlocker(blocker);
+    if (!isBankableQuestion(question, value)) return;
+    try {
+      this.answerBank.save(withRecordedAnswer(this.answerBank.entries(), {
+        id: this.createId("answer"),
+        key: answerBankKey(question.question, question.company),
+        question: question.question,
+        value,
+        tier: answerRiskTier(question),
+        ...(question.fieldType ? { fieldType: question.fieldType } : {}),
+        ...(question.options ? { options: question.options } : {}),
+        ...(question.company ? { company: question.company } : {}),
+        ...(blocker.context.jobId ? { jobId: blocker.context.jobId } : {}),
+        source,
+        recordedAt: this.now(),
+      }));
+    } catch {
+      // The bank is a convenience: failing to write it never fails the answer.
+    }
+  }
+
+  /**
+   * Fill open employer questions from answers the candidate already gave on
+   * other forms. Each reuse is recorded on the blocker as evidence, so the
+   * history shows which answers came from the bank.
+   */
+  private async autoResolveFromAnswerBank(
+    campaign: Campaign,
+    job: CareerJob,
+    drafts: readonly CareerBlockerDraft[],
+  ): Promise<CareerJob> {
+    if (!this.answerBank) return job;
+    let current = job;
+    for (const draft of drafts) {
+      if (draft.unit !== "submission" || draft.questionProvenance !== "ATS_FORM") continue;
+      const blocker = current.blockers.find(
+        (candidate) => candidate.status === "open" && careerBlockerKey(candidate) === careerBlockerKey(draft),
+      );
+      if (!blocker) continue;
+      let entries;
+      try { entries = this.answerBank.entries(); } catch { return current; }
+      const match = await findAnswerBankMatch(entries, questionFromBlocker(blocker), this.answerBankMatcher,
+        standingRecordsFromJobs(this.careerRepository.listJobs(), current.id));
+      if (!match) continue;
+      current = await this.resolveCareerBlocker(campaign.id, current.id, blocker.id, match.value, {
+        deferResume: true,
+        answerEvidence: [
+          "answer-provider:answer-bank",
+          `answer-bank-entry:${match.entry.id}`,
+          `answer-bank-match:${match.kind}`,
+          `answer-bank-tier:${match.entry.tier}`,
+        ],
+      });
+      try {
+        this.answerBank.save(this.answerBank.entries().map((entry) => entry.id === match.entry.id
+          ? { ...entry, usedCount: (entry.usedCount ?? 0) + 1, lastUsedAt: this.now() }
+          : entry));
+      } catch { /* usage counts are informational */ }
+    }
+    return current;
+  }
+
+  /**
+   * After the candidate answers a form question, answer the same open question
+   * on their other waiting applications. On the same employer an identical
+   * question reuses the answer directly, high-risk facts like a clearance
+   * included, but never salary, essays, legal statements or demographics. Any
+   * other employer goes through the answer bank's usual risk rules. A job left
+   * with nothing to ask resumes in the browser; otherwise its next question is
+   * sent.
+   */
+  private async carryAnswerToWaitingJobs(
+    campaignId: string,
+    sourceJobId: string,
+    sourceBlocker: CareerBlocker,
+    value: AnswerValue,
+  ): Promise<void> {
+    if (sourceBlocker.unit !== "submission" || questionProvenanceForBlocker(sourceBlocker) !== "ATS_FORM") return;
+    const source = questionFromBlocker(sourceBlocker);
+    const sourceKey = answerBankKey(source.question, source.company);
+    const sameEmployerCarries = !CARRY_OVER_EXCLUDED_KINDS.has(sourceBlocker.kind) && source.fieldType !== "textarea" &&
+      !/\b(?:salary|compensation|pay|wage|rate)\b/i.test(source.question);
+    const sameCompany = (left?: string, right?: string) => Boolean(left && right) && left!.trim().toLowerCase() === right!.trim().toLowerCase();
+    const sameOptions = (left?: readonly string[], right?: readonly string[]) =>
+      (left ?? []).map((option) => option.trim().toLowerCase()).sort().join("|") === (right ?? []).map((option) => option.trim().toLowerCase()).sort().join("|");
+    const notices: string[] = [];
+    const waiting = this.careerRepository.listJobs().filter((candidate) =>
+      candidate.id !== sourceJobId && candidate.campaignId === campaignId && candidate.status === "needs_input" && candidate.applicationId);
+    for (const waitingJob of waiting) {
+      let current = waitingJob;
+      const carried: string[] = [];
+      for (const blocker of waitingJob.blockers) {
+        if (blocker.status !== "open" || blocker.unit !== "submission" || questionProvenanceForBlocker(blocker) !== "ATS_FORM" || isPostSubmitHumanCheck(blocker)) continue;
+        const question = questionFromBlocker(blocker);
+        let answer: AnswerValue | undefined;
+        let evidence: string[] = [];
+        if (sameEmployerCarries && sameCompany(question.company, source.company) && blocker.kind === sourceBlocker.kind &&
+          answerBankKey(question.question, question.company) === sourceKey && question.fieldType === source.fieldType &&
+          sameOptions(question.options, source.options)) {
+          answer = value;
+          evidence = ["answer-provider:carry-over", `carried-from-job:${sourceJobId}`, "carry-over-match:same-employer-question"];
+        } else if (this.answerBank) {
+          let entries;
+          try { entries = this.answerBank.entries(); } catch { entries = undefined; }
+          const match = entries ? await findAnswerBankMatch(entries, question, this.answerBankMatcher,
+            standingRecordsFromJobs(this.careerRepository.listJobs(), current.id)) : undefined;
+          // Only the answer just given travels now; older bank entries already
+          // had their chance when this form was first read.
+          if (match && match.entry.jobId === sourceJobId) {
+            answer = match.value;
+            evidence = ["answer-provider:answer-bank", `answer-bank-entry:${match.entry.id}`, `answer-bank-match:${match.kind}`, `answer-bank-tier:${match.entry.tier}`, `carried-from-job:${sourceJobId}`];
+          }
+        }
+        if (answer === undefined) continue;
+        current = await this.resolveCareerBlocker(campaignId, current.id, blocker.id, answer, { deferResume: true, answerEvidence: evidence });
+        carried.push(blocker.question.replace(/\s*\*+\s*$/, "").slice(0, 80));
+      }
+      if (carried.length === 0) continue;
+      const campaign = this.getCampaign(campaignId);
+      const next = this.nextAttentionBlocker(campaign, current);
+      if (next) {
+        await this.publishAttentionForJob(campaign, current);
+      } else if (current.execution?.mode === "real_local") {
+        if (this.resumeAttention) {
+          try { await this.resumeAttention(campaignId, current.id, { verificationHandoff: false }); } catch { /* the job stays waiting; its next Slack answer resumes it */ }
+        }
+      } else if (campaign.status === "active") {
+        const resumed = await this.resumeBlockedJob(campaign, current);
+        if (resumed.careerJob.status === "needs_input") await this.publishAttentionForJob(this.getCampaign(campaignId), resumed.careerJob);
+      }
+      notices.push(`${current.job.company} — ${current.job.title}: ${carried.join("; ")}${next ? "" : " (nothing left to ask, so it's filling the form now)"}`);
+    }
+    if (notices.length > 0) {
+      await this.notificationAdapter?.publishInfoNotice?.(`I used that answer on your other waiting applications too:\n${notices.map((line) => `• ${line}`).join("\n")}`).catch(() => undefined);
+    }
+  }
+
   private async draftAtsAnswerForBlocker(job: CareerJob, blocker: CareerBlocker) {
     if (
       !this.applicationAnswerDraftGenerator ||
       blocker.unit !== "submission" ||
       blocker.kind !== "subjective_answer" ||
       questionProvenanceForBlocker(blocker) !== "ATS_FORM" ||
-      !job.applicationId
+      !job.applicationId ||
+      // A human check ("Which of the following is not a primary color?") is
+      // the candidate's to answer; the model got it wrong anyway.
+      /^\s*human verification\b|\bare you (?:a )?human\b|\bnot a robot\b/i.test(blocker.question)
     )
       return undefined;
     try {
@@ -3243,7 +3646,7 @@ export class CareerAgentService {
     job: CareerJob,
     drafts: readonly CareerBlockerDraft[],
   ): Promise<CareerJob> {
-    if (!campaign.applicationPolicy.allowGroundedDrafts || !this.applicationAnswerDraftGenerator) return job;
+    if (!campaign.applicationPolicy.allowGroundedDrafts || campaign.applicationPolicy.reviewModelDrafts || !this.applicationAnswerDraftGenerator) return job;
 
     let current = job;
     for (const draft of drafts) {
@@ -3268,6 +3671,7 @@ export class CareerAgentService {
           jobId: current.id,
           blocker,
           postingCompensation: current.job.compensation,
+          postingUrl: current.job.sourceUrl ?? current.job.applicationUrl,
           draft: generated,
           createdAt: blocker.createdAt,
           createId: this.createId,
@@ -3320,26 +3724,107 @@ export class CareerAgentService {
     }
 
     if (!blocker) return;
-    const draft = await this.draftAtsAnswerForBlocker(job, blocker);
+    const pending = this.takePendingBatchAnswer(campaign.id, job.id, blocker.id);
+    const draft = pending ? undefined : await this.draftAtsAnswerForBlocker(job, blocker);
     const generated = attentionEventForCareerBlocker({
       campaignId: campaign.id,
       jobId: job.id,
       blocker,
       postingCompensation: job.job.compensation,
+      postingUrl: job.job.sourceUrl ?? job.job.applicationUrl,
       ...(draft ? { draft } : {}),
       createdAt: blocker.createdAt,
       createId: this.createId,
     });
     if (!generated) return;
+    const batch = draft || pending ? undefined : this.batchForJob(currentCampaign, job, blocker);
+    const record: PersistedAttentionEvent = batch
+      ? { ...generated.record, batch: batch.questions, batchBlockerIds: batch.blockerIds }
+      : generated.record;
 
     // Persist the durable event before attempting any external delivery.
     const next = {
       ...currentCampaign,
-      attentionEvents: [...(currentCampaign.attentionEvents ?? []), generated.record],
+      attentionEvents: [...(currentCampaign.attentionEvents ?? []), record],
       updatedAt: this.now(),
     };
     this.careerRepository.saveCampaign(next);
-    await this.deliverAttentionRecord(generated.record);
+    // This question was already answered in an earlier numbered reply: use
+    // that answer through the normal reply path instead of asking again.
+    if (pending && record.question) {
+      const selectedOption = typedAnswerForQuestion(record.question, pending.text);
+      if (selectedOption !== undefined) {
+        try {
+          await this.resolveAttentionResponse({ eventId: record.id, selectedOption, actorIdentity: pending.actor, respondedAt: this.now() });
+          return;
+        } catch {
+          // The saved answer did not fit; ask the question on its own below.
+        }
+      }
+      await this.notificationAdapter?.publishInfoNotice?.(
+        `${job.job.company}: your answer "${pending.text.slice(0, 80)}" didn't fit "${record.question.prompt.slice(0, 120)}", so I'm asking it on its own.`,
+      ).catch(() => undefined);
+    }
+    await this.deliverAttentionRecord(record);
+  }
+
+  /**
+   * Every open question for this application that can be answered in one
+   * numbered reply, in form order, starting with `first`. Undefined when
+   * only one would be listed, so a single question keeps its usual message.
+   */
+  private batchForJob(campaign: Campaign, job: CareerJob, first: CareerBlocker): { questions: AttentionBatchQuestion[]; blockerIds: string[] } | undefined {
+    // A choice question gets its own message with a button per choice: typing a
+    // choice in a numbered reply failed on Samsara's lists (2026-11-12). Only
+    // questions answered by typing are batched.
+    const batchable = (candidate: CareerBlocker) => {
+      const question = !UNBATCHED_BLOCKER_KINDS.has(candidate.kind) ? questionForBlocker(candidate) : undefined;
+      return Boolean(question) && question!.kind !== "single_choice";
+    };
+    if (!batchable(first)) return undefined;
+    const executedAt = job.execution?.updatedAt;
+    const answered = new Set((campaign.attentionEvents ?? [])
+      .filter((event) => event.jobId === job.id && event.status === "resolved" && event.blockerId &&
+        !(executedAt && event.resolvedAt && executedAt > event.resolvedAt))
+      .map((event) => event.blockerId as string));
+    const rest = job.blockers.filter((candidate) => candidate.id !== first.id && candidate.status === "open" && !answered.has(candidate.id) &&
+      attentionDescriptorSignature(candidate, job.job.compensation) !== undefined && batchable(candidate));
+    const members = [first, ...rest].slice(0, MAX_BATCH_QUESTIONS);
+    if (members.length < 2) return undefined;
+    return {
+      questions: members.map((member) => {
+        const question = questionForBlocker(member)!;
+        return { prompt: question.prompt, kind: question.kind, options: question.options, ...(question.required !== undefined ? { required: question.required } : {}) };
+      }),
+      blockerIds: members.map((member) => member.id),
+    };
+  }
+
+  private savePendingBatchAnswers(campaignId: string, eventId: string, answers: Readonly<Record<string, string>>, actor: AttentionActorIdentity): void {
+    if (Object.keys(answers).length === 0) return;
+    const campaign = this.getCampaign(campaignId);
+    this.careerRepository.saveCampaign({
+      ...campaign,
+      attentionEvents: (campaign.attentionEvents ?? []).map((event) => event.id === eventId
+        ? { ...event, pendingBatchAnswers: { ...(event.pendingBatchAnswers ?? {}), ...answers }, batchResponder: actor }
+        : event),
+      updatedAt: this.now(),
+    });
+  }
+
+  /** Remove and return a saved numbered-reply answer for this blocker, if one is waiting. */
+  private takePendingBatchAnswer(campaignId: string, jobId: string, blockerId: string): { text: string; actor: AttentionActorIdentity } | undefined {
+    const campaign = this.getCampaign(campaignId);
+    const source = (campaign.attentionEvents ?? []).find((event) => event.jobId === jobId && event.pendingBatchAnswers?.[blockerId] !== undefined);
+    if (!source || !source.batchResponder) return undefined;
+    const text = source.pendingBatchAnswers![blockerId]!;
+    const { [blockerId]: _used, ...remaining } = source.pendingBatchAnswers!;
+    this.careerRepository.saveCampaign({
+      ...campaign,
+      attentionEvents: (campaign.attentionEvents ?? []).map((event) => event.id === source.id ? { ...event, pendingBatchAnswers: remaining } : event),
+      updatedAt: this.now(),
+    });
+    return { text, actor: source.batchResponder };
   }
 
   /**
@@ -3348,9 +3833,17 @@ export class CareerAgentService {
    * a sequential review again if a browser reinspection re-materializes it.
    */
   private nextAttentionBlocker(campaign: Campaign, job: CareerJob): CareerBlocker | undefined {
+    // An answered question is not asked again while its answer is on the way
+    // to the form. If the form ran after the answer and still reports the
+    // same blocker, the answer did not fit, so the question is asked again.
+    // Only a browser run that has finished after the answer can show the
+    // answer didn't fit; a run still in progress hasn't used it yet.
+    const runFinished = !(job.execution?.mode === "real_local" && ["starting", "inspecting", "executing", "resuming"].includes(job.execution.status ?? ""));
+    const executedAt = runFinished ? job.execution?.updatedAt : undefined;
     const previouslyResolved = new Set(
       (campaign.attentionEvents ?? [])
-        .filter((event) => event.jobId === job.id && event.status === "resolved" && event.blockerId)
+        .filter((event) => event.jobId === job.id && event.status === "resolved" && event.blockerId &&
+          !(executedAt && event.resolvedAt && executedAt > event.resolvedAt))
         .map((event) => event.blockerId as string),
     );
     return job.blockers.find(
@@ -3436,8 +3929,12 @@ export class CareerAgentService {
     if (!record || record.type !== "needs_input" || !record.question) return;
 
     const rawValue = typeof value === "string" ? value.trim() : String(value);
-    const option =
-      record.question.kind === "free_text"
+    // SKIP on an optional question stores the skip marker as the value; the
+    // reply itself was "SKIP", and the event is answered all the same.
+    const skipped = rawValue === OPTIONAL_ANSWER_SKIPPED && suppliedResponse !== undefined && /^\s*skip\s*$/i.test(suppliedResponse.selectedOption);
+    const option = skipped
+      ? { id: suppliedResponse!.selectedOption, label: "SKIP" }
+      : record.question.kind === "free_text"
         ? { id: rawValue, label: rawValue }
         : record.question.options.find(
             (candidate) => candidate.id === rawValue || candidate.label.toLowerCase() === rawValue.toLowerCase(),
@@ -3494,6 +3991,7 @@ export class CareerAgentService {
       jobId: job.id,
       blocker,
       postingCompensation: job.job.compensation,
+      postingUrl: job.job.sourceUrl ?? job.job.applicationUrl,
       createdAt: blocker.createdAt,
       createId: this.createId,
     });
@@ -3575,7 +4073,9 @@ export class CareerAgentService {
                 ? "workday-browser-executor"
                 : job.sourceRecordId?.startsWith("gusto:")
                   ? "gusto-browser-executor"
-                  : "lever-browser-executor";
+                  : job.sourceRecordId?.startsWith("vaia:")
+                    ? "vaia-browser-executor"
+                    : "lever-browser-executor";
       this.appendEvent(campaign.id, "application.execution_host_started", {
         ...careerEventMetadata(marked),
         executionId: snapshot.id,
@@ -3608,10 +4108,20 @@ export class CareerAgentService {
         });
       }
       if (snapshot.result.state === "failed") {
+        const alreadyFailed = job.status === "failed" && job.execution?.hostExecutionId === snapshot.id;
         this.appendEvent(campaign.id, "application.execution_failed", {
           ...careerEventMetadata(marked),
           executionId: snapshot.id,
         });
+        // Ramp (2026-11-09) stopped right after an answer was sent, and Slack
+        // just went quiet. Say so once, with the reason, so it never looks
+        // like the application is still waiting.
+        if (!alreadyFailed) {
+          const reason = snapshot.result.reason.replace(/\s+/g, " ").slice(0, 300);
+          await this.notificationAdapter?.publishInfoNotice?.(
+            `⚠️ ${marked.job.company} — ${marked.job.title}: the application stopped and nothing was submitted.\nReason: ${reason}`,
+          ).catch(() => undefined);
+        }
       }
       return marked;
     }
@@ -3997,8 +4507,14 @@ export class CareerAgentService {
 
     let fit: FitAssessment;
     try {
-      fit = trustedQueueFitAssessment(await this.applicationService.assessJob(existing.job), queueSelected, queueFit, queuePriority, resumeFamily, this.profile);
+      fit = trustedQueueFitAssessment(await this.applicationService.assessJob(existing.job, { preferredResumeFamily: canonicalQueueResumeFamily(resumeFamily) }), queueSelected, queueFit, queuePriority, resumeFamily, this.profile);
     } catch (error) {
+      if (error instanceof ResumeFamilyTieError) {
+        const held = this.saveJob({ ...existing, status: "held", destinationResolution, decisionReason: resumeChoiceReason(error), updatedAt: this.now() });
+        this.appendEvent(campaign.id, "job.held", careerEventMetadata(held, undefined, held.decisionReason));
+        await this.publishResumeChoice(campaign.id, held, error.tiedFamilies);
+        return held;
+      }
       const reason = error instanceof Error ? error.message : "Fit assessment failed.";
       const failed = this.saveJob({
         ...existing,
@@ -4142,18 +4658,33 @@ export class CareerAgentService {
       this.appendEvent(campaign.id, "campaign.review_needed", careerEventMetadata(careerJob, hardFilter));
       return { held: true };
     }
+    // Upstart allows 3 applications per 60 days and declined the 4th (2026-11-11).
+    const companyLimit = campaign.searchCriteria.companyApplicationLimit;
+    const overLimit = companyLimit ? companyLimitReached(careerJob, this.careerRepository.listJobs(), companyLimit, new Date(this.now())) : undefined;
+    if (overLimit) {
+      const reason = `Already ${overLimit.count} application${overLimit.count === 1 ? "" : "s"} to ${overLimit.company} in the last ${overLimit.windowDays} days or in progress (limit ${overLimit.max}).`;
+      careerJob = this.decideJob(careerJob, "rejected", reason);
+      this.appendEvent(campaign.id, "job.rejected", careerEventMetadata(careerJob, { decision: "reject", reason, evidence: [`company-limit:${overLimit.count}/${overLimit.max}`] }));
+      return { rejected: true };
+    }
 
     let fit: FitAssessment;
     try {
       fit = trace
-          ? await trace.measure(`job.fit.${careerJob.id}`, "judgment", () => this.applicationService.assessJob(careerJob.job).then((fit) => trustedQueueFitAssessment(fit, Boolean(scouted.queueSelected), scouted.queueFit, scouted.queuePriority, scouted.queueResumeFamily, this.profile)), {
+          ? await trace.measure(`job.fit.${careerJob.id}`, "judgment", () => this.applicationService.assessJob(careerJob.job, { preferredResumeFamily: canonicalQueueResumeFamily(scouted.queueResumeFamily) }).then((fit) => trustedQueueFitAssessment(fit, Boolean(scouted.queueSelected), scouted.queueFit, scouted.queuePriority, scouted.queueResumeFamily, this.profile)), {
             parentNodeId,
             inputCount: 1,
             outputCount: () => 1,
             metadata: { stage: "job.fit", jobId: careerJob.id },
           })
-        : trustedQueueFitAssessment(await this.applicationService.assessJob(careerJob.job), Boolean(scouted.queueSelected), scouted.queueFit, scouted.queuePriority, scouted.queueResumeFamily, this.profile);
+        : trustedQueueFitAssessment(await this.applicationService.assessJob(careerJob.job, { preferredResumeFamily: canonicalQueueResumeFamily(scouted.queueResumeFamily) }), Boolean(scouted.queueSelected), scouted.queueFit, scouted.queuePriority, scouted.queueResumeFamily, this.profile);
     } catch (error) {
+      if (error instanceof ResumeFamilyTieError) {
+        careerJob = this.decideJob(careerJob, "held", resumeChoiceReason(error));
+        this.appendEvent(campaign.id, "job.held", careerEventMetadata(careerJob, undefined, careerJob.decisionReason));
+        await this.publishResumeChoice(campaign.id, careerJob, error.tiedFamilies);
+        return { held: true };
+      }
       const reason = error instanceof Error ? error.message : "Fit assessment failed.";
       careerJob = this.decideJob(careerJob, "failed", reason);
       this.appendEvent(campaign.id, "application.failed", careerEventMetadata(careerJob, undefined, reason));
@@ -4363,7 +4894,12 @@ export class CareerAgentService {
           careerEventMetadata(careerJob, undefined, String(preparationDrafts.length)),
         );
         this.appendEvent(campaign.id, "campaign.review_needed", careerEventMetadata(careerJob, undefined, "application_preparation"));
-        await this.publishAttentionForJob(campaign, careerJob);
+        // A queue job's generic placeholders (pay, relocation, travel,
+        // demographics, legal) are dropped a moment later, once the browser
+        // reads the real form and asks its actual questions. Posting them
+        // first left a stray five-question Slack message on every application.
+        const placeholdersOnly = careerJob.queueSelected === true && preparationDrafts.every((draft) => GENERIC_PREPARATION_FIELDS.has(draft.field ?? ""));
+        if (!placeholdersOnly) await this.publishAttentionForJob(campaign, careerJob);
         return { blocked: true };
       }
 
@@ -4487,6 +5023,11 @@ export class CareerAgentService {
       override.result !== undefined
         ? override.manualSubmission !== true && (override.result.state !== "submitted" || campaign.submissionPolicy.authority !== "automatic")
         : this.executor.executionMode?.(executionRequest) === "preparation_only";
+    // A submit from the host's explicit manual lane was approved by the human
+    // at click time, so the campaign's automatic-submission authority does not
+    // gate it. Proof is still checked below like any other submission.
+    const humanApprovedSubmission = override.result?.state === "submitted" && override.manualSubmission === true;
+    const policyAllowsPreparedOnly = preparationOnly || humanApprovedSubmission;
     const gate = trace
       ? trace.measureSync(
           `execution.policy-check.${careerJob.id}`,
@@ -4498,7 +5039,7 @@ export class CareerAgentService {
               campaign.submissionPolicy,
               campaign,
               resolvedKinds,
-              preparationOnly,
+              policyAllowsPreparedOnly,
             ),
           {
             parentNodeId,
@@ -4517,7 +5058,7 @@ export class CareerAgentService {
           campaign.submissionPolicy,
           campaign,
           resolvedKinds,
-          preparationOnly,
+          policyAllowsPreparedOnly,
         );
 
     if (!gate.allowed) {
@@ -4711,6 +5252,7 @@ export class CareerAgentService {
         });
       }
 
+      blocked = await this.autoResolveFromAnswerBank(campaign, blocked, drafts);
       blocked = await this.autoResolveGroundedAtsBlockers(campaign, blocked, drafts);
       const openDrafts = drafts.filter((draft) =>
         blocked.blockers.some((candidate) => candidate.status === "open" && careerBlockerKey(candidate) === careerBlockerKey(draft)),

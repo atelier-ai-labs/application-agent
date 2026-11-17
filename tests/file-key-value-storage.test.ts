@@ -74,3 +74,40 @@ describe("durable local state failures", () => {
     expect(new DurableSubmissionAuthority("nested-lock-worker", { storage: persisted }).get("application-nested", "job-nested")?.state).toBe("unknown");
   });
 });
+
+describe("two processes sharing the state file", () => {
+  it("keeps a key another process wrote when this one saves a different key", () => {
+    const { path } = location();
+    const host = new FileKeyValueStorage(path);
+    const listener = new FileKeyValueStorage(path);
+    host.setItem("fence", "claimed");
+    listener.setItem("jobs", "[]");
+    expect(new FileKeyValueStorage(path).getItem("fence")).toBe("claimed");
+    expect(listener.getItem("fence")).toBe("claimed");
+    host.removeItem("missing");
+    expect(new FileKeyValueStorage(path).getItem("jobs")).toBe("[]");
+  });
+
+  it("reads another process's change to the same list before changing one record in it", () => {
+    // Affirm (2026-11-10): the listener wrote back a stale job list.
+    const { path } = location();
+    const cli = new FileKeyValueStorage(path);
+    const listener = new FileKeyValueStorage(path);
+    cli.setItem("jobs", JSON.stringify({ affirm: "ready_to_submit", latitude: "executing" }));
+    listener.getItem("jobs");
+    cli.setItem("jobs", JSON.stringify({ affirm: "failed", latitude: "executing" }));
+    const jobs = JSON.parse(listener.getItem("jobs")!);
+    listener.setItem("jobs", JSON.stringify({ ...jobs, latitude: "needs_input" }));
+    expect(JSON.parse(new FileKeyValueStorage(path).getItem("jobs")!)).toEqual({ affirm: "failed", latitude: "needs_input" });
+  });
+
+  it("keeps a fence claimed in another process while a submission is approved", () => {
+    const { path } = location();
+    const hostAuthority = new DurableSubmissionAuthority("host", { storage: new FileKeyValueStorage(path) });
+    const listener = new FileKeyValueStorage(path);
+    listener.getItem("anything");
+    const fence = hostAuthority.claim("application-1", "job-1", new Date().toISOString());
+    listener.setItem("atelier.application-agent.career-jobs.v0", "[]");
+    expect(() => hostAuthority.beforeClick(fence, new Date().toISOString())).not.toThrow();
+  });
+});

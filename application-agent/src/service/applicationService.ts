@@ -2,6 +2,7 @@ import {
   blockersFromAnswers,
   prepareApplicationAnswers,
 } from "../domain/answers";
+import type { AssessFitOptions } from "../domain/fit";
 import { createApplicationEvent } from "../domain/events";
 import type { ExecutionTraceBuilder } from "../domain/executionTrace";
 import { assertTransition } from "../domain/lifecycle";
@@ -149,8 +150,8 @@ export class ApplicationService {
     return updated;
   }
 
-  async assessJob(job: JobPosting): Promise<FitAssessment> {
-    return this.model.assessFit(job, this.profile);
+  async assessJob(job: JobPosting, options?: AssessFitOptions): Promise<FitAssessment> {
+    return this.model.assessFit(job, this.profile, options);
   }
 
   async evaluateApplication(applicationId: string, knownFit?: FitAssessment): Promise<Application> {

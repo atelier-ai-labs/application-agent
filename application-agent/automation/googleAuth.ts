@@ -2,6 +2,7 @@ import { loadEnv } from "vite";
 import {
   authorizeGoogleSheets,
   googleOAuthClientFile,
+  googleOAuthScopes,
   googleOAuthTokenFile,
   type GoogleAuthEnvironment,
 } from "./googleOAuth";
@@ -22,6 +23,7 @@ try {
   const result = await authorizeGoogleSheets({
     clientFile: googleOAuthClientFile(environment),
     tokenFile: googleOAuthTokenFile(environment),
+    scopes: googleOAuthScopes(environment),
   });
   console.log(`[career-agent-google-auth] stored server-side credentials at ${result.tokenFile}`);
   console.log(`[career-agent-google-auth] callback used ${result.callbackUri}`);

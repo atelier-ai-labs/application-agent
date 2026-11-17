@@ -52,6 +52,18 @@ class DomLocator {
     (this.elements[0] as HTMLElement | undefined)?.click();
   }
 
+  async fill(value: string): Promise<void> {
+    const input = this.elements[0] as HTMLInputElement | undefined;
+    if (input) input.value = value;
+  }
+
+  async pressSequentially(value: string): Promise<void> {
+    const input = this.elements[0] as HTMLInputElement | undefined;
+    if (!input) return;
+    input.value += value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
   async press(key: string): Promise<void> {
     (this.elements[0] as HTMLElement | undefined)?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
   }
@@ -107,7 +119,7 @@ class DomPage {
 
   async waitForSelector(): Promise<void> {}
 
-  async waitForTimeout(): Promise<void> {}
+  async waitForTimeout(): Promise<void> { await new Promise((resolve) => setTimeout(resolve, 5)); }
 
   async waitForLoadState(): Promise<void> {}
 
@@ -115,6 +127,10 @@ class DomPage {
 
   async evaluate<R>(callback: (arg?: unknown) => R, arg?: unknown): Promise<R> {
     return callback(arg);
+  }
+
+  frames(): unknown[] {
+    return [];
   }
 
   keyboard = { press: async (): Promise<void> => {} };
@@ -134,13 +150,14 @@ class DomPage {
   }
 }
 
-function sessionForDocument(currentPageUrl?: string): PlaywrightLeverBrowserSession {
+function sessionForDocument(currentPageUrl?: string, securityCodeProvider?: (since: number) => Promise<string | undefined>): PlaywrightLeverBrowserSession {
   return new PlaywrightLeverBrowserSession(
     new DomPage(currentPageUrl) as unknown as Page,
     {} as BrowserContext,
     {} as Browser,
     5_000,
     {},
+    securityCodeProvider,
   );
 }
 
@@ -201,6 +218,107 @@ describe("Rippling Playwright DOM integration", () => {
     expect(result.clicked).toBe(false);
     expect(result.evidence).toContain("invalid-control:ordinal-0");
     expect(clicks).toBe(0);
+  });
+
+  it("does not block Submit on Greenhouse's provider-validated controls", async () => {
+    let clicks = 0;
+    const box = (value: string, checked: boolean) =>
+      `<input type="checkbox" name="question_1[]" id="question_1[]_${value}" value="${value}" required${checked ? " checked" : ""}>`;
+    document.body.innerHTML = `<form>
+      <input role="combobox" id="gender" value=""><input required tabindex="-1" aria-hidden="true" class="remix-requiredInput" value="">
+      <fieldset class="checkbox" aria-required="true"><legend>Location Preference</legend>${box("austin", false)}${box("remote", true)}</fieldset>
+      <button type="submit">Submit</button><p>Application submitted</p></form>`;
+    document.querySelector("button")?.addEventListener("click", (event) => { event.preventDefault(); clicks += 1; });
+    const result = await sessionForDocument("https://example.invalid/confirmation").submit();
+    expect(result).toMatchObject({ clicked: true, confirmed: true });
+    expect(clicks).toBe(1);
+  });
+
+  it("still blocks Submit on a checkbox group with nothing checked", async () => {
+    let clicks = 0;
+    document.body.innerHTML = `<form><input type="checkbox" name="question_2[]" value="a" required><input type="checkbox" name="question_2[]" value="b" required><button type="submit">Submit</button></form>`;
+    document.querySelector("button")?.addEventListener("click", () => { clicks += 1; });
+    const result = await sessionForDocument().submit();
+    expect(result.clicked).toBe(false);
+    expect(clicks).toBe(0);
+  });
+
+  it("enters an emailed security code once and confirms the submission", async () => {
+    const entered: string[] = [];
+    document.body.innerHTML = `<form><button type="submit">Submit application</button></form>`;
+    document.querySelector("button")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      document.body.innerHTML = `<form><p>Enter the 8-character security code we sent to your email.</p>${
+        Array.from({ length: 8 }, (_, index) => `<input id="security-input-${index}" maxlength="1">`).join("")
+      }<button type="submit">Submit application</button></form>`;
+      document.querySelector("button")?.addEventListener("click", (second) => {
+        second.preventDefault();
+        entered.push(Array.from(document.querySelectorAll<HTMLInputElement>("input")).map((input) => input.value).join(""));
+        document.body.innerHTML = "<h1>Thank you for applying.</h1>";
+      });
+    });
+    const result = await sessionForDocument(undefined, async () => "AbC123xY").submit();
+
+    expect(entered).toEqual(["AbC123xY"]);
+    expect(result).toMatchObject({ clicked: true, confirmed: true });
+    expect(result.evidence).toContain("security-code:entered");
+  });
+
+  it("waits for the code boxes when the 'verification code' page renders after Submit (Sparksoft)", async () => {
+    const entered: string[] = [];
+    document.body.innerHTML = `<form><button type="submit">Submit application</button></form>`;
+    document.querySelector("button")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      // The page text arrives first; the inputs render a moment later.
+      document.body.innerHTML = `<p>Please enter the verification code we emailed you to finish your application.</p>`;
+      setTimeout(() => {
+        document.body.innerHTML = `<form><p>Please enter the verification code we emailed you to finish your application.</p>${
+          Array.from({ length: 8 }, (_, index) => `<input id="security-input-${index}" maxlength="1">`).join("")
+        }<button type="submit">Submit application</button></form>`;
+        document.querySelector("button")?.addEventListener("click", (second) => {
+          second.preventDefault();
+          entered.push(Array.from(document.querySelectorAll<HTMLInputElement>("input")).map((input) => input.value).join(""));
+          document.body.innerHTML = "<h1>Thank you for applying.</h1>";
+        });
+      }, 1_500);
+    });
+    const result = await sessionForDocument(undefined, async () => "AbC123xY").submit();
+
+    expect(entered).toEqual(["AbC123xY"]);
+    expect(result).toMatchObject({ clicked: true, confirmed: true });
+  }, 15_000);
+
+  it("stops without typing when no security code arrives", async () => {
+    document.body.innerHTML = `<form><button type="submit">Submit application</button></form>`;
+    document.querySelector("button")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      document.body.innerHTML = `<form><p>Enter the security code we emailed you.</p><input id="security-input-0"><button type="submit">Submit application</button></form>`;
+    });
+    const result = await sessionForDocument(undefined, async () => undefined).submit();
+
+    expect(result.confirmed).toBe(false);
+    expect(result.evidence).toContain("security-code:not-received");
+  });
+
+  it("picks Lever's matching location suggestion so selectedLocation is recorded", async () => {
+    document.body.innerHTML = `<form><div class="application-field"><label for="location-input">Current location</label>
+      <input class="location-input" id="location-input" type="text" name="location" required>
+      <input id="selected-location" type="hidden" name="selectedLocation">
+      <div class="dropdown-results"></div></div></form>`;
+    const input = document.querySelector<HTMLInputElement>("#location-input")!;
+    input.addEventListener("input", () => {
+      const results = document.querySelector(".dropdown-results")!;
+      results.innerHTML = ["McDonald, PA, USA", "McDonald, TN, USA"].map((name) => `<div>${name}</div>`).join("");
+      results.querySelectorAll("div").forEach((option) => option.addEventListener("click", () => {
+        input.value = option.textContent ?? "";
+        document.querySelector<HTMLInputElement>("#selected-location")!.value = JSON.stringify({ name: option.textContent });
+      }));
+    });
+    const [field] = await sessionForDocument("https://jobs.lever.co/acme/posting-1/apply").inspectFields();
+    await field!.fill("McDonald, Pennsylvania, USA");
+
+    expect(input.value).toBe("McDonald, PA, USA");
+    expect(document.querySelector<HTMLInputElement>("#selected-location")!.value).toContain("McDonald, PA, USA");
   });
 
   it("allows a valid form to click and confirms the resulting page", async () => {

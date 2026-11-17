@@ -1,5 +1,5 @@
 import { buildDraftAnswer, type AnswerDraftContext } from "./answers";
-import { assessFit } from "./fit";
+import { assessFit, type AssessFitOptions } from "./fit";
 import { pastedJobPostingIngestor } from "./job";
 import { tailorResume } from "./resume";
 import type {
@@ -13,7 +13,7 @@ import type {
 
 export interface ModelClient {
   analyzeJob(input: JobIntakeInput, capturedAt: string): Promise<JobPosting>;
-  assessFit(job: JobPosting, profile: CandidateProfile): Promise<FitAssessment>;
+  assessFit(job: JobPosting, profile: CandidateProfile, options?: AssessFitOptions): Promise<FitAssessment>;
   draftResume(
     job: JobPosting,
     profile: CandidateProfile,
@@ -33,8 +33,8 @@ export class DeterministicModelClient implements ModelClient {
     return pastedJobPostingIngestor.ingest(input, capturedAt);
   }
 
-  async assessFit(job: JobPosting, profile: CandidateProfile): Promise<FitAssessment> {
-    return assessFit(job, profile);
+  async assessFit(job: JobPosting, profile: CandidateProfile, options?: AssessFitOptions): Promise<FitAssessment> {
+    return assessFit(job, profile, options);
   }
 
   async draftResume(

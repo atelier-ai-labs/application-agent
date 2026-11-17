@@ -32,6 +32,7 @@ import type { RipplingPromptCandidate } from "./ripplingDomHelpers";
 import {
   isVerifiedMatlenApplicationUrl,
   isVerifiedProtagonaApplicationUrl,
+  isVerifiedVaiaApplicationUrl,
   isVerifiedRipplingApplicationUrl,
   isVerifiedAshbyApplicationUrl,
   isVerifiedAshbyHostedUrl,
@@ -42,12 +43,19 @@ export interface PlaywrightLeverBrowserOptions {
   headless?: boolean;
   slowMo?: number;
   timeoutMs?: number;
+  /**
+   * Returns the security code an ATS emails after Submit (Greenhouse), or
+   * undefined when none arrives. `since` is the Submit click time (ms epoch).
+   */
+  securityCodeProvider?: (since: number) => Promise<string | undefined>;
 }
 
 interface InspectedRawField {
   index: number;
   id: string;
   label: string;
+  /** Untruncated question title, kept in-process for answer rules only. */
+  fullPrompt?: string;
   type: ApplicationFieldType;
   role?: string;
   required: boolean;
@@ -362,9 +370,36 @@ function visibleFormControl(locator: Locator): Promise<boolean> {
  * filters" and "Apply coupon".
  */
 export function isApplicationDiscoveryControlLabel(value: string): boolean {
-  const normalized = value.replace(/\s+/g, " ").trim().toLowerCase();
+  // Aggregators decorate the control with trailing arrows ("Apply for this role →").
+  const normalized = value.replace(/\s+/g, " ").trim().toLowerCase().replace(/[\s→↗➔➜›»>]+$/u, "");
   if (!normalized || normalized.length > 96) return false;
-  return /^(?:apply|apply now|apply online|apply today|apply for (?:this )?(?:job|role|position)|apply on (?:the )?(?:company|employer) (?:website|site)|start (?:an )?application|begin (?:an )?application)$/.test(normalized);
+  return /^(?:apply|apply now|apply online|apply today|apply for (?:this )?(?:job|role|position)|apply on (?:the )?(?:company|employer|original) (?:website|site)|apply on [a-z0-9-]+(?:\.[a-z0-9-]+)+|start (?:an )?application|begin (?:an )?application)$/.test(normalized);
+}
+
+/** Aggregator controls that gate applying behind the aggregator's own account. */
+export function isAccountGatedApplyLabel(value: string): boolean {
+  const normalized = value.replace(/\s+/g, " ").trim().toLowerCase().replace(/[\s→↗➔➜›»>]+$/u, "");
+  return /^(?:log ?in|sign ?in|sign ?up|register|create (?:an )?account|join)(?: now)? to apply$/.test(normalized);
+}
+
+/** Listings often repeat one Apply link under different labels ("Apply for
+ * this role" / "Apply now"). Links that navigate to the same off-page
+ * destination are one control; buttons and same-page fragment links have no
+ * comparable destination, so their label still distinguishes them. */
+export function applicationDiscoveryControlKey(label: string, href: string | undefined, target: string | undefined, pageUrl: string): string {
+  let destination: string | undefined;
+  try {
+    const parsed = href ? new URL(href, pageUrl) : undefined;
+    const page = new URL(pageUrl);
+    if (parsed) parsed.hash = "";
+    page.hash = "";
+    if (parsed && /^https?:$/.test(parsed.protocol) && parsed.toString() !== page.toString()) destination = parsed.toString();
+  } catch {
+    destination = undefined;
+  }
+  return destination
+    ? `href\u0000${destination}\u0000${target ?? ""}`
+    : `label\u0000${label.toLowerCase()}\u0000${href ?? ""}\u0000${target ?? ""}`;
 }
 
 /** File inputs are frequently visually hidden behind a styled resume dropzone.
@@ -440,13 +475,38 @@ async function interactableOption(locator: Locator): Promise<boolean> {
   }).catch(() => false);
 }
 
+// Options vanish when a menu closes, and Playwright waits the full action
+// timeout (15 s) for a missing element: reading a closed menu's options this
+// way turned Samsara's form into a 23-minute run (2026-11-12). An option is
+// either there now or gone.
+const OPTION_READ_TIMEOUT_MS = 500;
+
 async function exactOptionLabel(locator: Locator): Promise<string> {
-  const accessible = (await locator.getAttribute("aria-label").catch(() => null))?.trim();
-  return (accessible || (await locator.innerText().catch(() => ""))).replace(/\s+/g, " ").trim();
+  const accessible = (await locator.getAttribute("aria-label", { timeout: OPTION_READ_TIMEOUT_MS }).catch(() => null))?.trim();
+  return (accessible || (await locator.innerText({ timeout: OPTION_READ_TIMEOUT_MS }).catch(() => ""))).replace(/\s+/g, " ").trim();
 }
 
 function normalizedOptionLabel(value: string): string {
   return value.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/** Moves the highlight to the option whose text is exactly `label`, then presses Enter. */
+export async function enterOnExactOption(control: Locator, label: string): Promise<boolean> {
+  const target = normalizedOptionLabel(label);
+  for (let step = 0; step < 40; step += 1) {
+    const focused = await control.evaluate((input) => {
+      const id = input.getAttribute("aria-activedescendant");
+      const element = (id ? document.getElementById(id) : null) ?? document.querySelector('[class*="option--is-focused"]');
+      return element ? (element.getAttribute("aria-label") || (element as HTMLElement).innerText || "") : null;
+    }, undefined, { timeout: OPTION_READ_TIMEOUT_MS }).catch(() => null);
+    if (focused !== null && normalizedOptionLabel(focused) === target) {
+      await control.press("Enter");
+      return true;
+    }
+    if (focused === null && step > 0) return false;
+    await control.press("ArrowDown").catch(() => undefined);
+  }
+  return false;
 }
 
 /**
@@ -514,6 +574,13 @@ async function logicalOptionIdentity(locator: Locator): Promise<string | null> {
     return parts.reverse().join("/") || null;
   }).catch(() => null);
 }
+
+/** How long to watch the page for a confirmation after the Submit click. */
+export const SUBMIT_CONFIRMATION_WAIT_MS = 60_000;
+
+/** Provider pages that say, in words, that the application went through. */
+export const SUBMISSION_CONFIRMATION_TEXT =
+  /\b(?:your application (?:has been |was )?(?:successfully )?(?:submitted|received|sent)|application (?:has been |was )?(?:successfully )?(?:submitted|received|sent)|thank(?:s| you) for (?:applying|your application|submitting your application)|you(?:'ve| have) (?:successfully )?applied)\b/i;
 
 function hostnameOf(value: string): string | undefined {
   try {
@@ -625,14 +692,45 @@ export function greenhouseOptionMatches(
     (optionValue !== null && normalize(optionValue) === normalizedDesired) ||
     normalizedText.startsWith(`${normalizedDesired}+`) ||
     normalizedText.startsWith(`${normalizedDesired} +`) ||
-    // Rippling dialing lists: "+1 US - United States" and committed "+1 US"
-    normalizedText.endsWith(` - ${normalizedDesired}`) ||
-    normalizedText.endsWith(`-${normalizedDesired}`) ||
-    normalizedText.includes(` - ${normalizedDesired}`) ||
+    // Rippling dialing lists: "+1 US - United States" and committed "+1 US".
+    // Only for labels that start with a dialing code: "Man" also matched
+    // "Cis-man" and Samsara's gender question committed it (2026-11-12).
+    (/^\+\d/.test(normalizedText) && (
+      normalizedText.endsWith(` - ${normalizedDesired}`) ||
+      normalizedText.endsWith(`-${normalizedDesired}`) ||
+      normalizedText.includes(` - ${normalizedDesired}`))) ||
     (
       (normalizedDesired === "united states" || normalizedDesired === "us" || normalizedDesired === "usa") &&
       /^\+\d+\s+us\b/.test(normalizedText)
     );
+}
+
+const US_STATES: Record<string, string> = {
+  al: "alabama", ak: "alaska", az: "arizona", ar: "arkansas", ca: "california", co: "colorado", ct: "connecticut", de: "delaware",
+  dc: "district of columbia", fl: "florida", ga: "georgia", hi: "hawaii", id: "idaho", il: "illinois", in: "indiana", ia: "iowa",
+  ks: "kansas", ky: "kentucky", la: "louisiana", me: "maine", md: "maryland", ma: "massachusetts", mi: "michigan", mn: "minnesota",
+  ms: "mississippi", mo: "missouri", mt: "montana", ne: "nebraska", nv: "nevada", nh: "new hampshire", nj: "new jersey",
+  nm: "new mexico", ny: "new york", nc: "north carolina", nd: "north dakota", oh: "ohio", ok: "oklahoma", or: "oregon",
+  pa: "pennsylvania", ri: "rhode island", sc: "south carolina", sd: "south dakota", tn: "tennessee", tx: "texas", ut: "utah",
+  vt: "vermont", va: "virginia", wa: "washington", wv: "west virginia", wi: "wisconsin", wy: "wyoming",
+};
+/** A place part and the other ways forms write it: "pa" ~ "pennsylvania", "usa" ~ "united states". */
+const PLACE_ALIASES: Record<string, string[]> = (() => {
+  const aliases: Record<string, string[]> = {};
+  for (const [code, name] of Object.entries(US_STATES)) aliases[code] = aliases[name] = [name, code];
+  for (const name of ["united states", "us", "usa", "united states of america", "u.s."]) aliases[name] = ["united states", "us", "usa", "united states of america", "u.s."];
+  return aliases;
+})();
+
+/**
+ * A typed place ("Pittsburgh, PA") and a rendered typeahead option
+ * ("Pittsburgh, Pennsylvania, United States") name the same place when the
+ * city is the same and every other typed part matches a part of the option.
+ * Ramp's payroll-location box (2026-11-09) failed on exactly this.
+ */
+export function typedPlaceMatchesOption(optionLabel: string, typed: string): boolean {
+  if (!/^[^,]{2,60},\s*[^,]{2,40}(?:,\s*[^,]{2,40})?$/.test(typed.trim())) return false;
+  return greenhouseLocationOptionMatches(optionLabel, typed, typed);
 }
 
 export function greenhouseLocationOptionMatches(optionLabel: string, desiredCity: string, groundedLocation?: string): boolean {
@@ -643,11 +741,20 @@ export function greenhouseLocationOptionMatches(optionLabel: string, desiredCity
   const normalizedCity = normalize(desiredCity.split(",")[0] ?? "");
   if (!normalizedCity || optionParts[0] !== normalizedCity) return false;
   if (!groundedLocation) return true;
-  const aliases: Record<string, string[]> = {
-    pennsylvania: ["pennsylvania", "pa"], pa: ["pennsylvania", "pa"],
-    tennessee: ["tennessee", "tn"], tn: ["tennessee", "tn"],
-    "united states": ["united states", "us", "usa"], us: ["united states", "us", "usa"], usa: ["united states", "us", "usa"],
-  };
+  const aliases = PLACE_ALIASES;
+  // A country-level question ("United States" among country options) matches
+  // when that country is the grounded location's country.
+  // Phone-country lists append the dialing code ("United States +1").
+  if (optionParts.length === 1 && !desiredCity.includes(",")) {
+    // A state-level question ("Which U.S. State or Canadian Province do you
+    // reside in?", Affirm, 2026-11-10) matches the grounded location's state.
+    const groundedRegions = groundedLocation.split(",").map(normalize).filter(Boolean).slice(1);
+    if (US_STATES[normalizedCity] || Object.values(US_STATES).includes(normalizedCity)) {
+      return groundedRegions.some((part) => (aliases[part] ?? [part]).includes(normalizedCity));
+    }
+    const groundedCountry = normalize(groundedLocation.split(",").at(-1) ?? "");
+    return (aliases[groundedCountry] ?? [groundedCountry]).includes(normalizedCity.replace(/\s*\+\d{1,4}$/, ""));
+  }
   return groundedLocation.split(",").map(normalize).filter(Boolean).slice(1).every((part) =>
     optionParts.slice(1).some((candidate) => (aliases[part] ?? [part]).includes(candidate)),
   );
@@ -725,6 +832,7 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
   public readonly section?: string;
   public readonly sourceSelector: string;
   public readonly questionDescriptor?: ApplicationFieldQuestionDescriptor;
+  public readonly fullPrompt?: string;
 
   constructor(
     private readonly page: Page,
@@ -746,6 +854,7 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
     this.questionDescriptor = raw.questionEvidence
       ? questionDescriptorFromEvidence(raw.questionEvidence)
       : undefined;
+    this.fullPrompt = raw.fullPrompt;
   }
 
   private locator(): Locator {
@@ -811,7 +920,52 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
       }
       throw new Error(`The control ${this.id} is not fillable.`);
     }
+    if (await this.isLeverLocationTypeahead(locator)) {
+      await this.fillLeverLocation(locator, value);
+      return;
+    }
     await locator.fill(value);
+  }
+
+  /** Lever's "Current location" box with its hidden selectedLocation companion. */
+  private async isLeverLocationTypeahead(locator: Locator): Promise<boolean> {
+    if (!/(?:^|\.)lever\.co$/i.test(hostnameOf(this.page.url()) ?? "")) return false;
+    return locator.evaluate((element) =>
+      element.classList.contains("location-input") &&
+      Boolean(element.closest(".application-field")?.querySelector('input[type="hidden"][name="selectedLocation"]')),
+    ).catch(() => false);
+  }
+
+  /**
+   * Typing alone leaves Lever's hidden selectedLocation empty, so the form
+   * treats the field as unanswered. Search by city and state, click the one
+   * suggestion that matches the full grounded location, and confirm the
+   * hidden value was set.
+   */
+  private async fillLeverLocation(locator: Locator, value: string): Promise<void> {
+    const query = value.split(",").slice(0, 2).map((part) => part.trim()).filter(Boolean).join(", ");
+    await locator.fill("");
+    await locator.pressSequentially(query, { delay: 30 });
+    // A Lever application has one location typeahead; its suggestions and
+    // hidden value are page-level siblings of the input.
+    const results = this.page.locator(".application-field .dropdown-results > div");
+    let matches: Locator[] = [];
+    for (let attempt = 0; attempt < 40 && matches.length === 0; attempt += 1) {
+      await this.page.waitForTimeout(150);
+      matches = [];
+      for (let index = 0; index < Math.min(await results.count(), 12); index += 1) {
+        const option = results.nth(index);
+        if (greenhouseLocationOptionMatches((await option.innerText().catch(() => "")).trim(), value, value)) matches.push(option);
+      }
+    }
+    if (matches.length !== 1) throw new Error(`The Lever location ${query} did not produce exactly one matching suggestion.`);
+    await matches[0]!.click();
+    const hidden = this.page.locator('.application-field input[type="hidden"][name="selectedLocation"]');
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if ((await hidden.inputValue().catch(() => "")).trim()) return;
+      await this.page.waitForTimeout(100);
+    }
+    throw new Error("Lever did not record the selected location.");
   }
 
   /** Resolve options for this combobox, preferring its explicit ARIA-owned
@@ -951,7 +1105,9 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
       const groundedRepresentative = locationSelection
         ? groundedLocationRepresentative(staticCandidates ?? [], value, context?.groundedLocation)
         : undefined;
-      const staticMatches = groundedRepresentative ? [groundedRepresentative] : staticCandidates;
+      // An exact label always beats a looser match ("Man" over anything else).
+      const exactStatic = staticCandidates?.filter((option) => normalizedOptionLabel(option.label) === normalizedOptionLabel(value));
+      const staticMatches = groundedRepresentative ? [groundedRepresentative] : exactStatic?.length === 1 ? exactStatic : staticCandidates;
       if (context?.groundedLocation && staticMatches && staticMatches.length > 1) {
         const labels = staticMatches.map((option) => option.label.trim()).filter(Boolean).slice(0, 8).join("|");
         throw new Error(`The select option ${value} was not uniquely verified${labels ? `; candidates:${labels}` : ""}.`);
@@ -993,7 +1149,7 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
             if (label) lastRenderedLabels.push(label);
             if (!label || !(locationSelection
               ? greenhouseLocationOptionMatches(label, value, context?.groundedLocation)
-              : greenhouseOptionMatches(label, label, value))) continue;
+              : greenhouseOptionMatches(label, label, value) || typedPlaceMatchesOption(label, value))) continue;
             candidates.push({ label, value: label });
           }
           if (candidates.length === 1) {
@@ -1052,13 +1208,14 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
       }
       if (matchedOption && (allowTypeahead || dynamicOptions)) {
         if (!exactVisibleOptionVerified) throw new Error(`The select option ${value} was not uniquely verified.`);
-        await locator.press("ArrowDown").catch(() => undefined);
-        await locator.press("Enter");
-      } else {
-      if (!exactVisibleOptionVerified) throw new Error(unmatchedSelectOptionMessage(value, lastRenderedLabels));
-      await locator.press("ArrowDown").catch(() => undefined);
-      await locator.press("Enter");
+      } else if (!exactVisibleOptionVerified) {
+        throw new Error(unmatchedSelectOptionMessage(value, lastRenderedLabels));
       }
+      // Never press Enter on whatever happens to be highlighted: typing "Man"
+      // also lists "Cis-man" and "Woman", and a blind ArrowDown+Enter committed
+      // the wrong one on Samsara's gender question (2026-11-12). Step to the
+      // exact option first; if it can't be found, the click retries below run.
+      await enterOnExactOption(locator, matchedOption?.label ?? value);
       for (let attempt = 0; attempt < 20; attempt += 1) {
         if (await isCommitted()) return;
         if (attempt < 19) await this.page.waitForTimeout(50);
@@ -1235,6 +1392,23 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
     if (committed !== value) throw new Error(`The checkbox value for ${this.id} was not committed.`);
   }
 
+  /**
+   * Greenhouse removes its file input once it accepts a file and renders the
+   * filename (with a Remove button) in the field's labelled upload group.
+   * Only that provider-owned receipt, showing the exact filename, counts.
+   */
+  private async greenhouseUploadReceiptShows(inputId: string, path: string): Promise<boolean> {
+    if (!/(?:^|\.)greenhouse\.io$/i.test(hostnameOf(this.page.url()) ?? "")) return false;
+    const expected = (path.split(/[\\/]/).pop() ?? path).trim().toLowerCase();
+    const receipt = this.page.locator(`[aria-labelledby="upload-label-${inputId.replace(/"/g, "")}"] .file-upload__filename`);
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const texts = await receipt.allTextContents().catch(() => [] as string[]);
+      if (texts.some((text) => text.replace(/\s+/g, " ").trim().toLowerCase().includes(expected))) return true;
+      await this.page.waitForTimeout(250);
+    }
+    return false;
+  }
+
   async uploadFile(path: string): Promise<void> {
     const locator = this.locator();
     const isRipplingResume = isVerifiedRipplingApplicationUrl(this.page.url()) && (
@@ -1250,21 +1424,25 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
           return (owner?.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase();
         }).catch(() => "")
       : "";
+    const inputId = await locator.getAttribute("id", { timeout: 2_000 }).catch(() => null);
     await locator.setInputFiles(path);
-    const committed = await locator.evaluate((element, expectedPath) => ({
+    // A provider can remove the input after accepting the file (Greenhouse);
+    // do not wait out the action timeout for an element that is gone.
+    const committed = await locator.count() === 0 ? { fileCount: 0, uploadMarker: false } : await locator.evaluate((element, expectedPath) => ({
       fileCount: element instanceof HTMLInputElement && element.type.toLowerCase() === "file"
         ? (element.files?.length ?? 0)
         : 0,
       // The deterministic DOM harness and a few provider wrappers expose a
       // bounded upload marker instead of a FileList.
       uploadMarker: element.getAttribute("data-uploaded-path") === expectedPath,
-    }), path).catch(() => ({ fileCount: 0, uploadMarker: false }));
+    }), path, { timeout: 5_000 }).catch(() => ({ fileCount: 0, uploadMarker: false }));
     // Rippling replaces its hidden input after accepting a file. In that
     // window Playwright can observe an empty FileList even though the
     // provider has committed the upload and rendered its receipt. Treat that
     // provider-owned receipt as the source of truth, but only for the
     // canonical Rippling resume control (never for arbitrary file fields).
-    if (committed.fileCount !== 1 && !committed.uploadMarker && !isRipplingResume) {
+    if (committed.fileCount !== 1 && !committed.uploadMarker && !isRipplingResume &&
+      !(inputId && await this.greenhouseUploadReceiptShows(inputId, path))) {
       throw new Error(`The uploaded resume was not committed by the form.`);
     }
     if (isRipplingResume && committed.fileCount !== 1 && !committed.uploadMarker) {
@@ -1452,7 +1630,12 @@ class PlaywrightLeverBrowserField implements LeverBrowserField {
       const roots: Element[] = [];
       let currentRoot: Element | null = element;
       for (let depth = 0; currentRoot && depth < 8; depth += 1, currentRoot = currentRoot.parentElement) roots.push(currentRoot);
-      const selectedValue = roots.map((root) => root.querySelector(".select__single-value")?.textContent).find(Boolean);
+      const selectedValue = roots.map((root) => root.querySelector(".select__single-value")?.textContent).find(Boolean) ??
+        // Multi-selects ("select all that apply") show each pick as a chip.
+        // One chip is the value; several are joined, so a single expected
+        // option never matches a mixed selection.
+        roots.map((root) => Array.from(root.querySelectorAll(".select__multi-value__label"))
+          .map((chip) => chip.textContent?.trim() ?? "").filter(Boolean).join(", ")).find(Boolean);
       const selectedOption = roots.map((root) => root.querySelector('[role="option"][aria-selected="true"]')?.textContent).find(Boolean);
       const selectedDataValue = roots.map((root) => root.querySelector('[aria-selected="true"][data-value], [aria-selected="true"][value]')?.getAttribute("data-value") ?? root.querySelector('[aria-selected="true"][value]')?.getAttribute("value")).find(Boolean);
       const hiddenValue = roots.map((root) => root.querySelector('input[type="hidden"][value]')?.getAttribute("value")).find(Boolean);
@@ -1571,6 +1754,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
     private readonly browser: Browser,
     private readonly timeoutMs: number,
     boundaries: BrowserExecutionBoundaryState,
+    private readonly securityCodeProvider?: PlaywrightLeverBrowserOptions["securityCodeProvider"],
   ) {
     this.page.setDefaultTimeout(timeoutMs);
     this.boundaryState = { ...boundaries };
@@ -1646,6 +1830,26 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
     const target = await this.page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.tagName.toLowerCase(), point).catch(() => undefined);
     if (target !== "iframe") throw new Error("The verified tap target is no longer the CAPTCHA iframe.");
     await this.page.mouse.click(point.x, point.y);
+  }
+
+  /**
+   * Remote-viewer input from the user's phone. The viewer is only reachable
+   * while this session waits on the user, so this is the user operating the
+   * page (a Submit tap here is theirs, like a click in the Chromium window).
+   */
+  async handoffInput(input: import("../src/domain/executor").BrowserHandoffInput): Promise<void> {
+    if (this.closed) throw new Error("The browser session is closed.");
+    if (input.type === "tap") {
+      const viewport = this.page.viewportSize();
+      if (viewport && (input.x > viewport.width || input.y > viewport.height)) throw new Error("The tap is outside the page.");
+      await this.page.mouse.click(input.x, input.y);
+    } else if (input.type === "type") {
+      await this.page.keyboard.type(input.text, { delay: 15 });
+    } else if (input.type === "key") {
+      await this.page.keyboard.press(input.key === "Space" ? " " : input.key);
+    } else {
+      await this.page.mouse.wheel(0, input.dy);
+    }
   }
 
   async navigate(url: string): Promise<void> {
@@ -1935,6 +2139,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
     const controls = this.page.locator('a, button, input[type="button"], input[type="submit"], [role="button"]');
     const candidates: { locator: Locator; key: string }[] = [];
     const seen = new Set<string>();
+    let accountGated = false;
     for (let index = 0; index < await controls.count(); index += 1) {
       const candidate = controls.nth(index);
       if (!(await visibleFormControl(candidate)) || !(await candidate.isEnabled().catch(() => true))) continue;
@@ -1955,14 +2160,22 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
         };
       }).catch(() => undefined);
       if (!details || details.insideForm || details.type === "submit" || details.href?.toLowerCase().startsWith("javascript:")) continue;
+      if (details.labels.some((value) => isAccountGatedApplyLabel(value))) accountGated = true;
       const label = details.labels.find((value) => isApplicationDiscoveryControlLabel(value));
       if (!label) continue;
-      const key = `${label.toLowerCase()}\u0000${details.href ?? ""}\u0000${details.target ?? ""}`;
+      const key = applicationDiscoveryControlKey(label, details.href, details.target, this.page.url());
       if (seen.has(key)) continue;
       seen.add(key);
       candidates.push({ locator: candidate, key });
     }
 
+    if (candidates.length === 0 && accountGated) {
+      return {
+        status: "blocked",
+        reason: "The listing site requires you to log in or create an account before applying.",
+        evidence: ["listing-identity:verified", "listing-boundary:account_gated_apply", "apply:not-clicked"],
+      };
+    }
     if (candidates.length === 0) {
       return {
         status: "not_found",
@@ -2161,7 +2374,19 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       };
     }
 
-    if (passwordCount > 0 || /\b(?:sign in|log in|login|multi-factor|mfa|verification code)\b/.test(lowerBody)) {
+    // A job description can say "login" or "MFA" (Affirm's CIAM role, about
+    // building login and MFA, 2026-11-10). With the application form showing
+    // and no password box, those words are the posting, not a login wall. An
+    // emailed verification code still stops here either way.
+    const applicationFormShowing = passwordCount === 0 && await this.page.locator(
+      'input[autocomplete="given-name"], input[name*="first_name" i], input[id*="first_name" i], input[name*="firstname" i], input[id*="firstname" i]',
+    ).evaluateAll((elements) => elements.some((element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    })).catch(() => false);
+    const loginWords = !applicationFormShowing && /\b(?:sign in|log in|login|multi-factor|mfa)\b/.test(lowerBody);
+    if (passwordCount > 0 || loginWords || /\bverification code\b/.test(lowerBody)) {
       return {
         kind: "external_login",
         question: "Authenticate the application session in the browser",
@@ -2499,6 +2724,9 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
         uploadEntryLabel ||
         uploadContainerLabel ||
         control.getAttribute("aria-label")?.trim() ||
+        // aria-labelledby is the accessible label (Vaia's "ZIP code"); a
+        // placeholder is example input ("10001") and must not win over it.
+        ariaLabelledByText ||
         control.getAttribute("placeholder")?.trim() ||
         control.getAttribute("name")?.trim() ||
         control.id.trim() ||
@@ -2651,6 +2879,9 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
           stableSelectorSource = "dom-structure";
         }
       }
+      // Long questions ("we hire in these states: ...") lose their key words
+      // at the 240-character descriptor bound; keep the whole title for rules.
+      const fullPrompt = descriptorText(fieldEntryTitle?.textContent ?? fieldset?.querySelector("legend")?.textContent ?? associated?.textContent, 2_000);
       const isFirstRadioInGroup = type !== "radio" ||
         (control instanceof HTMLInputElement && !control.name) ||
         (control instanceof HTMLInputElement
@@ -2679,6 +2910,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
         ...(uploadEntryLabel || uploadContainerLabel ? { explicitFileLabel: true } : {}),
         ...(Object.keys(questionEvidence).length > 0 ? { questionEvidence } : {}),
         ...(ancestorPromptCandidates.length > 0 ? { ripplingPromptCandidates: ancestorPromptCandidates } : {}),
+        ...(fullPrompt && fullPrompt.length > 240 ? { fullPrompt } : {}),
       }];
     }));
 
@@ -2806,6 +3038,138 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       .toLowerCase().replace(/[^a-z0-9]+/g, " ");
     const terms = `${company} ${role}`.toLowerCase().split(/[^a-z0-9]+/).filter((term) => term.length > 2);
     return terms.length > 0 && terms.every((term) => text.includes(term));
+  }
+
+  /**
+   * Vaia Easy Apply: email gate → résumé upload → details. Only the two intro
+   * steps are completed here, each through one exactly labelled control; the
+   * details step is left for the shared inspection and is never continued.
+   */
+  async prepareVaiaApplication(input: { email: string; resumePath: string; company: string; role: string }): Promise<void> {
+    if (!isVerifiedVaiaApplicationUrl(this.page.url())) throw new Error("The page is not the verified Vaia apply form.");
+    const detailsField = this.page.locator("#f-first");
+    const stepTimeout = Math.max(this.timeoutMs, 30_000);
+    await this.page.locator("#f-email-gate, #f-first").first().waitFor({ state: "visible", timeout: stepTimeout });
+    if (!(await this.verifyPageIdentity(input.company, input.role))) {
+      throw new Error("The Vaia apply form did not visibly name the expected company and role.");
+    }
+    if (await visibleFormControl(detailsField)) return;
+
+    const uniqueButton = async (name: RegExp): Promise<Locator> => {
+      const matches = this.page.getByRole("button", { name });
+      const visible: Locator[] = [];
+      for (let index = 0; index < await matches.count(); index += 1) {
+        if (await visibleFormControl(matches.nth(index))) visible.push(matches.nth(index));
+      }
+      if (visible.length !== 1) throw new Error(`Expected exactly one visible Vaia "${name.source}" control; found ${visible.length}.`);
+      return visible[0]!;
+    };
+
+    const emailField = this.page.locator("#f-email-gate");
+    if (await visibleFormControl(emailField)) {
+      await emailField.fill(input.email);
+      await (await uniqueButton(/^continue$/i)).click();
+    }
+
+    await this.page.getByRole("button", { name: /^upload résumé & start application$/i })
+      .waitFor({ state: "visible", timeout: stepTimeout });
+    const fileInputs = this.page.locator('input[type="file"]:not(#cover-letter-input):not(#certificate-input)');
+    const resumeInputs: Locator[] = [];
+    for (let index = 0; index < await fileInputs.count(); index += 1) {
+      const accept = ((await fileInputs.nth(index).getAttribute("accept")) ?? "").toLowerCase();
+      if (accept.includes(".pdf") && accept.includes(".docx")) resumeInputs.push(fileInputs.nth(index));
+    }
+    if (resumeInputs.length !== 1) throw new Error(`Expected exactly one Vaia résumé input; found ${resumeInputs.length}.`);
+    await resumeInputs[0]!.setInputFiles(input.resumePath);
+    // Vaia may start parsing as soon as a file is chosen (the upload button
+    // disappears) or wait for the explicit upload control; accept either.
+    const uploadButton = this.page.getByRole("button", { name: /^upload résumé & start application$/i });
+    const parseTimeout = Math.max(this.timeoutMs, 60_000);
+    const deadline = Date.now() + parseTimeout;
+    let clickedUpload = false;
+    while (Date.now() < deadline) {
+      if (await visibleFormControl(detailsField)) return;
+      if (!clickedUpload && await uploadButton.count() > 0 && await visibleFormControl(uploadButton.first())) {
+        const button = await uniqueButton(/^upload résumé & start application$/i);
+        if (await button.isEnabled().catch(() => false)) {
+          await button.click();
+          clickedUpload = true;
+        }
+      }
+      await this.page.waitForTimeout(250);
+    }
+    throw new Error("Vaia did not show the details step after the résumé upload.");
+  }
+
+  /**
+   * Vaia details → review: one click on the details step's primary
+   * "Continue". Validation failures are reported, never retried, and the
+   * review step's own control is left for the candidate.
+   */
+  async advanceVaiaToReview(): Promise<void> {
+    if (!isVerifiedVaiaApplicationUrl(this.page.url())) throw new Error("The page is not the verified Vaia apply form.");
+    const detailsField = this.page.locator("#f-first");
+    if (!(await visibleFormControl(detailsField))) throw new Error("Vaia is not on the details step; nothing was clicked.");
+    const primary = this.page.locator("button#v2-cta");
+    if (await primary.count() !== 1 || !(await visibleFormControl(primary))) throw new Error("Vaia's details Continue control was not uniquely visible.");
+    const label = (await primary.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+    if (!/^continue$/i.test(label)) throw new Error(`Vaia's details control read "${label.slice(0, 60)}" instead of Continue; nothing was clicked.`);
+    await primary.click();
+    try {
+      await detailsField.waitFor({ state: "hidden", timeout: Math.max(this.timeoutMs, 30_000) });
+    } catch {
+      const errors = await this.page.locator('[role="alert"], [aria-live="assertive"], .error, .field-error, [class*="error" i]')
+        .allInnerTexts().catch(() => [] as string[]);
+      const visibleErrors = errors.map((text) => text.replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 3).join("; ");
+      throw new Error(`Vaia did not accept the details step${visibleErrors ? `: ${visibleErrors.slice(0, 300)}` : ""}.`);
+    }
+  }
+
+  /**
+   * Vaia review → done. Reached only through the executor's explicit
+   * submitPrepared path (a per-application human approval). Clicks only an
+   * unambiguous submit label and proves success from the rendered Done state.
+   */
+  private async submitVaiaReview(): Promise<BrowserSubmissionResult> {
+    const url = this.page.url();
+    if (await visibleFormControl(this.page.locator("#f-first"))) {
+      return { clicked: false, confirmed: false, evidence: "submit:vaia-not-on-review" };
+    }
+    const primary = this.page.locator("button#v2-cta");
+    if (await primary.count() !== 1 || !(await visibleFormControl(primary))) {
+      return { clicked: false, confirmed: false, evidence: "submit:control-missing" };
+    }
+    const label = (await primary.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+    if (!/^(?:submit|send|apply)(?: (?:my |your |the )?application)?(?: now)?$/i.test(label)) {
+      return { clicked: false, confirmed: false, evidence: `submit:vaia-unexpected-control:${label.slice(0, 60) || "unlabelled"}` };
+    }
+    await primary.click();
+    const done = /application (?:was |has been )?(?:sent|submitted)|thank you for (?:your )?appl|you(?:'|’)ve applied|successfully (?:applied|submitted)/i;
+    const deadline = Date.now() + Math.max(this.timeoutMs, 30_000);
+    while (Date.now() < deadline) {
+      const text = await this.page.locator("body").innerText().catch(() => "");
+      if (done.test(text) && isVerifiedVaiaApplicationUrl(this.page.url())) {
+        const confirmationUrl = this.page.url();
+        const jobId = new URL(confirmationUrl).searchParams.get("job_id") ?? "unknown";
+        return {
+          clicked: true,
+          confirmed: true,
+          outcome: "confirmed",
+          externalApplicationId: `vaia:${jobId}:${new Date().toISOString()}`,
+          confirmationOrigin: new URL(confirmationUrl).origin,
+          confirmationUrl,
+          evidence: "submit:clicked; confirmation:vaia-done",
+        };
+      }
+      await this.page.waitForTimeout(500);
+    }
+    return {
+      clicked: true,
+      confirmed: false,
+      outcome: "ambiguous",
+      reasonCode: "confirmation-missing",
+      evidence: `submit:clicked; confirmation:missing; start-url:${new URL(url).origin}`,
+    };
   }
 
   /** Matlen keeps its application form behind a non-submitting Apply toggle. */
@@ -2939,6 +3303,12 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
   }
 
   private async submitControl(): Promise<Locator | null> {
+    // Vaia marks every wizard button (Close, Back, salutation) type="submit".
+    // Only its primary step control is the form's forward action.
+    if (isVerifiedVaiaApplicationUrl(this.page.url())) {
+      const primary = this.page.locator("button#v2-cta");
+      return await primary.count() === 1 && await visibleFormControl(primary) ? primary : null;
+    }
     const submitInputs = this.page.locator('input[type="submit"], button[type="submit"]');
     for (let index = 0; index < await submitInputs.count(); index += 1) {
       const candidate = submitInputs.nth(index);
@@ -2989,6 +3359,19 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       const candidate = invalidControls.nth(index);
       if (!(await visibleFormControl(candidate))) continue;
       if (evidence.length >= 12) continue;
+      // Not real gaps (Greenhouse): a fieldset is :invalid only through its
+      // controls; an aria-hidden "requiredInput" mirrors a combobox that the
+      // provider validates itself (optional demographics carry one too); and
+      // every box of a multi-choice group is `required` even once one is checked.
+      const providerOwned = await candidate.evaluate((element) => {
+        if (element.tagName === "FIELDSET" || element.getAttribute("aria-hidden") === "true") return true;
+        const input = element as HTMLInputElement;
+        if (input.type === "checkbox" && input.name) {
+          return Array.from(document.getElementsByName(input.name)).some((other) => (other as HTMLInputElement).checked);
+        }
+        return false;
+      }).catch(() => false);
+      if (providerOwned) continue;
       const observation = await candidate.evaluate((element): NativeValidityObservation => {
         const validity = (element as HTMLInputElement).validity;
         const flags = ["valueMissing", "typeMismatch", "patternMismatch", "tooLong", "tooShort", "rangeUnderflow", "rangeOverflow", "stepMismatch", "badInput", "customError"]
@@ -3006,7 +3389,43 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
     return evidence;
   }
 
+  /** The page is asking for a code it emailed (Greenhouse's post-Submit check). */
+  private async pageAsksForEmailedCode(): Promise<boolean> {
+    const body = await this.page.locator("body").innerText({ timeout: 2_000 }).catch(() => "");
+    return /\b(?:security|verification) code\b/i.test(body) && /\b(?:e-?mail(?:ed)?|sent)\b/i.test(body) &&
+      (await this.page.locator('input[type="password"]').count().catch(() => 0)) === 0;
+  }
+
+  /** Visible inputs for an emailed security code (one box, or one box per character). */
+  private async securityCodeInputs(): Promise<Locator[]> {
+    // Code-specific names only ("security clearance" questions also say
+    // "security"), and only when the page is asking for a code.
+    const body = await this.page.locator("body").innerText({ timeout: 2_000 }).catch(() => "");
+    if (!/\b(?:security|verification) code\b/i.test(body)) return [];
+    const candidates = this.page.locator(
+      'input[id^="security-input" i], input[id*="security_code" i], input[id*="security-code" i], ' +
+      'input[name*="security_code" i], input[name*="security-code" i], input[aria-label*="security code" i], ' +
+      'input[aria-label*="verification code" i], input[autocomplete="one-time-code"]',
+    );
+    const visible: Locator[] = [];
+    for (let index = 0; index < Math.min(await candidates.count().catch(() => 0), 12); index += 1) {
+      const candidate = candidates.nth(index);
+      if (await candidate.isVisible().catch(() => false)) visible.push(candidate);
+    }
+    return visible;
+  }
+
+  private async enterSecurityCode(inputs: readonly Locator[], code: string): Promise<void> {
+    const perCharacter = inputs.length > 1 && inputs.length >= code.length;
+    if (!perCharacter) {
+      await inputs[0]!.fill(code);
+      return;
+    }
+    for (let index = 0; index < code.length; index += 1) await inputs[index]!.fill(code[index]!);
+  }
+
   async submit(): Promise<BrowserSubmissionResult> {
+    if (isVerifiedVaiaApplicationUrl(this.page.url())) return this.submitVaiaReview();
     const control = await this.submitControl();
     if (!control) return { clicked: false, confirmed: false, evidence: "submit:control-missing" };
     if (await control.isDisabled().catch(() => true) || (await control.getAttribute("aria-disabled").catch(() => null)) === "true") {
@@ -3035,12 +3454,58 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
     }
 
     await this.page.waitForLoadState("domcontentloaded", { timeout: Math.min(this.timeoutMs, 5_000) }).catch(() => undefined);
-    await this.page.waitForTimeout(Math.min(750, this.timeoutMs));
-    const afterUrl = this.page.url();
-    const bodyText = await this.page.locator("body").innerText({ timeout: this.timeoutMs }).catch(() => "");
-    const confirmationText = /\b(?:your application (?:has been )?submitted|application (?:has been )?submitted|thank you for applying|thanks for applying|application received)\b/i.test(bodyText);
-    const confirmationUrl = /\/(?:confirmation|success|thank[-_]?you)(?:\/|$)/i.test(new URL(afterUrl).pathname);
-    const confirmed = clicked && (confirmationText || confirmationUrl);
+    // Providers can take a while to finish (Ashby runs an invisible reCAPTCHA
+    // before posting; Thumbtack's success page arrived after 20s), so keep
+    // looking for the confirmation instead of reading the page once.
+    let afterUrl = this.page.url();
+    let confirmed = false;
+    let confirmationUrl = false;
+    // Ashby shows its success panel in place: the URL stays on /application.
+    let ashbyInPlace: "ashby-success" | "ashby-form-replaced" | undefined;
+    let securityCode: "entered" | "not-received" | undefined;
+    const clickedAt = Date.now();
+    let deadline = clickedAt + (clicked ? SUBMIT_CONFIRMATION_WAIT_MS : 0);
+    do {
+      // Greenhouse can answer Submit with "enter the security code we
+      // emailed you". Part of the same approved submission: enter the code
+      // once and submit again; never loop on it.
+      if (clicked && !securityCode && this.securityCodeProvider) {
+        const codeInputs = await this.securityCodeInputs();
+        if (codeInputs.length > 0) {
+          const code = await this.securityCodeProvider(clickedAt).catch(() => undefined);
+          if (!code) {
+            securityCode = "not-received";
+            break;
+          }
+          await this.enterSecurityCode(codeInputs, code);
+          const again = await this.submitControl();
+          if (again) await again.click().catch(() => undefined);
+          securityCode = "entered";
+          deadline = Date.now() + 20_000;
+        }
+      }
+      await this.page.waitForTimeout(Math.min(750, this.timeoutMs));
+      afterUrl = this.page.url();
+      const bodyText = await this.page.locator("body").innerText({ timeout: this.timeoutMs }).catch(() => "");
+      const confirmationText = SUBMISSION_CONFIRMATION_TEXT.test(bodyText);
+      confirmationUrl = /\/(?:confirmation|success|thank[-_]?you)(?:\/|$)/i.test(new URL(afterUrl).pathname);
+      const ashbySuccess = await this.page.locator(".ashby-application-form-success-container").count().catch(() => 0) > 0;
+      confirmed = clicked && (confirmationText || confirmationUrl || ashbySuccess);
+      if (confirmed && !confirmationUrl && /(^|\.)ashbyhq\.com$/i.test(new URL(afterUrl).hostname)) {
+        // The rendered success panel, or the submission wording with the form's
+        // Submit control gone, is Ashby's own confirmation for this posting.
+        ashbyInPlace = ashbySuccess ? "ashby-success" : confirmationText && !(await this.submitControl().catch(() => null)) ? "ashby-form-replaced" : undefined;
+      }
+      // A CAPTCHA raised on Submit expires in about two minutes; stop waiting
+      // and hand it to the user now rather than at the end of the wait.
+      // Greenhouse's emailed-code page reads as a login wall ("verification
+      // code") and can render after the first code check; while the code
+      // reader is available and has not run, keep looking for its inputs.
+      if (!confirmed && clicked) {
+        const boundary = await this.detectHumanBoundary().catch(() => null);
+        if (boundary && !(boundary.kind === "external_login" && this.securityCodeProvider && !securityCode && await this.pageAsksForEmailedCode())) break;
+      }
+    } while (!confirmed && Date.now() < deadline);
     if (!confirmed) {
       const postClickBoundary = clicked ? await this.detectHumanBoundary() : null;
       if (postClickBoundary) {
@@ -3088,7 +3553,7 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
         confirmed: false,
         outcome: "ambiguous",
         reasonCode: "confirmation-missing",
-        evidence: clicked ? "submit:clicked; confirmation:not-detected" : "submit:not-clicked; confirmation:not-detected",
+        evidence: `${clicked ? "submit:clicked; confirmation:not-detected" : "submit:not-clicked; confirmation:not-detected"}${securityCode ? `; security-code:${securityCode}` : ""}`,
       };
     }
 
@@ -3100,7 +3565,9 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
       externalApplicationId: `confirmation:${parsed.hostname}${parsed.pathname}`,
       confirmationOrigin: parsed.origin,
       confirmationUrl: parsed.toString(),
-      evidence: confirmationUrl ? "submit:clicked; confirmation:url" : "submit:clicked; confirmation:text",
+      // The path and parameter names (never values) show why a confirmation
+      // was or was not tied to the posting.
+      evidence: `${confirmationUrl ? "submit:clicked; confirmation:url" : ashbyInPlace ? `submit:clicked; confirmation:${ashbyInPlace}` : "submit:clicked; confirmation:text"}${securityCode ? `; security-code:${securityCode}` : ""}; confirmation-path:${parsed.pathname.slice(0, 120)}${[...parsed.searchParams.keys()].length > 0 ? `?${[...new Set(parsed.searchParams.keys())].slice(0, 8).join("&")}` : ""}`,
     };
   }
 
@@ -3114,7 +3581,8 @@ export class PlaywrightLeverBrowserSession implements LeverBrowserSession {
 }
 
 export class PlaywrightLeverBrowserSessionFactory implements LeverBrowserSessionFactory {
-  private readonly options: Required<PlaywrightLeverBrowserOptions>;
+  private readonly options: Required<Omit<PlaywrightLeverBrowserOptions, "securityCodeProvider">>;
+  private readonly securityCodeProvider: PlaywrightLeverBrowserOptions["securityCodeProvider"];
 
   constructor(options: PlaywrightLeverBrowserOptions = {}) {
     this.options = {
@@ -3122,6 +3590,7 @@ export class PlaywrightLeverBrowserSessionFactory implements LeverBrowserSession
       slowMo: options.slowMo ?? 0,
       timeoutMs: options.timeoutMs ?? 15_000,
     };
+    this.securityCodeProvider = options.securityCodeProvider;
   }
 
   async open(_applicationId: string): Promise<LeverBrowserSession> {
@@ -3179,6 +3648,6 @@ export class PlaywrightLeverBrowserSessionFactory implements LeverBrowserSession
       browserLaunched: true,
       contextCreated: true,
       pageCreated: true,
-    });
+    }, this.securityCodeProvider);
   }
 }

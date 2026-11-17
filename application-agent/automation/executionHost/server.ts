@@ -1,3 +1,4 @@
+import { DEFAULT_FORM_SNAPSHOT_DIR } from "../formSnapshots/formSnapshot";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createPlaywrightLeverBrowserExecutor } from "../createLeverBrowserExecutor";
 import type { ApplicationExecutor } from "../../src/domain/executor";
@@ -23,6 +24,8 @@ import {
   type ManualSubmissionApproval,
 } from "./sessionRegistry";
 import { createConfiguredGoogleSheetsJobTracker } from "../googleSheetsJobTracker";
+import { GmailSecurityCodeReader } from "../gmailSecurityCode";
+import { createGoogleOAuthAccessTokenProvider, gmailSecurityCodesEnabled, resolveGoogleAuthMode } from "../googleOAuth";
 import { HandoffBoundary, type HandoffGrant } from "./handoffBoundary";
 import { createHandoffViewerServer, type HandoffViewerServer } from "./handoffViewer";
 import {
@@ -211,7 +214,8 @@ export function createExecutionHostServer(options: ExecutionHostServerOptions): 
       }
 
       if (request.method === "GET" && parts.length === 1 && parts[0] === "health") {
-        sendJson(response, 200, { ok: true, mode: "real_local" }, origin, allowedOrigins);
+        const { active, max } = registry.capacity();
+        sendJson(response, 200, { ok: true, mode: "real_local", activeSessions: active, maxConcurrent: max }, origin, allowedOrigins);
         return;
       }
 
@@ -390,13 +394,26 @@ export function createConfiguredExecutionHostServer(
   options: ConfiguredExecutionHostOptions = {},
 ): ExecutionHostServer {
   const config = resolveExecutionHostConfig(options.env ?? process.env);
+  const env = options.env ?? process.env;
+  // Opt-in (ATELIER_GMAIL_SECURITY_CODES=true plus re-running google-auth):
+  // read Greenhouse's emailed security code so Submit can finish unattended.
+  const tokens = gmailSecurityCodesEnabled(env) && resolveGoogleAuthMode(env).mode === "oauth"
+    ? createGoogleOAuthAccessTokenProvider(env, 10_000)
+    : undefined;
+  const securityCodes = tokens ? new GmailSecurityCodeReader({ accessToken: () => tokens.getAccessToken() }) : undefined;
   const executor = createPlaywrightLeverBrowserExecutor({
     provider: "auto",
     headless: config.headless,
+    ...(config.slowMoMs > 0 ? { slowMo: config.slowMoMs } : {}),
     timeoutMs: config.browserTimeoutMs,
     ...(Object.keys(config.resumePaths).length > 0 ? { resumePaths: config.resumePaths } : {}),
     allowAutomaticSubmission: config.submissionAuthority === "automatic" && !config.preparationOnly,
     ...(options.now ? { now: options.now } : {}),
+    ...(securityCodes ? { securityCodeProvider: (since: number) => securityCodes.waitForCode(since) } : {}),
+    // Each real form's first read is kept (labels and options, never answers) for career-agent:replay.
+    ...((env as Record<string, string | undefined>).ATELIER_FORM_SNAPSHOTS?.trim() === "disabled"
+      ? {}
+      : { formSnapshotDir: (env as Record<string, string | undefined>).ATELIER_FORM_SNAPSHOT_DIR?.trim() || DEFAULT_FORM_SNAPSHOT_DIR }),
   });
   return createExecutionHostServer({
     executor,

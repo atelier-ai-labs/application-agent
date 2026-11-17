@@ -239,9 +239,33 @@ function inferAts(sourceUrl: string | undefined, applicationUrl: string | undefi
   return undefined;
 }
 
-function inferRemoteStatus(text: string): string | undefined {
+/** "3 days a week in the office", "in-office requirement", "hybrid": the job is not remote. */
+const OFFICE_DAYS = /\bhybrid\b|\b(?:\d|one|two|three|four)\+?\s*(?:or more )?days? (?:a|per|each) week (?:in|at|from) (?:the |our |an |one of our )?(?:office|hub|studio)|\bin[- ]office (?:days?|requirement|expectation|policy|presence)\b|\breturn to (?:the )?office\b/;
+/** Wording that makes a job remote even when its location names offices ("SF • NY • United States"). */
+const CLEARLY_REMOTE = /\b(?:fully|100%|completely) remote\b|\bremote[- ]first\b|\bremote(?:ly)? (?:in|within|from anywhere in|anywhere in) (?:the )?(?:us|u\.s\.|usa|united states)\b|\bcan be (?:held|done|performed|based) remotely\b|\bremote[- ]eligible\b|\bopen to (?:fully )?remote\b|\bthis (?:is a |)(?:remote|fully remote) (?:role|position|job)\b/;
+
+/**
+ * Remote, hybrid or on-site. The location line decides when it says so; a
+ * stray "remote" elsewhere in the text does not make an office job remote.
+ * Chime's San Francisco roles mention remote work but require office days,
+ * and passed as remote while any mention counted (2026-11-06).
+ */
+export function inferRemoteStatus(text: string, location?: string): string | undefined {
   const lower = text.toLowerCase();
-  if (lower.includes("hybrid")) return "hybrid";
+  // A source's explicit label ("Remote status: remote", Himalayas) wins.
+  const labeled = /^\s*(?:remote status|workplace(?: type)?):\s*(remote|hybrid|on[- ]?site)\b/m.exec(lower)?.[1];
+  if (labeled) return labeled.startsWith("on") ? "on-site" : labeled;
+  const place = location?.toLowerCase();
+  if (place) {
+    if (/\bhybrid\b/.test(place)) return "hybrid";
+    if (/\b(?:remote|anywhere|distributed|work from home)\b/.test(place)) return "remote";
+    if (/\bon[- ]?site\b/.test(place)) return "on-site";
+    // The location names places only: the text must clearly offer remote work.
+    if (OFFICE_DAYS.test(lower)) return "hybrid";
+    if (CLEARLY_REMOTE.test(lower)) return "remote";
+    return /\bon[- ]?site\b|\bin[- ]office\b/.test(lower) ? "on-site" : undefined;
+  }
+  if (OFFICE_DAYS.test(lower)) return "hybrid";
   if (lower.includes("remote")) return "remote";
   if (lower.includes("on-site") || lower.includes("onsite")) return "on-site";
   return undefined;
@@ -285,7 +309,7 @@ export function normalizeJobPosting(
   const sourceUrl = validOptionalUrl(input.sourceUrl, "Source URL");
   const applicationUrl = validOptionalUrl(input.applicationUrl, "Application URL");
   const location = labelValue(lines, "location");
-  const remoteStatus = inferRemoteStatus(rawText);
+  const remoteStatus = inferRemoteStatus(rawText, location);
   const skills = extractSkills(lines);
   const compensation = input.compensation ?? extractCompensation(rawText);
   const posting: JobPosting = {

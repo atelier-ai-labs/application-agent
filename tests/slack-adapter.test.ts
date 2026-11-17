@@ -92,6 +92,12 @@ function response(status: "resolved" | "duplicate" = "resolved") {
   return async () => ({ status });
 }
 
+const SUBMIT_IDS = {
+  campaign: "campaign-83493d54-f0c4-416d-92ec-3d78848ce38c",
+  job: "career-job-5031ff6a-36f0-4216-8364-00242349e2af",
+  application: "application-2db1933e-dcd8-453f-9423-88dc0e0f5846",
+};
+
 function slackResponse(actionValue = "attention-1|yes", overrides: Record<string, unknown> = {}) {
   return {
     type: "block_actions",
@@ -199,6 +205,40 @@ describe("Slack human-attention adapter", () => {
     expect(requests[0].body).not.toContain("blocker-1");
   });
 
+  it("splits a long list of choices into rows of at most 25 buttons", async () => {
+    const bodies: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        bodies.push(typeof init?.body === "string" ? init.body : "");
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000003" }) } as Response;
+      },
+    });
+    const base = event();
+    const options = Array.from({ length: 30 }, (_, index) => ({ id: `o${index}`, label: `Source ${index}` }));
+    await adapter.publishAttentionEvent({ ...base, question: { ...base.question!, kind: "single_choice", options } });
+    const rows = (JSON.parse(bodies[0]!).blocks as { type: string; elements?: unknown[] }[]).filter((block) => block.type === "actions" && (block.elements ?? []).length > 0);
+    expect(rows.map((row) => row.elements!.length).slice(0, 2)).toEqual([25, 5]);
+  });
+
+  it("links the job posting under the title, and only a safe https link", async () => {
+    // ElevenLabs (2026-11-10): the questions came with no way to read the job.
+    const bodies: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        bodies.push(typeof init?.body === "string" ? init.body : "");
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000002" }) } as Response;
+      },
+    });
+    const base = event();
+    await adapter.publishAttentionEvent({ ...base, context: { ...base.context, postingUrl: "https://jobs.ashbyhq.com/elevenlabs/123" } });
+    const blocks = JSON.parse(bodies[0]!).blocks as { type: string; elements?: { text: string }[] }[];
+    expect(blocks[1]).toEqual({ type: "context", elements: [{ type: "mrkdwn", text: "<https://jobs.ashbyhq.com/elevenlabs/123|View the job posting>" }] });
+    await adapter.publishAttentionEvent({ ...base, id: "attention-2", context: { ...base.context, postingUrl: "javascript:alert(1)" } });
+    expect(bodies[1]).not.toContain("View the job posting");
+  });
+
   it("renders unique option-scoped action IDs and accepts each matching option", async () => {
     const requests: string[] = [];
     const responses: string[] = [];
@@ -245,6 +285,34 @@ describe("Slack human-attention adapter", () => {
     expect(responses).toEqual(["yes", "no"]);
   });
 
+  it("posts a résumé choice with one button per résumé and routes the tap", async () => {
+    const choice: AttentionEvent = {
+      id: "attention-resume-1", type: "resume_choice", source: "career-agent", campaignId: "campaign-1",
+      createdAt: "2026-11-06T22:30:00.000Z", status: "open", title: "📄 Which résumé should I use?", questionProvenance: "POLICY",
+      context: { company: "Span", role: "Platform Engineer" },
+      question: { prompt: "This posting matches Cloud / Platform and AI Platform / Agentic equally.", kind: "single_choice",
+        options: [{ id: "cloud-platform", label: "Cloud / Platform" }, { id: "ai-platform-agentic", label: "AI Platform / Agentic" }] },
+    };
+    const requests: string[] = [];
+    const responses: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      eventLookup: (eventId) => (eventId === choice.id ? choice : undefined),
+      responseHandler: async (input) => { responses.push(input.selectedOption); return { status: "resolved" }; },
+      fetcher: async (_url, init) => { requests.push(String(init?.body ?? "")); return new Response(JSON.stringify({ ok: true, ts: "1700000000.000100" }), { status: 200 }); },
+    });
+    const delivery = await adapter.publishAttentionEvent(choice);
+    expect(delivery).toMatchObject({ messageTs: "1700000000.000100" });
+    const body = JSON.parse(requests[0]!) as { text: string; blocks: Array<{ type: string; elements?: Array<{ text: { text: string }; value: string }> }> };
+    expect(body.text).toContain("Span");
+    expect(body.blocks.find((block) => block.type === "actions")?.elements?.map((element) => element.text.text)).toEqual(["Cloud / Platform", "AI Platform / Agentic"]);
+    await expect(adapter.handleInteraction(slackResponse("attention-resume-1|ai-platform-agentic", {
+      actions: [{ action_id: `${ACTION_ID}_1`, value: "attention-resume-1|ai-platform-agentic" }],
+    }))).resolves.toEqual({ status: "resolved" });
+    await expect(adapter.handleInteraction(slackResponse("attention-resume-1|frontend-software"))).resolves.toEqual({ status: "rejected", reason: "invalid_option" });
+    expect(responses).toEqual(["ai-platform-agentic"]);
+  });
+
   it("keeps the legacy action ID compatible while rejecting unscoped or mismatched generated IDs", async () => {
     const adapter = new SlackNotificationAdapter({
       config,
@@ -275,6 +343,104 @@ describe("Slack human-attention adapter", () => {
     ).resolves.toEqual({ status: "rejected", reason: "unexpected_action" });
   });
 
+  it("posts a pre-submit review with one confirm-gated Submit button for the exact application", async () => {
+    const requests: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        requests.push(typeof init?.body === "string" ? init.body : "");
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000010" }) } as Response;
+      },
+    });
+    // The card's ts lets the Waiting on you board link to it.
+    await expect(adapter.publishSubmissionReview({
+      campaignId: SUBMIT_IDS.campaign, jobId: SUBMIT_IDS.job, applicationId: SUBMIT_IDS.application,
+      company: "Changeis, Inc.", role: "Junior Cloud Engineer", resumeFamily: "cloud-platform",
+      filled: [{ label: "ZIP code", value: "15057" }], leftBlank: ["Street (optional)"],
+    })).resolves.toBe("1710000000.000010");
+    const body = JSON.parse(requests[0]!);
+    expect(JSON.stringify(body)).toContain("ZIP code");
+    expect(JSON.stringify(body)).toContain("15057");
+    const button = body.blocks.find((block: { type: string }) => block.type === "actions").elements[0];
+    expect(button.action_id).toBe("career_agent_submit_prepared");
+    expect(button.value).toBe(`${SUBMIT_IDS.campaign}|${SUBMIT_IDS.job}|${SUBMIT_IDS.application}`);
+    expect(button.confirm.confirm.text).toBe("Submit");
+    await expect(adapter.publishSubmissionReview({
+      campaignId: "campaign-x", jobId: SUBMIT_IDS.job, applicationId: SUBMIT_IDS.application, company: "A", role: "B", filled: [], leftBlank: [],
+    })).rejects.toThrow("exact campaign");
+  });
+
+  it("runs the Submit approval only for the configured user and an exact target, removing the button first", async () => {
+    const requests: string[] = [];
+    const approvals: unknown[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        requests.push(typeof init?.body === "string" ? init.body : "");
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000010" }) } as Response;
+      },
+      submissionApprovalHandler: async (approval) => {
+        approvals.push(approval);
+        return { submitted: true, message: "Submitted: Changeis, Inc. — Junior Cloud Engineer." };
+      },
+    });
+    const value = `${SUBMIT_IDS.campaign}|${SUBMIT_IDS.job}|${SUBMIT_IDS.application}`;
+    const click = (overrides: Record<string, unknown> = {}) => slackResponse(value, {
+      actions: [{ action_id: "career_agent_submit_prepared", value }],
+      container: { message_ts: "1710000000.000010" },
+      ...overrides,
+    });
+
+    await expect(adapter.handleInteraction(click({ user: { id: "U999999" } }))).resolves.toMatchObject({ status: "rejected", reason: "unauthorized_user" });
+    await expect(adapter.handleInteraction(click({ channel: { id: "C999999" } }))).resolves.toMatchObject({ status: "rejected", reason: "unexpected_channel" });
+    await expect(adapter.handleInteraction(slackResponse("campaign-x|y|z", { actions: [{ action_id: "career_agent_submit_prepared", value: "campaign-x|y|z" }] })))
+      .resolves.toMatchObject({ status: "rejected", reason: "malformed_action_value" });
+    expect(approvals).toHaveLength(0);
+
+    await expect(adapter.handleInteraction(click())).resolves.toEqual({ status: "resolved" });
+    expect(approvals).toEqual([{ campaignId: SUBMIT_IDS.campaign, jobId: SUBMIT_IDS.job, applicationId: SUBMIT_IDS.application, actorIdentity: { provider: "slack", userId: "U123456", workspaceId: "T123456" } }]);
+    // First update removes the button before the click; the second reports the result.
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toContain("Submitting");
+    expect(requests[0]).not.toContain("career_agent_submit_prepared");
+    expect(requests[1]).toContain("Submitted: Changeis");
+  });
+
+  it("reports a refused Submit approval without claiming success", async () => {
+    const requests: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        requests.push(typeof init?.body === "string" ? init.body : "");
+        return { ok: true, status: 200, json: async () => ({ ok: true }) } as Response;
+      },
+      submissionApprovalHandler: async () => { throw new Error("Submit requires the retained real local execution to be ready_to_submit."); },
+    });
+    const value = `${SUBMIT_IDS.campaign}|${SUBMIT_IDS.job}|${SUBMIT_IDS.application}`;
+    await expect(adapter.handleInteraction(slackResponse(value, { actions: [{ action_id: "career_agent_submit_prepared", value }], container: { message_ts: "1.2" } })))
+      .resolves.toMatchObject({ status: "rejected", reason: "submission_refused" });
+    expect(requests.at(-1)).toContain("Not submitted");
+  });
+
+  it("posts a link-only queue handoff notice and rejects non-HTTPS links", async () => {
+    const requests: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        requests.push(typeof init?.body === "string" ? init.body : "");
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000009" }) } as Response;
+      },
+    });
+    await adapter.publishQueueHandoffNotice({ jobId: "tracker-url:1", company: "Acme <Corp>", role: "Engineer", url: "https://builtin.com/job/engineer/1", reason: "The listing site requires you to log in or create an account before applying." });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toContain("https://builtin.com/job/engineer/1");
+    expect(requests[0]).toContain("Acme &lt;Corp&gt;");
+    expect(requests[0]).toContain("did not sign in, create an account, or fill anything");
+    expect(requests[0]).not.toContain('"type":"actions"');
+    await expect(adapter.publishQueueHandoffNotice({ jobId: "x", company: "A", role: "B", url: "http://insecure.example/job", reason: "r" })).rejects.toThrow("HTTPS");
+    expect(requests).toHaveLength(1);
+  });
+
   it("publishes a bounded free-text question with a clear threaded-reply action", async () => {
     const requests: string[] = [];
     const adapter = new SlackNotificationAdapter({
@@ -292,6 +458,37 @@ describe("Slack human-attention adapter", () => {
     expect(requests[0]).toContain("What compensation do you expect for this role?");
     expect(requests[0]).toContain("Reply in this Slack thread with one grounded answer.");
     expect(requests[0]).not.toContain('"type":"actions"');
+  });
+
+  it("tells the user an optional free-text question can be skipped", async () => {
+    const requests: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        requests.push(typeof init?.body === "string" ? init.body : "");
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000003" }) } as Response;
+      },
+    });
+    const event = freeTextEvent();
+    await adapter.publishAttentionEvent({ ...event, question: { ...event.question!, required: false } });
+    expect(requests[0]).toContain("This question is optional: reply SKIP to leave it blank.");
+  });
+
+  it("asks to attach a dropped résumé instead of asking for a text answer", async () => {
+    const requests: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      fetcher: async (_input, init) => {
+        requests.push(typeof init?.body === "string" ? init.body : "");
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000004" }) } as Response;
+      },
+    });
+    const event = freeTextEvent();
+    await adapter.publishAttentionEvent({ ...event, blockerType: "resume_missing", question: { ...event.question!, prompt: "Résumé", required: false } });
+    expect(requests[0]).toContain("the page dropped it");
+    expect(requests[0]).toContain("then reply DONE");
+    expect(requests[0]).toContain("reply SKIP to continue without a résumé");
+    expect(requests[0]).not.toContain("one grounded answer");
   });
 
   it("reannounces one buried open question as a fresh top-level message", async () => {
@@ -346,8 +543,12 @@ describe("Slack human-attention adapter", () => {
     expect(requests[0]).toContain("Tell us about a difficult technical problem you solved.");
     expect(requests[0]).toContain("Suggested answer generated locally for your review (not submitted):");
     expect(requests[0]).toContain("I improved service observability by adding runbooks and operational checks.");
-    expect(requests[0]).toContain("Reply APPROVE to use this draft, or reply with your edited answer.");
+    expect(requests[0]).toContain("Tap *Approve draft* (or reply APPROVE) to use this draft, or reply with your edited answer.");
     expect(requests[0]).not.toContain("Your answer is");
+    // The word it asks for is a button too.
+    const blocks = JSON.parse(requests[0]!).blocks as { type: string; elements?: { action_id: string; value: string; text: { text: string } }[] }[];
+    const actions = blocks.find((block) => block.type === "actions");
+    expect(actions?.elements?.map((element) => [element.action_id, element.text.text])).toEqual([["career_agent_quick_reply_APPROVE", "Approve draft"]]);
   });
 
   it("updates an existing Slack attention message in place when a draft is backfilled", async () => {
@@ -387,7 +588,7 @@ describe("Slack human-attention adapter", () => {
     expect(requests[0].input).toContain("chat.postMessage");
     expect(requests[1].input).toContain("chat.update");
     expect(requests[1].body).toContain("I am looking for a role where I can keep growing as an engineer.");
-    expect(requests[1].body).toContain("Reply APPROVE to use this draft, or reply with your edited answer.");
+    expect(requests[1].body).toContain("Tap *Approve draft* (or reply APPROVE) to use this draft, or reply with your edited answer.");
     expect(requests[1].body).not.toContain("chat.postMessage");
   });
 
@@ -571,7 +772,10 @@ describe("Slack human-attention adapter", () => {
     expect(requests).toHaveLength(1);
     expect(JSON.parse(requests[0]).thread_ts).toBeUndefined();
     expect(JSON.parse(requests[0]).text).toContain("reply DONE");
-    expect(JSON.parse(requests[0]).text).toContain("protected browser handoff below");
+    // The handoff link is view-only; the message sends the user to the real window.
+    expect(JSON.parse(requests[0]).text).toContain("agent's Chromium window");
+    expect(JSON.parse(requests[0]).text).toContain("works on your phone");
+    expect(JSON.parse(requests[0]).text).toContain("Open the protected browser handoff");
     expect(JSON.parse(requests[0]).text).not.toContain("open local browser");
     expect(JSON.parse(requests[0]).text).not.toContain("No interactive browser link is provided");
     expect(JSON.parse(requests[0]).unfurl_links).toBe(false);
@@ -582,6 +786,47 @@ describe("Slack human-attention adapter", () => {
       text: "DONE",
     })));
     expect(responses).toEqual(["DONE"]);
+  });
+
+  it("offers Done / Skip as buttons where the message asks for the word, and shows the tap right away", async () => {
+    const requests: { url: string; body: Record<string, unknown> }[] = [];
+    const responses: string[] = [];
+    const captchaEvent: AttentionEvent = {
+      ...freeTextEvent(), id: "attention-captcha-2", blockerType: "captcha",
+      question: { prompt: "Verify you are human", kind: "free_text", options: [] },
+    };
+    const optionalEvent: AttentionEvent = {
+      ...freeTextEvent(), id: "attention-optional-2", blockerType: "subjective_answer",
+      question: { prompt: "What made you decide to apply?", kind: "free_text", options: [], required: false },
+    };
+    const events = new Map([captchaEvent, optionalEvent].map((event) => [event.id, event]));
+    const adapter = new SlackNotificationAdapter({
+      config,
+      eventLookup: (eventId) => events.get(eventId),
+      responseHandler: async ({ selectedOption }) => { responses.push(selectedOption); return { status: "resolved" }; },
+      fetcher: async (input, init) => {
+        requests.push({ url: String(input), body: JSON.parse(typeof init?.body === "string" ? init.body : "{}") });
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: `1710000000.0001${requests.length}` }) } as Response;
+      },
+      handoffUrlForApplication: async () => "https://sample.trycloudflare.com/handoff#token=redacted",
+    });
+    const buttons = (body: Record<string, unknown>) => ((body.blocks as { type: string; elements?: { action_id: string }[] }[])
+      .find((block) => block.type === "actions")?.elements ?? []).map((element) => element.action_id);
+
+    await adapter.publishAttentionEvent(captchaEvent);
+    expect(buttons(requests[0]!.body)).toEqual(["career_agent_quick_reply_DONE"]);
+    await adapter.publishAttentionEvent(optionalEvent);
+    expect(buttons(requests[1]!.body)).toEqual(["career_agent_quick_reply_SKIP"]);
+
+    // A word the message didn't offer is refused; the offered one goes through like a typed reply.
+    expect(await adapter.handleInteraction(slackResponse("attention-captcha-2|APPROVE", { actions: [{ action_id: "career_agent_quick_reply_APPROVE", value: "attention-captcha-2|APPROVE" }] })))
+      .toEqual({ status: "rejected", reason: "invalid_option" });
+    expect(await adapter.handleInteraction(slackResponse("", { actions: [{ action_id: "career_agent_quick_reply_DONE", value: "attention-captcha-2|DONE" }] })))
+      .toEqual({ status: "resolved" });
+    expect(responses).toEqual(["DONE"]);
+    const update = requests.find((request) => request.url.endsWith("chat.update"));
+    expect(JSON.stringify(update?.body)).toContain("You chose *Done*");
+    expect(buttons(update!.body)).toEqual([]);
   });
 
   it("does not post a human-verification alert when its configured handoff URL is unavailable", async () => {
@@ -717,6 +962,32 @@ describe("Slack human-attention adapter", () => {
     });
   });
 
+  it("answers a reply in a non-question thread instead of ignoring it silently", async () => {
+    const requests: Record<string, unknown>[] = [];
+    const responses: string[] = [];
+    const adapter = new SlackNotificationAdapter({
+      config,
+      eventLookup: () => freeTextEvent(),
+      responseHandler: async () => {
+        responses.push("unexpected");
+        return { status: "resolved" };
+      },
+      fetcher: async (_input, init) => {
+        requests.push(JSON.parse(typeof init?.body === "string" ? init.body : "{}"));
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000002" }) } as Response;
+      },
+    });
+    await adapter.publishAttentionEvent(freeTextEvent());
+    // "skip" posted under a different message (a review or "not confirmed" notice).
+    await adapter.handleSocketEnvelope(JSON.stringify(messageEnvelope({ thread_ts: "1710000000.999999", text: "skip" })));
+
+    expect(responses).toEqual([]);
+    const reply = requests.at(-1)!;
+    expect(reply.thread_ts).toBe("1710000000.999999");
+    expect(String(reply.text)).toContain("couldn't match this reply");
+    expect(String(reply.text)).toContain("What compensation do you expect for this role?");
+  });
+
   it("does not create a correlation timestamp when Slack omits the message timestamp", async () => {
     const diagnostics = diagnosticCapture();
     const responses: string[] = [];
@@ -819,6 +1090,41 @@ describe("Slack human-attention adapter", () => {
 
     await adapter.handleSocketEnvelope(JSON.stringify(messageEnvelope({ text: "USD 150000 base salary" })));
     expect(responses).toEqual(["attention-free-text-1:USD 150000 base salary"]);
+  });
+
+  it("posts every question for an application in one numbered message and routes the numbered reply", async () => {
+    const requests: string[] = [];
+    const responses: string[] = [];
+    const batchEvent: AttentionEvent = {
+      ...event(),
+      id: "attention-batch-1",
+      context: { company: "Kapitus", role: "Software Engineer II" },
+      question: { prompt: "Do you hold an active security clearance?", kind: "single_choice", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
+      batch: [
+        { prompt: "Do you hold an active security clearance?", kind: "single_choice", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
+        { prompt: "Which city will you work from?", kind: "free_text", options: [] },
+        { prompt: "Pronouns", kind: "free_text", options: [], required: false },
+      ],
+    };
+    const adapter = new SlackNotificationAdapter({
+      config,
+      eventLookup: (eventId) => (eventId === batchEvent.id ? batchEvent : undefined),
+      responseHandler: async (attentionResponse) => { responses.push(attentionResponse.selectedOption); return { status: "resolved" }; },
+      fetcher: async (_input, init) => {
+        requests.push(typeof init?.body === "string" ? init.body : "");
+        return { ok: true, status: 200, json: async () => ({ ok: true, ts: "1710000000.000002" }) } as Response;
+      },
+    });
+    await adapter.publishAttentionEvent(batchEvent);
+    const posted = JSON.parse(requests[0]!) as { text: string; blocks: unknown[] };
+    expect(posted.text).toContain("3 questions for this application");
+    expect(posted.text).toMatch(/\*1\.\* Do you hold an active security clearance\?\n\s+Choices: Yes · No/);
+    expect(posted.text).toContain("*3.* Pronouns _(optional)_");
+    expect(posted.text).toContain("Reply once in this thread with numbered answers");
+    expect(JSON.stringify(posted.blocks)).not.toContain("\"actions\"");
+    // Question 1 is a choice, but a typed numbered reply still reaches the agent.
+    await adapter.handleSocketEnvelope(JSON.stringify(messageEnvelope({ text: "1. No\n2. Pittsburgh, PA\n3. SKIP" })));
+    expect(responses).toEqual(["1. No\n2. Pittsburgh, PA\n3. SKIP"]);
   });
 
   it("routes an authorized free-text thread reply through the existing response core", async () => {

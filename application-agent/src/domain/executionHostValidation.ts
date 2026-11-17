@@ -150,7 +150,7 @@ function isFieldType(value: unknown): boolean {
 }
 
 function isFieldClassification(value: unknown): boolean {
-  return value === "contact" || value === "linkedin" || value === "website" || value === "resume_upload" || value === "location" ||
+  return value === "contact" || value === "linkedin" || value === "github" || value === "website" || value === "resume_upload" || value === "location" ||
     value === "desired_work_location" || value === "start_availability" ||
     value === "employment_history" || value === "education" || value === "work_authorization" ||
     value === "sponsorship" || value === "salary" || value === "relocation" || value === "travel" ||
@@ -228,6 +228,8 @@ export function isExecutionInspection(value: unknown): value is ExecutionInspect
     isStringArray(value.unresolvedFields) &&
     Array.isArray(value.blockers) && value.blockers.every(isCareerBlockerDraft) &&
     (value.resumeUsed === undefined || isNonEmptyString(value.resumeUsed)) &&
+    (value.reviewSummary === undefined || (Array.isArray(value.reviewSummary) && value.reviewSummary.length <= 40 &&
+      value.reviewSummary.every((entry) => isRecord(entry) && isNonEmptyString(entry.label) && typeof entry.value === "string"))) &&
     isStringArray(value.evidence) &&
     (value.durationMs === undefined || isNonNegativeNumber(value.durationMs)) &&
     (value.domInspectionCount === undefined || isNonNegativeInteger(value.domInspectionCount)) &&

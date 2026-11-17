@@ -1,7 +1,8 @@
 import type { CareerBlocker, CareerBlockerKind, QuestionProvenance } from "./campaignTypes";
 import type { JobCompensation } from "./types";
 
-export type AttentionEventType = "needs_input" | "configuration_required";
+/** `resume_choice`: a posting matched two résumés equally, before any application exists. */
+export type AttentionEventType = "needs_input" | "configuration_required" | "resume_choice";
 export type AttentionEventStatus = "open" | "resolved" | "cancelled" | "expired";
 export type AttentionQuestionKind = "single_choice" | "free_text";
 export type AttentionDeliveryFailureCode = "provider_error" | "unknown";
@@ -24,6 +25,18 @@ export interface AttentionQuestion {
   required?: boolean;
 }
 
+/**
+ * One question in an application's batch: every open question for one
+ * application is listed in a single Slack message and answered with one
+ * numbered reply. Item 1 is always the event's own question.
+ */
+export interface AttentionBatchQuestion {
+  prompt: string;
+  kind: AttentionQuestionKind;
+  options: readonly AttentionOption[];
+  required?: boolean;
+}
+
 /** A local model suggestion shown for human review; it is never an answer approval. */
 export interface AttentionDraft {
   answer: string;
@@ -37,6 +50,8 @@ export interface AttentionEventContext {
   section?: string;
   /** Structured compensation copied from the job posting, never a candidate answer. */
   postingCompensation?: JobCompensation;
+  /** The public job posting, so the person answering can read what the job is. */
+  postingUrl?: string;
 }
 
 export interface AttentionDescriptorMetadata {
@@ -65,6 +80,8 @@ export interface AttentionEvent {
   draft?: AttentionDraft;
   /** The exact answer persisted for this blocker after an explicit response. */
   answerUsed?: string;
+  /** All of this application's open questions, numbered from 1, when more than one is waiting. */
+  batch?: readonly AttentionBatchQuestion[];
   message?: string;
   remediation?: string;
   reasonCode?: AttentionConfigurationReason;
@@ -109,6 +126,12 @@ export interface PersistedAttentionEvent extends AttentionEvent {
   /** Historical lifecycle metadata kept private to durable state. */
   closureReason?: AttentionClosureReason;
   replacementEventId?: string;
+  /** Blocker for each `batch` item, in the same order. */
+  batchBlockerIds?: readonly string[];
+  /** Answers given in a numbered reply for later batch items, by blocker id, not yet used. */
+  pendingBatchAnswers?: Readonly<Record<string, string>>;
+  /** Who sent the numbered reply, so a later item's answer is recorded as theirs. */
+  batchResponder?: AttentionActorIdentity;
 }
 
 export interface NotificationAdapter {
@@ -122,6 +145,43 @@ export interface NotificationAdapter {
   closeAttentionEvent?(event: AttentionEvent): Promise<void>;
   /** Replaces a verification handoff with an explicit expired-session notice. */
   publishExpiredSessionNotice?(event: AttentionEvent): Promise<void>;
+  /** One-way notice that a queue row needs the human to open its link. */
+  publishQueueHandoffNotice?(notice: QueueHandoffNotice): Promise<void>;
+  /** A plain one-line notice with no buttons (for example, "marked Applied"). */
+  publishInfoNotice?(text: string): Promise<void>;
+  /** Pre-submit review of one prepared application with an explicit Submit action. */
+  /** Resolves to the posted card's message timestamp when the provider has one. */
+  publishSubmissionReview?(notice: SubmissionReviewNotice): Promise<string | undefined | void>;
+}
+
+/**
+ * A prepared, not-yet-submitted application. Its only action is an explicit,
+ * per-application Submit approval from the configured human; it never
+ * changes the automatic submission authority.
+ */
+export interface SubmissionReviewNotice {
+  campaignId: string;
+  jobId: string;
+  applicationId: string;
+  company: string;
+  role: string;
+  resumeFamily?: string;
+  postingUrl?: string;
+  filled: readonly { label: string; value: string }[];
+  leftBlank: readonly string[];
+}
+
+/**
+ * A queue row the agent cannot open safely (login wall, unverified or
+ * unsupported destination). It carries only the public link and the reason;
+ * it asks no question and accepts no answer.
+ */
+export interface QueueHandoffNotice {
+  jobId: string;
+  company: string;
+  role: string;
+  url: string;
+  reason: string;
 }
 
 /** Deterministic adapter used by local acceptance tests. */
@@ -154,7 +214,8 @@ export class InMemoryNotificationAdapter implements NotificationAdapter {
 export const ATTENTION_EVENT_HISTORY_LIMIT = 64;
 
 const MAX_PROMPT_LENGTH = 240;
-const MAX_RESPONSE_LENGTH = 512;
+// A numbered reply to an application's batch of questions can run long.
+const MAX_RESPONSE_LENGTH = 2000;
 const MAX_CONTEXT_LENGTH = 160;
 // The signature includes the exact inspected prompt plus bounded field,
 // section, option, and provenance metadata. Keep the serialized identity
@@ -299,6 +360,8 @@ function descriptorMetadata(blocker: CareerBlocker): AttentionDescriptorMetadata
     : undefined;
 }
 
+const MAX_OPTION_LABEL_LENGTH = 200;
+
 function optionId(label: string, index: number): string {
   const slug = label
     .toLowerCase()
@@ -309,13 +372,16 @@ function optionId(label: string, index: number): string {
 }
 
 function structuredOptions(blocker: CareerBlocker): readonly AttentionOption[] | undefined {
-  const raw = evidenceValue(blocker, "options:", 240);
+  // Keep the provider's complete labels: the chosen label is typed into the
+  // form, so a shortened one ("Upstart careers webs") can never match.
+  const raw = evidenceValue(blocker, "options:", 6_000);
   if (!raw) return undefined;
   const labels = raw
     .split("|")
-    .map((value) => safeString(value, 64))
+    .map((value) => safeString(value, MAX_OPTION_LABEL_LENGTH))
     .filter((value): value is string => Boolean(value));
-  if (labels.length === 0 || labels.length > 16 || new Set(labels.map((value) => value.toLowerCase())).size !== labels.length)
+  // Slack renders at most 25 buttons in one actions block.
+  if (labels.length === 0 || labels.length > 25 || new Set(labels.map((value) => value.toLowerCase())).size !== labels.length)
     return undefined;
   if (
     labels.length === 2 &&
@@ -366,7 +432,7 @@ function questionKind(options: readonly AttentionOption[]): AttentionQuestionKin
   return options.length > 0 ? "single_choice" : "free_text";
 }
 
-function questionForBlocker(blocker: CareerBlocker): AttentionQuestion | undefined {
+export function questionForBlocker(blocker: CareerBlocker): AttentionQuestion | undefined {
   if (!isHumanAttentionBlockerKind(blocker.kind)) return undefined;
   const prompt = promptFor(blocker);
   if (!prompt || !blocker.context.applicationId) return undefined;
@@ -476,6 +542,7 @@ export function attentionEventForCareerBlocker(input: {
   jobId: string;
   blocker: CareerBlocker;
   postingCompensation?: JobCompensation;
+  postingUrl?: string;
   draft?: AttentionDraft;
   createdAt: string;
   createId: (prefix: string) => string;
@@ -487,7 +554,10 @@ export function attentionEventForCareerBlocker(input: {
   if (!question || !descriptorSignature || !blocker.context.applicationId) return undefined;
 
   const section = sectionFor(blocker);
-  const draft = safeAttentionDraft(input.draft);
+  // A typed draft only fits a free-text question. Latitude's multiple-choice
+  // human check got one, the saved record failed validation and was dropped on
+  // every read, so the question was posted again every minute (2026-11-10).
+  const draft = question.kind === "free_text" ? safeAttentionDraft(input.draft) : undefined;
   const event: AttentionEvent = {
     id: input.createId("attention"),
     type: "needs_input",
@@ -502,6 +572,7 @@ export function attentionEventForCareerBlocker(input: {
       role: safeString(blocker.context.role, MAX_CONTEXT_LENGTH) ?? "Application",
       ...(section ? { section } : {}),
       ...(postingCompensation ? { postingCompensation } : {}),
+      ...(isPostingUrl(input.postingUrl) ? { postingUrl: input.postingUrl } : {}),
     },
     question,
     questionProvenance: questionProvenanceForBlocker(blocker),
@@ -567,6 +638,38 @@ export function attentionEventForConfiguration(input: {
   };
 }
 
+/**
+ * One tap in Slack picks the résumé when a posting matches two equally.
+ * The job waits (held) until then; nothing is applied with a guessed résumé.
+ */
+export function attentionEventForResumeChoice(input: {
+  campaignId: string;
+  jobId: string;
+  createdAt: string;
+  createId: (prefix: string) => string;
+  company: string;
+  role: string;
+  families: readonly AttentionOption[];
+}): { event: AttentionEvent; record: PersistedAttentionEvent } {
+  const event: AttentionEvent = {
+    id: input.createId("attention"),
+    type: "resume_choice",
+    source: "career-agent",
+    campaignId: input.campaignId,
+    createdAt: input.createdAt,
+    status: "open",
+    title: "📄 Which résumé should I use?",
+    questionProvenance: "POLICY",
+    context: { company: input.company, role: input.role },
+    question: {
+      prompt: `This posting matches ${input.families.map((family) => family.label).join(" and ")} equally. Tap the résumé to apply with; I'll start the application on the next run.`,
+      kind: "single_choice",
+      options: input.families.map((family) => ({ id: family.id, label: family.label })),
+    },
+  };
+  return { event, record: { ...event, jobId: input.jobId, descriptorSignature: `resume-choice:${input.jobId}` } };
+}
+
 export function publicAttentionEvent(record: PersistedAttentionEvent): AttentionEvent {
   const {
     jobId: _jobId,
@@ -581,6 +684,9 @@ export function publicAttentionEvent(record: PersistedAttentionEvent): Attention
     response: _response,
     closureReason: _closureReason,
     replacementEventId: _replacementEventId,
+    batchBlockerIds: _batchBlockerIds,
+    pendingBatchAnswers: _pendingBatchAnswers,
+    batchResponder: _batchResponder,
     ...event
   } = record;
   return clone(event);
@@ -591,7 +697,7 @@ export function isAttentionOption(value: unknown): value is AttentionOption {
     value &&
     typeof value === "object" &&
     boundedText((value as { id?: unknown }).id, 32) &&
-    boundedText((value as { label?: unknown }).label, 64),
+    boundedText((value as { label?: unknown }).label, MAX_OPTION_LABEL_LENGTH),
   );
 }
 
@@ -614,6 +720,12 @@ function isPostingCompensation(value: unknown): value is JobCompensation {
     (candidate.currency === undefined || boundedText(candidate.currency, MAX_COMPENSATION_TEXT_LENGTH)) &&
     (candidate.period === undefined || boundedText(candidate.period, MAX_COMPENSATION_TEXT_LENGTH))
   );
+}
+
+/** An https link short enough to render; anything else is left off the message. */
+export function isPostingUrl(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 500) return false;
+  try { return new URL(value).protocol === "https:"; } catch { return false; }
 }
 
 function isAttentionDraft(value: unknown): value is AttentionDraft {
@@ -647,7 +759,7 @@ export function isAttentionEvent(value: unknown): value is AttentionEvent {
   const question = candidate.question;
   const common =
     boundedText(candidate.id, 128) &&
-    (candidate.type === "needs_input" || candidate.type === "configuration_required") &&
+    (candidate.type === "needs_input" || candidate.type === "configuration_required" || candidate.type === "resume_choice") &&
     candidate.source === "career-agent" &&
     boundedText(candidate.campaignId, 128) &&
     timestamp(candidate.createdAt) &&
@@ -664,7 +776,8 @@ export function isAttentionEvent(value: unknown): value is AttentionEvent {
       boundedText(context.company, MAX_CONTEXT_LENGTH) &&
       boundedText(context.role, MAX_CONTEXT_LENGTH) &&
       (context.section === undefined || boundedText(context.section, MAX_CONTEXT_LENGTH)) &&
-      (context.postingCompensation === undefined || isPostingCompensation(context.postingCompensation)),
+      (context.postingCompensation === undefined || isPostingCompensation(context.postingCompensation)) &&
+      (context.postingUrl === undefined || isPostingUrl(context.postingUrl)),
     ) &&
     (candidate.descriptor === undefined ||
       (candidate.descriptor !== null &&
@@ -708,6 +821,21 @@ export function isAttentionEvent(value: unknown): value is AttentionEvent {
       candidate.reasonCode === undefined
     );
   }
+  if (candidate.type === "resume_choice") {
+    return Boolean(
+      candidate.applicationId === undefined &&
+      candidate.blockerType === undefined &&
+      candidate.message === undefined &&
+      candidate.reasonCode === undefined &&
+      question &&
+      typeof question === "object" &&
+      boundedText(question.prompt, MAX_PROMPT_LENGTH) &&
+      question.kind === "single_choice" &&
+      Array.isArray(question.options) &&
+      question.options.length >= 2 &&
+      question.options.every(isAttentionOption),
+    );
+  }
   return (
     candidate.applicationId === undefined &&
     candidate.question === undefined &&
@@ -742,7 +870,9 @@ export function isPersistedAttentionEvent(value: unknown): value is PersistedAtt
   const internalCareerLink =
     candidate.type === "needs_input"
       ? boundedText(candidate.jobId, 128) && boundedText(candidate.blockerId, 128)
-      : candidate.jobId === undefined && candidate.blockerId === undefined;
+      : candidate.type === "resume_choice"
+        ? boundedText(candidate.jobId, 128) && candidate.blockerId === undefined
+        : candidate.jobId === undefined && candidate.blockerId === undefined;
   return (
     internalCareerLink &&
     boundedText(candidate.descriptorSignature, MAX_SIGNATURE_LENGTH) &&
@@ -764,4 +894,58 @@ export function isPersistedAttentionEvent(value: unknown): value is PersistedAtt
       candidate.closureReason === "reclassified_non_blocking") &&
     (candidate.replacementEventId === undefined || boundedText(candidate.replacementEventId, 128))
   );
+}
+
+/**
+ * Splits "1. Yes 2. No\n3) SKIP" into answers by number. A reply with no
+ * numbers at all is not numbered: the caller treats it as the answer to
+ * question 1, as before batching existed.
+ */
+export function parseNumberedReply(text: string, count: number): { numbered: boolean; answers: Map<number, string> } {
+  const answers = new Map<number, string>();
+  const marker = /(?:^|\s)(\d{1,2})\s*[.):\-]\s+/g;
+  const hits: { number: number; start: number; end: number }[] = [];
+  for (let match = marker.exec(text); match; match = marker.exec(text)) {
+    const number = Number(match[1]);
+    if (number < 1 || number > count) continue;
+    // Numbers must climb ("1. ... 2. ..."); "I have 3 years" is not a marker.
+    if (hits.length > 0 && number <= hits[hits.length - 1]!.number) continue;
+    hits.push({ number, start: match.index, end: match.index + match[0].length });
+  }
+  if (hits.length === 0) return { numbered: false, answers };
+  // Text before the first marker is not an answer to anything.
+  if (text.slice(0, hits[0]!.start).trim() !== "") return { numbered: false, answers };
+  hits.forEach((hit, index) => {
+    const value = text.slice(hit.end, index + 1 < hits.length ? hits[index + 1]!.start : undefined).trim();
+    if (value) answers.set(hit.number, value);
+  });
+  return { numbered: true, answers };
+}
+
+/** The option a typed answer names: its id or label, or a lone "yes"/"no" that starts one label. */
+export function optionIdForTypedAnswer(options: readonly AttentionOption[], text: string): string | undefined {
+  const wanted = text.trim().toLowerCase().replace(/[.!]+$/, "");
+  if (!wanted) return undefined;
+  const exact = options.find((option) => option.id.toLowerCase() === wanted || option.label.trim().toLowerCase().replace(/[.!]+$/, "") === wanted);
+  if (exact) return exact.id;
+  if (/^(?:yes|no|y|n)$/.test(wanted)) {
+    const word = wanted.startsWith("y") ? "yes" : "no";
+    const leading = options.filter((option) => new RegExp(`^${word}\\b`, "i").test(option.label.trim()));
+    if (leading.length === 1) return leading[0]!.id;
+  }
+  // A reply that clearly names one choice: "Acknowledge" for "Acknowledge/Confirm"
+  // (Samsara, 2026-11-12), "Indeed" for "Indeed / Glassdoor". Spacing around "/"
+  // doesn't matter, and it must point to exactly one option.
+  // Slack and phones turn ' into ’ ("I wasn’t familiar…", Samsara 2026-11-12).
+  const compact = (value: string) => value.trim().toLowerCase().replace(/[’‘`]/g, "'").replace(/[“”]/g, '"')
+    .replace(/[.!]+$/, "").replace(/\s*([/|·-])\s*/g, "$1").replace(/\s+/g, " ");
+  const target = compact(text);
+  if (target.length < 3) return undefined;
+  const sameCompact = options.filter((option) => compact(option.label) === target);
+  if (sameCompact.length === 1) return sameCompact[0]!.id;
+  const named = options.filter((option) => {
+    const label = compact(option.label);
+    return label.split(/[/|·]/).map((part) => part.trim()).includes(target) || label.startsWith(`${target}/`) || label.startsWith(`${target} `);
+  });
+  return named.length === 1 ? named[0]!.id : undefined;
 }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { OPTIONAL_ANSWER_SKIPPED } from "../application-agent/src/domain/executor";
 import {
   DEFAULT_ANSWER_POLICIES,
   ApplicationService,
@@ -20,7 +21,8 @@ import {
   type ExecutionInspection,
   type JobSourceListing,
 } from "../application-agent/src";
-import { OllamaApplicationAnswerDraftGenerator } from "../application-agent/automation/answerDraft/ollamaApplicationAnswerDraftGenerator";
+import { ESSAY_PROMPT_VERSION, OllamaApplicationAnswerDraftGenerator, fillerPhrases, phrasesCopiedFromPosting } from "../application-agent/automation/answerDraft/ollamaApplicationAnswerDraftGenerator";
+import type { ModelCallRecord } from "../application-agent/automation/modelCallLog";
 
 const capturedAt = "2026-09-10T12:00:00.000Z";
 
@@ -66,7 +68,7 @@ function inspection(status: ExecutionInspection["status"]): ExecutionInspection 
   };
 }
 
-function subjectiveBlocker(): CareerBlockerDraft {
+function subjectiveBlocker(optional = false): CareerBlockerDraft {
   return {
     kind: "subjective_answer",
     unit: "submission",
@@ -78,7 +80,7 @@ function subjectiveBlocker(): CareerBlockerDraft {
       "executor:lever-browser",
       "field-id:behavioral-question-1",
       "field-type:textarea",
-      "field-required:true",
+      `field-required:${optional ? "false" : "true"}`,
       "classification:free_text",
       "question-prompt:Tell us about a difficult technical problem you solved.",
       "question-section:Experience",
@@ -90,6 +92,10 @@ function subjectiveBlocker(): CareerBlockerDraft {
 class SubjectiveQuestionExecutor implements ApplicationExecutor {
   readonly id = "answer-draft-executor";
   readonly receivedValues: string[] = [];
+  /** Reject the next answer the way a form rejects a value that matches no option. */
+  rejectNextAnswer = false;
+  /** Present the question as optional (field-required:false). */
+  optionalQuestion = false;
 
   executionMode(): "preparation_only" {
     return "preparation_only";
@@ -98,14 +104,20 @@ class SubjectiveQuestionExecutor implements ApplicationExecutor {
   async execute(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult> {
     const blocker = request.careerJob.blockers.find((candidate) => candidate.field === "behavioral-question-1");
     if (!blocker?.value) {
-      return { state: "requires_human", blocker: subjectiveBlocker() };
+      return { state: "requires_human", blocker: subjectiveBlocker(this.optionalQuestion) };
     }
     this.receivedValues.push(String(blocker.value));
+    if (this.rejectNextAnswer) {
+      this.rejectNextAnswer = false;
+      return { state: "requires_human", blocker: subjectiveBlocker() };
+    }
     return { state: "ready_to_submit", inspection: inspection("inspected") };
   }
 }
 
-function draftService(options: { profile?: CandidateProfile; onDraftRequest?: () => void; draftEnabled?: () => boolean; allowGroundedDrafts?: boolean } = {}) {
+function draftService(options: { profile?: CandidateProfile; onDraftRequest?: () => void; draftEnabled?: () => boolean; allowGroundedDrafts?: boolean; reviewModelDrafts?: boolean; now?: () => string; uniqueIds?: boolean } = {}) {
+  let idCounter = 0;
+  const createId = (prefix: string) => options.uniqueIds ? `${prefix}-answer-draft-${(idCounter += 1)}` : `${prefix}-answer-draft`;
   const profile = options.profile ?? privateProfile();
   const careerRepository = new InMemoryCareerRepository();
   const applicationRepository = new InMemoryApplicationRepository();
@@ -117,7 +129,7 @@ function draftService(options: { profile?: CandidateProfile; onDraftRequest?: ()
     {
       applicationService: new ApplicationService(applicationRepository, profile, new DeterministicModelClient(), {
         now: () => capturedAt,
-        createId: (prefix) => `${prefix}-answer-draft`,
+        createId,
       }),
       careerRepository,
       scout: new JobScout({ [source.id]: source }, () => capturedAt),
@@ -133,7 +145,7 @@ function draftService(options: { profile?: CandidateProfile; onDraftRequest?: ()
         };
       },
     },
-    { now: () => capturedAt, createId: (prefix) => `${prefix}-answer-draft` },
+    { now: options.now ?? (() => capturedAt), createId },
   );
   const campaign = service.createCampaign({
     name: "Answer draft acceptance",
@@ -149,6 +161,7 @@ function draftService(options: { profile?: CandidateProfile; onDraftRequest?: ()
     applicationPolicy: {
       autoPrepare: true,
       allowGroundedDrafts: options.allowGroundedDrafts ?? false,
+      ...(options.reviewModelDrafts !== undefined ? { reviewModelDrafts: options.reviewModelDrafts } : {}),
       approvedResumeFamilies: [],
     },
     submissionPolicy: {
@@ -219,6 +232,38 @@ describe("local ATS answer drafting", () => {
     expect(evidence.every((item) => !item.source.startsWith("Verified profile skills"))).toBe(true);
   });
 
+  it("logs every model call with its prompt version, outcome, timing and tokens", async () => {
+    // 2026-11-14: a dropped or retried draft used to leave no trace.
+    const records: ModelCallRecord[] = [];
+    const logger = { record: (entry: ModelCallRecord) => { records.push(entry); } };
+    const replies = [
+      { status: "drafted", answer: "I improved service observability by adding runbooks and operational checks.", evidenceIds: ["employment:example-employment-atelier"] },
+      { status: "drafted", answer: "I improved service observability by adding runbooks and operational checks.", evidenceIds: ["made-up-evidence"] },
+    ];
+    const generator = (reply: unknown, fail = false) => new OllamaApplicationAnswerDraftGenerator({
+      baseUrl: "http://ollama.test", model: "qwen2.5:7b", logger, timeoutMs: 50,
+      fetcher: async (_input, init) => {
+        if (fail) return await new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))));
+        return { ok: true, json: async () => ({ response: JSON.stringify(reply), prompt_eval_count: 812, eval_count: 41 }) } as Response;
+      },
+    });
+    const request = {
+      question: "Tell us about a difficult technical problem you solved.",
+      job: { company: "Example Cloud Co", title: "Platform Engineer", description: "Build reliable platform systems.", requiredSkills: [], preferredSkills: [], capturedAt },
+      profile: privateProfile(), resume: null,
+    };
+    expect(await generator(replies[0]).generate(request)).toBeDefined();
+    expect(await generator(replies[1]).generate(request)).toBeUndefined();
+    expect(await generator(undefined, true).generate(request)).toBeUndefined();
+    expect(records.map((record) => record.outcome)).toEqual(["drafted", "unknown_evidence_ids", "timeout"]);
+    expect(records[0]).toMatchObject({
+      purpose: "essay_draft", model: "qwen2.5:7b", promptVersion: ESSAY_PROMPT_VERSION, attempt: 1, company: "Example Cloud Co",
+      question: "Tell us about a difficult technical problem you solved.", promptTokens: 812, outputTokens: 41, problems: [],
+    });
+    expect(ESSAY_PROMPT_VERSION).toMatch(/^[0-9a-f]{10}$/);
+    expect(records[0]!.latencyMs).toBeGreaterThanOrEqual(0);
+  });
+
   it("accepts only a structured grounded Ollama draft", async () => {
     const requests: RequestInit[] = [];
     const generator = new OllamaApplicationAnswerDraftGenerator({
@@ -267,11 +312,55 @@ describe("local ATS answer drafting", () => {
     expect(String(requests[0].body)).not.toContain("fullName");
     expect(JSON.parse(String(requests[0].body))).toMatchObject({
       system: expect.stringContaining("Never combine facts from different employers or projects"),
-      options: { temperature: 0.1, num_predict: 160 },
+      options: { temperature: 0.1, num_predict: 200 },
       format: {
       required: ["status", "answer", "evidenceIds"],
       },
     });
+  });
+
+  it("answers a 'why this company' question from what the posting emphasizes and the project that proves it", async () => {
+    const requests: RequestInit[] = [];
+    const replies = [
+      "I'm excited about Outmarket because it offers impactful work in a collaborative environment.",
+      "Outmarket's focus on tool-using AI agents and evaluating model output matches what I built at PuckPulse: a tool-calling agent with an eval suite.",
+    ];
+    const generator = new OllamaApplicationAnswerDraftGenerator({
+      baseUrl: "http://ollama.test",
+      model: "qwen2.5:7b",
+      fetcher: async (_input, init) => {
+        requests.push(init ?? {});
+        const answer = replies[Math.min(requests.length - 1, replies.length - 1)];
+        return { ok: true, json: async () => ({ response: JSON.stringify({ status: "drafted", answer, evidenceIds: ["evidence-1"] }) }) } as Response;
+      },
+    });
+    const profile = privateProfile();
+    profile.projects = [
+      { id: "web-shop", name: "Storefront", description: "A React storefront.", bullets: ["Built product pages in React."], verifiedSkills: ["React"] },
+      { id: "puck", name: "PuckPulse", description: "A live NHL analytics app.", bullets: ["Built PuckPulse AI, a tool-calling agent that answers only from the app's data, with an eval suite."], verifiedSkills: ["Python"] },
+    ] as unknown as CandidateProfile["projects"];
+    const result = await generator.generate({
+      question: "What interests you about Outmarket?",
+      job: {
+        company: "Outmarket AI", title: "Software Engineer", capturedAt,
+        description: "Software Engineer at Outmarket AI\nLocation: Remote\nResume Version: agentic-ai\nPython, SQL, RAG, embeddings, semantic search, tool-using agents and model-output evaluation. React is a bonus.",
+        requiredSkills: ["Python", "React"], preferredSkills: [],
+      },
+      profile,
+      resume: null,
+    });
+    // The first draft was filler; one retry asked for something specific, and that one is kept.
+    expect(requests).toHaveLength(2);
+    expect(result?.answer).toContain("eval suite");
+    const first = JSON.parse(String(requests[0].body)) as { prompt: string };
+    expect(first.prompt).toContain("<company>Outmarket AI</company>");
+    expect(first.prompt).toContain("<what-the-posting-emphasizes>retrieval-augmented generation (RAG); embeddings; semantic search; tool-using AI agents; evaluating model output</what-the-posting-emphasizes>");
+    expect(first.prompt).toContain("<where-the-candidate-evidence-matches>tool-using AI agents; evaluating model output</where-the-candidate-evidence-matches>");
+    expect(first.prompt).toContain("<source>Project — PuckPulse</source>");
+    expect(first.prompt).not.toContain("Resume Version");
+    expect(first.prompt).not.toContain("contribute to meaningful technical work, and take on");
+    const second = JSON.parse(String(requests[1].body)) as { prompt: string };
+    expect(second.prompt).toContain(`An earlier draft used generic filler or copied the company's own wording ("impactful", "collaborative environment")`);
   });
 
   it("honors an explicit phrase requirement in the inspected application question", async () => {
@@ -680,6 +769,19 @@ describe("local ATS answer drafting", () => {
     expect(service.getJob(service.listJobs(campaign.id)[0].id).status).toBe("ready_to_submit");
   });
 
+  it("sends a local-model answer to Slack for approval when the campaign reviews model drafts", async () => {
+    const { service, campaign, executor, notifications } = draftService({ allowGroundedDrafts: true, reviewModelDrafts: true });
+    service.activateCampaign(campaign.id);
+    await service.runCampaign(campaign.id);
+
+    expect(executor.receivedValues).toEqual([]);
+    expect(notifications.publishedEvents).toHaveLength(1);
+    expect(service.listAttentionEvents(campaign.id)[0].draft).toMatchObject({
+      answer: "I improved service observability by adding runbooks and operational checks.",
+    });
+    expect(service.getJob(service.listJobs(campaign.id)[0].id).status).toBe("needs_input");
+  });
+
   it("backfills a newly available draft onto the already-published exact ATS event", async () => {
     let draftEnabled = false;
     const { notifications, service, campaign } = draftService({
@@ -724,6 +826,54 @@ describe("local ATS answer drafting", () => {
     expect(executor.receivedValues).toEqual([]);
   });
 
+  it("asks again when the form rejects an answered question", async () => {
+    let tick = 0;
+    const { service, campaign, executor, notifications } = draftService({
+      draftEnabled: () => false,
+      uniqueIds: true,
+      now: () => new Date(Date.parse(capturedAt) + (tick += 1000)).toISOString(),
+    });
+    service.activateCampaign(campaign.id);
+    await service.runCampaign(campaign.id);
+    executor.rejectNextAnswer = true;
+    const first = service.listAttentionEvents(campaign.id)[0];
+    await service.resolveAttentionResponse({
+      eventId: first.id,
+      selectedOption: "An answer the form does not accept",
+      actorIdentity: { provider: "test", userId: "human-1" },
+      respondedAt: capturedAt,
+    });
+
+    expect(executor.receivedValues).toEqual(["An answer the form does not accept"]);
+    const events = service.listAttentionEvents(campaign.id);
+    expect(events.map((event) => event.status)).toEqual(["resolved", "open"]);
+    expect(notifications.publishedEvents.length).toBeGreaterThan(0);
+
+    const retry = events.find((event) => event.status === "open")!;
+    await service.resolveAttentionResponse({
+      eventId: retry.id,
+      selectedOption: "The answer that fits",
+      actorIdentity: { provider: "test", userId: "human-1" },
+      respondedAt: capturedAt,
+    });
+    const answers = service.getJob(service.listJobs(campaign.id)[0].id).blockers
+      .filter((blocker) => blocker.field === "behavioral-question-1" && blocker.status === "resolved")
+      .map((blocker) => blocker.value);
+    expect(answers).toEqual(["The answer that fits"]);
+  });
+
+  it("stores SKIP on an optional question as the skip marker, never as an answer", async () => {
+    const { service, campaign, executor } = draftService({ draftEnabled: () => false });
+    executor.optionalQuestion = true;
+    service.activateCampaign(campaign.id);
+    await service.runCampaign(campaign.id);
+    const event = service.listAttentionEvents(campaign.id)[0];
+    expect(event.question?.required).toBe(false);
+
+    await service.resolveAttentionResponse({ eventId: event.id, selectedOption: "skip", actorIdentity: { provider: "test", userId: "human-1" }, respondedAt: capturedAt });
+    expect(executor.receivedValues).toEqual([OPTIONAL_ANSWER_SKIPPED]);
+  });
+
   it("passes an edited Slack answer through as the exact blocker value", async () => {
     const { service, campaign, executor } = draftService();
     service.activateCampaign(campaign.id);
@@ -757,5 +907,24 @@ describe("local ATS answer drafting", () => {
     expect(event.questionProvenance).toBe("APPLICATION_PREPARATION");
     expect(event.draft).toBeUndefined();
     expect(draftRequests).toBe(0);
+  });
+});
+
+describe("over-the-top drafts (Mercury, 2026-11-09)", () => {
+  const draft = "Mercury is crafting an exceptional banking experience for startups, simplifying financial navigation much like the trim tab eases flight. I built PuckPulse. This aligns perfectly with Mercury's commitment to creating lovable products.";
+  const posting = "Since the dawn of aviation, pilots have faced air resistance. The trim tab simplifies flight. At Mercury, we are committed to crafting an exceptional banking experience for startups. Our team is passionately focused on our product.";
+
+  it("flags stock phrases", () => {
+    expect(fillerPhrases(draft)).toEqual(expect.arrayContaining(["much like", "aligns perfectly", "commitment to"]));
+    expect(fillerPhrases("I built a nightly ingest job that grades every prediction against closing lines.")).toEqual([]);
+    // ElevenLabs (2026-11-10): "aligning closely with ElevenLabs' focus" slipped through.
+    expect(fillerPhrases("PuckPulse is a robust platform, aligning closely with their focus, which resonated with me.")).toEqual(
+      expect.arrayContaining(["robust", "aligning closely", "resonated with"]),
+    );
+  });
+
+  it("flags lines lifted from the posting, but not short shared words", () => {
+    expect(phrasesCopiedFromPosting(draft, posting)).toEqual(["crafting an exceptional banking experience for startups"]);
+    expect(phrasesCopiedFromPosting("Mercury builds banking for startups, and I like product work.", posting)).toEqual([]);
   });
 });

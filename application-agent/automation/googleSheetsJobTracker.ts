@@ -123,6 +123,20 @@ function normalizeIdentity(value: string | undefined): string {
   return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
+/** Legal suffixes vary between sources ("Sidekick Solutions" / "Sidekick Solutions LLC"); match the queue import. */
+function normalizeCompanyIdentity(value: string | undefined): string {
+  return normalizeIdentity(value).replace(/\b(?:llc|inc|incorporated|corp|corporation|co|company|ltd|limited)\b/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/** "Remote — U.S." and "Remote - United States · remote" describe the same location. */
+function normalizeLocationIdentity(value: string | undefined): string {
+  return normalizeIdentity(value)
+    .replace(/\b(?:united states(?: of america)?|u s a|usa|u s|us)\b/g, " us ")
+    .replace(/\bremote\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function cellText(value: unknown): string {
   if (typeof value === "string") return value.trim();
   if (typeof value === "number" || typeof value === "boolean") return String(value);
@@ -461,9 +475,9 @@ function findExistingRow(
 ): number | undefined {
   const incomingUrls = new Set(canonicalUrls(update));
   const incomingProviderId = update.sourceRecordId?.trim();
-  const incomingCompany = normalizeIdentity(update.company);
+  const incomingCompany = normalizeCompanyIdentity(update.company);
   const incomingRole = normalizeIdentity(update.role);
-  const incomingLocation = normalizeIdentity(update.locationRemote);
+  const incomingLocation = normalizeLocationIdentity(update.locationRemote);
 
   for (let index = 1; index < rows.length; index += 1) {
     const row = rows[index] ?? [];
@@ -481,9 +495,9 @@ function findExistingRow(
 
     const company = cellText(row[columns.company ?? -1]);
     const role = cellText(row[columns.role ?? -1]);
-    if (!company || !role || normalizeIdentity(company) !== incomingCompany || normalizeIdentity(role) !== incomingRole) continue;
-    const existingLocation = cellText(columns.locationRemote === undefined ? undefined : row[columns.locationRemote]);
-    if (incomingLocation && existingLocation && normalizeIdentity(existingLocation) !== incomingLocation) continue;
+    if (!company || !role || normalizeCompanyIdentity(company) !== incomingCompany || normalizeIdentity(role) !== incomingRole) continue;
+    const existingLocation = normalizeLocationIdentity(cellText(columns.locationRemote === undefined ? undefined : row[columns.locationRemote]));
+    if (incomingLocation && existingLocation && existingLocation !== incomingLocation) continue;
     return index + 1;
   }
   return undefined;

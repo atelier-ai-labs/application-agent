@@ -233,6 +233,7 @@ export function isCandidateProfile(value: unknown): value is CandidateProfile {
     isStringOrNull(identity.fullName) &&
     (identity.preferredName === undefined || isStringOrNull(identity.preferredName)) &&
     isOptionalHttpUrlOrNull(identity.linkedinUrl) &&
+    isOptionalHttpUrlOrNull(identity.githubUrl) &&
     isOptionalHttpUrlOrNull(identity.websiteUrl) &&
     isStringOrNull(identity.email) &&
     isStringOrNull(identity.phone) &&
@@ -255,10 +256,13 @@ export function isCandidateProfile(value: unknown): value is CandidateProfile {
     isStringOrNull(preferences.travel) &&
     (preferences.preferredWorkLocation === undefined || isStringOrNull(preferences.preferredWorkLocation)) &&
     (preferences.availabilityStartDate === undefined || isStringOrNull(preferences.availabilityStartDate)) &&
+    (preferences.salaryStrategy === undefined || preferences.salaryStrategy === "ask" || preferences.salaryStrategy === "posting_midpoint") &&
+    (preferences.availabilityNoticeDays === undefined || (Number.isInteger(preferences.availabilityNoticeDays) && (preferences.availabilityNoticeDays as number) >= 0 && (preferences.availabilityNoticeDays as number) <= 180)) &&
     isRecord(authorization) &&
     isStringOrNull(authorization.status) &&
     isStringArray(authorization.countries) &&
     (authorization.sponsorshipRequired === null || typeof authorization.sponsorshipRequired === "boolean") &&
+    (authorization.citizenship === undefined || isStringArray(authorization.citizenship)) &&
     Array.isArray(value.resumeFamilies) &&
     value.resumeFamilies.every(isResumeFamily) &&
     isRecord(answerPolicies) &&

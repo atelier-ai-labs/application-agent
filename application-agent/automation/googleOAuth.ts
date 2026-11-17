@@ -6,6 +6,8 @@ import { dirname, resolve } from "node:path";
 
 /** The narrowest Sheets scope needed to read the tracker and update its rows. */
 export const GOOGLE_SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
+/** Opt-in, read-only: lets the submit lane read an ATS's emailed security code. */
+export const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
 export const GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 export const DEFAULT_GOOGLE_OAUTH_CLIENT_FILE = ".local/google-oauth-client.json";
 export const DEFAULT_GOOGLE_OAUTH_TOKEN_FILE = ".local/google-sheets-token.json";
@@ -18,6 +20,8 @@ export interface GoogleAuthEnvironment {
   ATELIER_GOOGLE_TOKEN_FILE?: string;
   ATELIER_GOOGLE_APPLICATION_CREDENTIALS?: string;
   ATELIER_GOOGLE_ACCESS_TOKEN?: string;
+  /** "true" adds read-only Gmail access so emailed application security codes can be entered. */
+  ATELIER_GMAIL_SECURITY_CODES?: string;
 }
 
 export interface GoogleOAuthClientConfig {
@@ -66,6 +70,8 @@ export interface GoogleOAuthAccessTokenProviderOptions {
 export interface GoogleOAuthAuthorizationOptions {
   clientFile: string;
   tokenFile: string;
+  /** Defaults to the Sheets scope only. */
+  scopes?: readonly string[];
   timeoutMs?: number;
   callbackPath?: string;
   openBrowser?: (url: string) => Promise<void> | void;
@@ -170,6 +176,15 @@ export function resolveGoogleAuthMode(env: GoogleAuthEnvironment): GoogleAuthSel
     return { error: "Multiple Google credential modes are configured; set ATELIER_GOOGLE_AUTH_MODE explicitly." };
   }
   return { mode: modes[0] };
+}
+
+/** True when the user opted in to reading emailed application security codes. */
+export function gmailSecurityCodesEnabled(env: GoogleAuthEnvironment): boolean {
+  return env.ATELIER_GMAIL_SECURITY_CODES?.trim().toLowerCase() === "true";
+}
+
+export function googleOAuthScopes(env: GoogleAuthEnvironment): string[] {
+  return gmailSecurityCodesEnabled(env) ? [GOOGLE_SHEETS_SCOPE, GMAIL_READONLY_SCOPE] : [GOOGLE_SHEETS_SCOPE];
 }
 
 export function googleOAuthClientFile(env: GoogleAuthEnvironment): string {
@@ -508,7 +523,7 @@ export async function authorizeGoogleSheets(options: GoogleOAuthAuthorizationOpt
         authorizationUrl.searchParams.set("client_id", client.clientId);
         authorizationUrl.searchParams.set("redirect_uri", redirectUri);
         authorizationUrl.searchParams.set("response_type", "code");
-        authorizationUrl.searchParams.set("scope", GOOGLE_SHEETS_SCOPE);
+        authorizationUrl.searchParams.set("scope", (options.scopes ?? [GOOGLE_SHEETS_SCOPE]).join(" "));
         authorizationUrl.searchParams.set("access_type", "offline");
         authorizationUrl.searchParams.set("prompt", "consent");
         authorizationUrl.searchParams.set("state", state);

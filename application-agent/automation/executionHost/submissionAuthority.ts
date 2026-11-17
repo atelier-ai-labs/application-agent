@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { FileKeyValueStorage } from "../runtime/fileKeyValueStorage";
+import { openStateStorage } from "../runtime/stateStorage";
 import type { KeyValueStorage } from "../../src/persistence/storage";
 
 export type SubmissionFenceState = "claimed" | "clicking" | "unknown" | "recovered" | "retry_authorized" | "submitted";
@@ -79,7 +79,7 @@ export class DurableSubmissionAuthority {
     options: { storage?: KeyValueStorage; stateFile?: string } = {},
   ) {
     if (!workerId.trim()) throw new Error("Submission worker ID must be non-empty.");
-    this.storage = options.storage ?? new FileKeyValueStorage(options.stateFile);
+    this.storage = options.storage ?? openStateStorage(options.stateFile);
   }
 
   claim(applicationId: string, jobId: string, now: string): SubmissionFence {

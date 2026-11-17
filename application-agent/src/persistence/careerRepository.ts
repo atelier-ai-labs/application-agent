@@ -1,3 +1,4 @@
+import { isCompanyApplicationLimit } from "../domain/searchIntent";
 import type {
   ApplicationPolicy,
   CareerBlocker,
@@ -47,7 +48,7 @@ import {
   isRecord,
   isSubmissionProof,
 } from "../domain/validation";
-import { browserStorage, type KeyValueStorage } from "./storage";
+import { browserStorage, updateStoredArray, type KeyValueStorage } from "./storage";
 
 export const CAMPAIGNS_STORAGE_KEY = "atelier.application-agent.campaigns.v0";
 export const CAREER_JOBS_STORAGE_KEY = "atelier.application-agent.career-jobs.v0";
@@ -92,8 +93,16 @@ function boundedHistory(value: unknown): unknown {
   return {
     ...withHistory,
     // A malformed attention event must not hide an otherwise valid campaign.
-    attentionEvents: value.attentionEvents.filter(isPersistedAttentionEvent).slice(-ATTENTION_EVENT_HISTORY_LIMIT),
+    // A record whose only problem is its draft keeps the question: dropping it
+    // silently made the agent ask again every minute (Latitude, 2026-11-10).
+    attentionEvents: value.attentionEvents.map(withoutInvalidDraft).filter(isPersistedAttentionEvent).slice(-ATTENTION_EVENT_HISTORY_LIMIT),
   };
+}
+
+function withoutInvalidDraft(value: unknown): unknown {
+  if (!isRecord(value) || value.draft === undefined || isPersistedAttentionEvent(value)) return value;
+  const { draft: _draft, ...rest } = value;
+  return rest;
 }
 
 function boundedCampaign(campaign: Campaign): Campaign {
@@ -250,6 +259,8 @@ function isSearchCriteria(value: unknown): value is SearchCriteria {
     (value.minimumSalary === undefined || (typeof value.minimumSalary === "number" && Number.isFinite(value.minimumSalary) && value.minimumSalary >= 0)) &&
     isStringArray(value.excludedSeniorities) &&
     (value.excludedTitleTerms === undefined || isStringArray(value.excludedTitleTerms)) &&
+    (value.maxYearsExperience === undefined || (typeof value.maxYearsExperience === "number" && Number.isInteger(value.maxYearsExperience) && value.maxYearsExperience >= 0)) &&
+    (value.companyApplicationLimit === undefined || isCompanyApplicationLimit(value.companyApplicationLimit)) &&
     isStringArray(value.excludedCompanies)
   );
 }
@@ -389,6 +400,7 @@ function isApplicationPolicy(value: unknown): value is ApplicationPolicy {
   return (
     typeof value.autoPrepare === "boolean" &&
     typeof value.allowGroundedDrafts === "boolean" &&
+    (value.reviewModelDrafts === undefined || typeof value.reviewModelDrafts === "boolean") &&
     Array.isArray(value.approvedResumeFamilies) &&
     value.approvedResumeFamilies.every(isResumeFamilyId)
   );
@@ -627,6 +639,7 @@ const CAREER_EVENT_TYPES = new Set([
   "application.ready_to_submit",
   "application.submitted",
   "application.applied",
+  "application.receipt_confirmed",
   "application.failed",
   "tracker.update_started",
   "tracker.updated",
@@ -708,12 +721,14 @@ export class LocalStorageCareerRepository implements CareerRepository {
   }
 
   saveCampaign(campaign: Campaign): void {
-    campaign = boundedCampaign(campaign);
-    const campaigns = [...this.listCampaigns()];
-    const index = campaigns.findIndex((candidate) => candidate.id === campaign.id);
-    if (index === -1) campaigns.push(clone(campaign));
-    else campaigns[index] = clone(campaign);
-    this.storage.setItem(CAMPAIGNS_STORAGE_KEY, JSON.stringify(campaigns));
+    const saved = clone(boundedCampaign(campaign));
+    updateStoredArray(this.storage, CAMPAIGNS_STORAGE_KEY, (items) => {
+      const campaigns = items.map(boundedHistory).filter(isCampaign);
+      const index = campaigns.findIndex((candidate) => candidate.id === saved.id);
+      if (index === -1) campaigns.push(saved);
+      else campaigns[index] = saved;
+      return campaigns;
+    });
   }
 
   listJobs(campaignId?: string): readonly CareerJob[] {
@@ -727,11 +742,14 @@ export class LocalStorageCareerRepository implements CareerRepository {
   }
 
   saveJob(job: CareerJob): void {
-    const jobs = [...this.listJobs()];
-    const index = jobs.findIndex((candidate) => candidate.id === job.id);
-    if (index === -1) jobs.push(clone(job));
-    else jobs[index] = clone(job);
-    this.storage.setItem(CAREER_JOBS_STORAGE_KEY, JSON.stringify(jobs));
+    const saved = clone(job);
+    updateStoredArray(this.storage, CAREER_JOBS_STORAGE_KEY, (items) => {
+      const jobs = items.filter(isCareerJob);
+      const index = jobs.findIndex((candidate) => candidate.id === saved.id);
+      if (index === -1) jobs.push(saved);
+      else jobs[index] = saved;
+      return jobs;
+    });
   }
 
   listEvents(campaignId: string): readonly CareerEvent[] {
@@ -741,8 +759,8 @@ export class LocalStorageCareerRepository implements CareerRepository {
   }
 
   appendEvent(event: CareerEvent): void {
-    const events = [...loadArray(this.storage, CAREER_EVENTS_STORAGE_KEY).filter(isCareerEvent), clone(event)];
-    this.storage.setItem(CAREER_EVENTS_STORAGE_KEY, JSON.stringify(events));
+    const saved = clone(event);
+    updateStoredArray(this.storage, CAREER_EVENTS_STORAGE_KEY, (items) => [...items.filter(isCareerEvent), saved]);
   }
 }
 

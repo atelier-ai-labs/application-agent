@@ -22,6 +22,9 @@ const PROTAGONA_POSTING_SLUG = "AWS-Cloud-Engineer";
 const GUSTO_HOST = "jobs.gusto.com";
 const GUSTO_POSTING_SLUG = "sidekick-solutions-llc-cloud-engineer";
 const GUSTO_POSTING_ID = "ac0d6b2b-36c5-4bad-a8d2-91b69546d4ad";
+const VAIA_HOST = "partner.studysmarter.de";
+/** Vaia apply-form parameters that identify the posting; everything else is session/tracking noise. */
+const VAIA_IDENTITY_PARAMS = ["job_id", "domain", "lang", "company", "title"] as const;
 
 function decodeSegment(value: string): string | undefined {
   try {
@@ -279,6 +282,44 @@ export function isVerifiedProtagonaApplicationUrl(value: string | undefined): bo
 
 export function protagonaPostingId(value: string | undefined): string | undefined {
   return protagonaJobSegments(value)?.[1];
+}
+
+/**
+ * Vaia (StudySmarter) hosts an "Easy Apply" wizard for many employers at one
+ * route, identified by a numeric `job_id`. The route itself is shared, so the
+ * executor must still verify the rendered company and role before preparing.
+ */
+function vaiaApplyFormUrl(value: string | undefined): URL | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || normalizedHost(url) !== VAIA_HOST) return undefined;
+    if (url.pathname.replace(/\/+$/, "") !== "/apply-form") return undefined;
+    if (!/^\d+$/.test(url.searchParams.get("job_id") ?? "")) return undefined;
+    return url;
+  } catch {
+    return undefined;
+  }
+}
+
+export function isVerifiedVaiaApplicationUrl(value: string | undefined): boolean {
+  return vaiaApplyFormUrl(value) !== undefined;
+}
+
+export function vaiaPostingId(value: string | undefined): string | undefined {
+  return vaiaApplyFormUrl(value)?.searchParams.get("job_id") ?? undefined;
+}
+
+/** Drops Vaia session/device tracking (amp_session_id, deviceId) and keeps the posting identity. */
+export function canonicalVaiaApplicationUrl(value: string | undefined): string | undefined {
+  const url = vaiaApplyFormUrl(value);
+  if (!url) return undefined;
+  const clean = new URL(`https://${VAIA_HOST}/apply-form/`);
+  for (const key of VAIA_IDENTITY_PARAMS) {
+    const param = url.searchParams.get(key);
+    if (param) clean.searchParams.set(key, param);
+  }
+  return clean.toString();
 }
 
 export function isVerifiedGustoHostedUrl(value: string | undefined): boolean {

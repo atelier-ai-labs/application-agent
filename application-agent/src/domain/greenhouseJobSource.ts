@@ -307,6 +307,32 @@ export function isVerifiedGreenhouseApplicationUrl(value: string | undefined, bo
   return isVerifiedGreenhouseHostedUrl(value, board, postingId);
 }
 
+/**
+ * Greenhouse's embed route serves the same posting's form on greenhouse.io.
+ * Boards that redirect the hosted page to the employer's own careers site
+ * (Upstart: careers.upstart.com) still serve it here without a redirect.
+ */
+export function greenhouseEmbedApplicationUrl(board: string, postingId: string): string {
+  const url = new URL("https://job-boards.greenhouse.io/embed/job_app");
+  url.searchParams.set("for", normalizedBoard(board));
+  url.searchParams.set("token", postingId);
+  return url.toString();
+}
+
+export function isVerifiedGreenhouseEmbedUrl(value: string | undefined, board: string, postingId: string): boolean {
+  if (!value || !/^\d+$/.test(postingId)) return false;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:") return false;
+    if (url.hostname.toLowerCase() !== "boards.greenhouse.io" && url.hostname.toLowerCase() !== "job-boards.greenhouse.io") return false;
+    return url.pathname.replace(/\/+$/, "") === "/embed/job_app" &&
+      (url.searchParams.get("for") ?? "").toLowerCase() === normalizedBoard(board).toLowerCase() &&
+      url.searchParams.get("token") === postingId;
+  } catch {
+    return false;
+  }
+}
+
 export function parseGreenhouseResponse(
   payload: unknown,
   board: string,
@@ -422,7 +448,8 @@ export class GreenhouseJobSource implements JobSource {
     if (!Number.isInteger(this.maxResults) || this.maxResults <= 0) {
       throw new Error("Greenhouse source result cap must be a positive integer.");
     }
-    this.retrievalCap = options.retrievalCap ?? Math.max(200, this.maxResults);
+    // The whole board arrives in one response; reading every posting is cheap, and big employers (Databricks, Anthropic) list 500+.
+    this.retrievalCap = options.retrievalCap ?? Math.max(2_000, this.maxResults);
     if (!Number.isInteger(this.retrievalCap) || this.retrievalCap <= 0) {
       throw new Error("Greenhouse retrieval cap must be a positive integer.");
     }

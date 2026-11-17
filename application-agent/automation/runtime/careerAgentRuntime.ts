@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { ApplicationService, type ApplicationServiceOptions } from "../../src/service/applicationService";
 import {
   CareerAgentService,
@@ -18,7 +18,10 @@ import {
 } from "../../src/domain/applicationDestinationResolver";
 import type { Campaign, CampaignRunResult, CareerJob, CreateCampaignInput } from "../../src/domain/campaignTypes";
 import type { DailyHuntProcessingResult } from "../../src/service/careerAgentService";
-import { HIMALAYAS_SOURCE_ID } from "../../src/domain/campaignTypes";
+import { HIMALAYAS_SOURCE_ID, jobSourceConfigId } from "../../src/domain/campaignTypes";
+import { AshbyBoardSource } from "../../src/domain/ashbyBoardSource";
+import { DEFAULT_DISCOVERY_CONFIG, parseDiscoveryConfig, type DiscoveryConfig } from "../../src/domain/discoveryConfig";
+import { MUSE_SOURCE_ID, MuseJobSource } from "../../src/domain/museJobSource";
 import type { ExecutionHostRequest, ExecutionHostSnapshot, ExecutionHostStatus } from "../../src/domain/executionHostTypes";
 import { createGreenhouseJobSources, DEFAULT_GREENHOUSE_API_BASE_URL, parseGreenhouseBoards } from "../../src/domain/greenhouseJobSource";
 import { JobReferenceResolver, JobReferenceSource } from "../../src/domain/jobReferenceResolver";
@@ -46,16 +49,32 @@ import {
   ExecutionHostResponseError,
   type ExecutionHostClientOptions,
 } from "../../src/service/executionHostClient";
-import { createConfiguredGoogleSheetsJobTracker, type GoogleSheetsEnvironment } from "../googleSheetsJobTracker";
+import { createConfiguredGoogleSheetsJobTracker, createConfiguredGoogleSheetsTransport, type GoogleSheetsEnvironment } from "../googleSheetsJobTracker";
+import { GoogleSheetsJobQueue } from "../googleSheetsJobQueue";
+import { DEFAULT_LEARNED_BOARDS_FILE, loadLearnedBoards } from "../boardLearning";
+import { applyResumeChoiceToSheets } from "../resumeChoiceSheets";
 import { resolveExecutionHostConfig, resolveResumePathsFromEnv, type ExecutionHostEnvironment } from "../executionHost/config";
 import { SlackNotificationAdapter } from "../slack/slackNotificationAdapter";
 import { resolveSlackConfig, type SlackEnvironment } from "../slack/config";
 import { createPlaywrightLeverBrowserExecutor } from "../createLeverBrowserExecutor";
 import { OllamaApplicationAnswerDraftGenerator } from "../answerDraft/ollamaApplicationAnswerDraftGenerator";
+import { enrichJobIntake } from "../../src/domain/postingEnrichment";
+import { FileAnswerBankStore } from "../answerBank/fileAnswerBankStore";
+import { isAwaitingReceipt, matchReceiptToJob } from "../../src/domain/applicationReceipt";
+import { renderWaitingBoard, waitingBoardItems, waitingBoardSignature, WAITING_BOARD_RECENT_MS } from "../../src/domain/waitingBoard";
+import { slackMessagesToTidy } from "../../src/domain/slackTidy";
+
+const SUBMISSION_REVIEW_CARDS_KEY = "atelier.application-agent.submission-review-cards.v0";
+import { gmailInbox, type InboxSource } from "../gmailInbox";
+import { createGoogleOAuthAccessTokenProvider, gmailSecurityCodesEnabled, resolveGoogleAuthMode } from "../googleOAuth";
+import { createOllamaAnswerBankMatcher } from "../answerBank/ollamaAnswerBankMatcher";
 import { isUsableResumeArtifact } from "../resume/resumeArtifact";
 import { normalizeJobSearchIntent, type JobSearchIntent } from "../../src/domain/searchIntent";
-import { DEFAULT_CAREER_AGENT_STATE_FILE, FileKeyValueStorage } from "./fileKeyValueStorage";
-import type { AttentionEvent, AttentionResponse, NotificationAdapter, PersistedAttentionEvent } from "../../src/domain/attention";
+import { DEFAULT_CAREER_AGENT_STATE_DB, openStateStorage } from "./stateStorage";
+import { FileModelCallLogger, type ModelCallLogger } from "../modelCallLog";
+import { assertDuplicateRiskRetryAuthorization, assertSubmitPreparedApplicationPreflight } from "./submitPreparedApplicationPreflight";
+import { authorizeThenSubmit } from "./submitPreparedApplicationFlow";
+import { attentionDescriptorSignature, type AttentionEvent, type AttentionResponse, type NotificationAdapter, type PersistedAttentionEvent, type QueueHandoffNotice } from "../../src/domain/attention";
 import { DurableSubmissionAuthority } from "../executionHost/submissionAuthority";
 
 export interface BackgroundCareerAgentEnvironment extends ExecutionHostEnvironment, SlackEnvironment {
@@ -72,10 +91,12 @@ export interface BackgroundCareerAgentEnvironment extends ExecutionHostEnvironme
   ATELIER_CAREER_AGENT_STATE_FILE?: string;
   ATELIER_CAREER_AGENT_PROFILE_FILE?: string;
   ATELIER_CAREER_AGENT_SEARCH_INTENT_FILE?: string;
+  ATELIER_CAREER_AGENT_DISCOVERY_FILE?: string;
   /** Optional bounded public destination evidence; never read by the browser client. */
   ATELIER_CAREER_AGENT_DESTINATION_EVIDENCE_FILE?: string;
   ATELIER_CAREER_AGENT_BROWSER_ENABLED?: string;
   ATELIER_CAREER_AGENT_CAMPAIGN_ID?: string;
+  ATELIER_GOOGLE_SHEET_QUEUE_TAB?: string;
   /** Optional one-shot server-local snapshot of the Daily job hunt report. */
   ATELIER_CAREER_AGENT_DAILY_HUNT_FILE?: string;
   /** Close the process after a one-shot Daily job hunt intake. */
@@ -88,6 +109,8 @@ export interface BackgroundCareerAgentEnvironment extends ExecutionHostEnvironme
   ATELIER_CAREER_AGENT_ANSWER_DRAFT_MODE?: string;
   ATELIER_CAREER_AGENT_OLLAMA_BASE_URL?: string;
   ATELIER_CAREER_AGENT_OLLAMA_MODEL?: string;
+  ATELIER_CAREER_AGENT_ANSWER_BANK?: string;
+  ATELIER_CAREER_AGENT_ANSWER_BANK_FILE?: string;
   ATELIER_CAREER_AGENT_OLLAMA_TIMEOUT_MS?: string;
 }
 
@@ -97,6 +120,19 @@ export interface RuntimeNotificationTransport {
   start?(): Promise<void>;
   stop?(): void | Promise<void>;
 }
+
+/** The Slack adapter's board methods (the in-memory adapter has none). */
+interface WaitingBoardPort {
+  permalink(messageTs: string): Promise<string | undefined>;
+  replaceWaitingBoard(board: { text: string; blocks: unknown[] }, previousTs?: string): Promise<string>;
+}
+
+interface SlackTidyPort {
+  listTidyCandidates(beforeTs: string, limit?: number): Promise<import("../../src/domain/slackTidy").TidyCandidate[]>;
+  deleteOwnMessage(messageTs: string): Promise<boolean>;
+}
+
+const SLACK_TIDY_MIN_AGE_MS = 24 * 60 * 60 * 1_000;
 
 /** The existing execution-host HTTP seam, kept as a narrow runtime port. */
 export interface CareerAgentExecutionHostPort {
@@ -126,10 +162,22 @@ export interface BackgroundCareerAgentRuntimeOptions {
   hostPollTimeoutMs?: number;
   resumeArtifactAvailable?: (familyId: ResumeFamilyId) => boolean;
   applicationAnswerDraftGenerator?: import("../../src/domain/applicationAnswerDraft").ApplicationAnswerDraftGenerator;
+  postingEnricher?: (input: import("../../src/domain/types").JobIntakeInput) => Promise<import("../../src/domain/types").JobIntakeInput>;
+  answerBank?: import("../../src/domain/answerBank").AnswerBankStore;
+  answerBankMatcher?: import("../../src/domain/answerBank").AnswerBankSemanticMatcher;
+  /** Read-only inbox checked for "thanks for applying" emails while a job waits on DONE. */
+  receiptInbox?: InboxSource;
+  receiptPollIntervalMs?: number;
   defaultCampaignInput?: CreateCampaignInput;
   now?: () => string;
   createId?: CareerAgentServiceOptions["createId"];
   submissionAuthority?: DurableSubmissionAuthority;
+  /**
+   * Advances the matching Sheet queue row once an application is confirmed
+   * applied, so strict queue order does not stall on a submitted row.
+   * Returns a short status for the operator, or undefined when nothing matched.
+   */
+  confirmQueueRow?: (job: CareerJob) => Promise<string | undefined>;
 }
 
 export interface BackgroundCareerAgentRuntime {
@@ -140,6 +188,10 @@ export interface BackgroundCareerAgentRuntime {
   readonly service: CareerAgentService;
   readonly defaultCampaignInput?: CreateCampaignInput;
   start(): Promise<void>;
+  /** Rebuild the Slack "Waiting on you" board; see the implementation. */
+  refreshWaitingBoard(now?: Date): Promise<"posted" | "unchanged" | "unavailable">;
+  /** Deletes the bot's finished Slack messages older than a day; returns how many. */
+  tidySlack(now?: Date, options?: { maxDeletes?: number; pauseMs?: number }): Promise<number>;
   stop(): Promise<void>;
   createCampaign(input: CreateCampaignInput): Campaign;
   runCampaign(campaignId: string): Promise<CampaignRunResult>;
@@ -175,6 +227,16 @@ export interface BackgroundCareerAgentRuntime {
   getSubmissionFence(applicationId: string, jobId: string): import("../executionHost/submissionAuthority").SubmissionFence | undefined;
   resumePreparationOnlyConfigurationBlocker(campaignId: string, jobId: string): import("../../src/domain/campaignTypes").CareerJob;
   getApplication(applicationId: string): import("../../src/domain/types").Application;
+  /** Sends a link-only queue notice when the adapter supports it; returns false otherwise. */
+  notifyQueueHandoff(notice: QueueHandoffNotice): Promise<boolean>;
+  /**
+   * One explicit, human-approved submit of an exact prepared application
+   * (Slack's Submit button). Same preflight as career-agent:submit-prepared;
+   * never authorizes duplicate-risk retries.
+   */
+  submitFromHumanApproval(campaignId: string, jobId: string, applicationId: string, executionHostBaseUrl: string): Promise<{ submitted: boolean; message: string }>;
+  /** Marks the matching queue row Confirmed for an applied job; undefined when none matched. */
+  confirmQueueRowForAppliedJob(jobId: string): Promise<string | undefined>;
 }
 
 const HOST_ACTIVE_STATUSES: ReadonlySet<ExecutionHostStatus> = new Set(["starting", "inspecting", "executing", "resuming"]);
@@ -256,6 +318,26 @@ export function loadBackgroundCandidateProfile(
 }
 
 export const DEFAULT_CAREER_AGENT_SEARCH_INTENT_FILE = ".local/career-agent/search-intent.json";
+export const DEFAULT_CAREER_AGENT_DISCOVERY_FILE = ".local/career-agent/discovery.json";
+
+/** Load the optional source/board choices; without a file the defaults apply. */
+export function loadBackgroundDiscoveryConfig(
+  env: Pick<BackgroundCareerAgentEnvironment, "ATELIER_CAREER_AGENT_DISCOVERY_FILE">,
+): DiscoveryConfig {
+  const configuredPath = env.ATELIER_CAREER_AGENT_DISCOVERY_FILE?.trim();
+  const path = configuredPath || DEFAULT_CAREER_AGENT_DISCOVERY_FILE;
+  if (!existsSync(resolve(path))) {
+    if (configuredPath) throw new Error("The configured Career Agent discovery file could not be found.");
+    return DEFAULT_DISCOVERY_CONFIG;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(resolve(path), "utf8"));
+  } catch {
+    throw new Error("The configured Career Agent discovery file could not be read or parsed.");
+  }
+  return parseDiscoveryConfig(parsed);
+}
 
 /** Load optional server-side user intent without putting it in the client bundle. */
 export function loadBackgroundSearchIntent(
@@ -305,21 +387,43 @@ export function loadBackgroundDestinationCandidates(
   }
 }
 
-interface RuntimeSources {
+export interface RuntimeSources {
   scout: JobScout;
   campaignInput: CreateCampaignInput;
   destinationResolver: BoundedApplicationDestinationResolver;
   officialDestinationCandidates: ReturnType<typeof parseDestinationCandidates>;
 }
 
-function createRuntimeSources(env: BackgroundCareerAgentEnvironment): RuntimeSources {
+/** The campaign searches exactly the sources built from discovery.json (switched-off feeds removed, The Muse and Ashby boards added). */
+function discoveryCampaignInput(input: CreateCampaignInput, sources: Readonly<Record<string, JobSource>>): CreateCampaignInput {
+  const ids = (input.searchSources.length > 0 ? input.searchSources : (input.sourceConfigs ?? []).map(jobSourceConfigId))
+    .filter((id) => id in sources || id.startsWith("references:"));
+  for (const id of Object.keys(sources)) if (!ids.includes(id)) ids.push(id);
+  return { ...input, searchSources: ids, ...(input.sourceConfigs ? { sourceConfigs: input.sourceConfigs.filter((config) => jobSourceConfigId(config) in sources || config.type === "brave_search") } : {}) };
+}
+
+/** The scout and campaign shape built from search-intent.json and discovery.json. */
+export function createRuntimeSources(env: BackgroundCareerAgentEnvironment): RuntimeSources {
   const remotiveEndpoint = valueOrDefault(env.VITE_REMOTIVE_API_BASE_URL, DEFAULT_REMOTIVE_API_BASE_URL);
   const himalayasEndpoint = valueOrDefault(env.ATELIER_HIMALAYAS_API_BASE_URL, DEFAULT_HIMALAYAS_API_BASE_URL);
   const leverEndpoint = valueOrDefault(env.VITE_LEVER_API_BASE_URL, DEFAULT_LEVER_POSTINGS_BASE_URL);
   const greenhouseEndpoint = valueOrDefault(env.VITE_GREENHOUSE_API_BASE_URL, DEFAULT_GREENHOUSE_API_BASE_URL);
-  const leverSites = parseLeverSites(env.VITE_LEVER_SITES ?? "");
-  const greenhouseBoards = parseGreenhouseBoards(env.VITE_GREENHOUSE_BOARDS ?? "");
-  const broadDiscoveryEnabled = parseBroadDiscoveryEnabled(env.VITE_BROAD_DISCOVERY_ENABLED ?? "false");
+  const configured = loadBackgroundDiscoveryConfig(env);
+  // Boards the job search learned from feed companies (learned-boards.json) join the configured ones.
+  const learned = loadLearnedBoards((env as Record<string, string | undefined>).ATELIER_CAREER_AGENT_LEARNED_BOARDS_FILE?.trim() || DEFAULT_LEARNED_BOARDS_FILE);
+  const merge = (a: readonly string[], b: readonly string[]) => [...new Map([...a, ...b].map((board) => [board.toLowerCase(), board])).values()];
+  const discovery = {
+    ...configured,
+    employerBoards: {
+      greenhouse: merge(configured.employerBoards.greenhouse, learned.greenhouse),
+      lever: merge(configured.employerBoards.lever, learned.lever),
+      ashby: merge(configured.employerBoards.ashby, learned.ashby),
+    },
+  };
+  // Boards from discovery.json join any listed in the older env variables.
+  const leverSites = parseLeverSites([env.VITE_LEVER_SITES ?? "", ...discovery.employerBoards.lever].join(","));
+  const greenhouseBoards = parseGreenhouseBoards([env.VITE_GREENHOUSE_BOARDS ?? "", ...discovery.employerBoards.greenhouse].join(","));
+  const broadDiscoveryEnabled = discovery.sources.brave || parseBroadDiscoveryEnabled(env.VITE_BROAD_DISCOVERY_ENABLED ?? "false");
   const searchIntent = loadBackgroundSearchIntent(env);
   const destinationCandidates = loadBackgroundDestinationCandidates(env);
   const leverSources = createLeverJobSources(leverSites, leverEndpoint);
@@ -338,11 +442,14 @@ function createRuntimeSources(env: BackgroundCareerAgentEnvironment): RuntimeSou
 
   const remotive = createRemotiveJobSource(remotiveEndpoint);
   const himalayas = createHimalayasJobSource(himalayasEndpoint);
+  const ashbySources = discovery.employerBoards.ashby.map((board) => new AshbyBoardSource({ board }));
   const sources: Record<string, JobSource> = {
-    [remotive.id]: remotive,
-    [HIMALAYAS_SOURCE_ID]: himalayas,
+    ...(discovery.sources.remotive ? { [remotive.id]: remotive } : {}),
+    ...(discovery.sources.himalayas ? { [HIMALAYAS_SOURCE_ID]: himalayas } : {}),
+    ...(discovery.sources.themuse ? { [MUSE_SOURCE_ID]: new MuseJobSource() } : {}),
     ...Object.fromEntries(leverSources.map((source) => [source.id, source])),
     ...Object.fromEntries(greenhouseSources.map((source) => [source.id, source])),
+    ...Object.fromEntries(ashbySources.map((source) => [source.id, source])),
   };
   if (broadDiscoveryEnabled) {
     const brave = new BraveSearchDiscoveryProvider({
@@ -353,8 +460,9 @@ function createRuntimeSources(env: BackgroundCareerAgentEnvironment): RuntimeSou
   }
 
   return {
-    scout: new JobScout(sources),
-    campaignInput: createLiveCampaignInput(leverSites, greenhouseBoards, broadDiscoveryEnabled, searchIntent, true),
+    // Large boards (Gopuff's Lever board lists ~800 postings) need longer than the 8s default.
+    scout: new JobScout(sources, undefined, { timeoutMs: 20_000 }),
+    campaignInput: discoveryCampaignInput(createLiveCampaignInput(leverSites, greenhouseBoards, broadDiscoveryEnabled, searchIntent, true), sources),
     destinationResolver: new BoundedApplicationDestinationResolver({
       lookup: new StaticDestinationEvidenceLookup(destinationCandidates),
     }),
@@ -378,14 +486,24 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
   private readonly hostPollIntervalMs: number;
   private readonly hostPollTimeoutMs: number;
   private readonly submissionAuthority?: DurableSubmissionAuthority;
+  private readonly confirmQueueRow?: (job: CareerJob) => Promise<string | undefined>;
+  private readonly receiptInbox?: InboxSource;
+  private readonly receiptPollIntervalMs: number;
+  private readonly seenReceiptEmails = new Set<string>();
+  private receiptTimer?: ReturnType<typeof setInterval>;
+  private receiptCheckRunning = false;
+  private readonly boardPermalinks = new Map<string, string>();
   private started = false;
   private stopped = false;
 
   constructor(options: BackgroundCareerAgentRuntimeOptions) {
     this.profile = options.profile;
-    const storage = options.stateStorage ?? new FileKeyValueStorage(options.stateFilePath ?? DEFAULT_CAREER_AGENT_STATE_FILE);
+    this.receiptInbox = options.receiptInbox;
+    this.receiptPollIntervalMs = positiveInteger(options.receiptPollIntervalMs, 3 * 60_000, "Career Agent receipt poll interval");
+    this.confirmQueueRow = options.confirmQueueRow;
+    const storage = options.stateStorage ?? openStateStorage(options.stateFilePath ?? DEFAULT_CAREER_AGENT_STATE_DB);
     this.stateStorage = storage;
-    this.stateFilePath = storage instanceof FileKeyValueStorage ? storage.filePath : options.stateFilePath;
+    this.stateFilePath = "filePath" in storage && typeof (storage as { filePath?: unknown }).filePath === "string" ? (storage as { filePath: string }).filePath : options.stateFilePath;
     this.careerRepository = options.careerRepository ?? new LocalStorageCareerRepository(storage);
     this.applicationRepository = options.applicationRepository ?? new LocalStorageApplicationRepository(storage);
     this.notification = options.notification ?? (options.notificationAdapter ? { adapter: options.notificationAdapter } : undefined);
@@ -423,11 +541,19 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
               applicationAnswerDraftGenerator: options.applicationAnswerDraftGenerator,
             }
           : {}),
+        ...(options.postingEnricher ? { postingEnricher: options.postingEnricher } : {}),
+        ...(options.answerBank ? { answerBank: options.answerBank } : {}),
+        ...(options.answerBankMatcher ? { answerBankMatcher: options.answerBankMatcher } : {}),
         ...(this.executionHost
           ? {
               resumeAttention: async (campaignId, jobId, options) => this.resumeHostExecution(campaignId, jobId, options),
             }
           : {}),
+        confirmPostSubmitDone: async (campaignId, jobId) => {
+          const applied = await this.confirmManualApplication(campaignId, jobId);
+          await this.confirmQueueRowForAppliedJob(jobId).catch(() => undefined);
+          return applied;
+        },
       },
       serviceOptions,
     );
@@ -442,6 +568,14 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
       await this.service.publishPendingAttentionEvents();
       this.started = true;
       await this.resumePendingAttentionContinuations();
+      if (this.receiptInbox) {
+        this.receiptTimer = setInterval(() => {
+          void this.checkApplicationReceipts().catch((error: unknown) => {
+            console.warn(`[career-agent-receipts] check failed: ${error instanceof Error ? error.message.slice(0, 200) : "unknown error"}`);
+          });
+        }, this.receiptPollIntervalMs);
+        this.receiptTimer.unref?.();
+      }
     } catch (error) {
       await this.notification?.stop?.();
       throw error;
@@ -451,6 +585,7 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
   async stop(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    if (this.receiptTimer) clearInterval(this.receiptTimer);
     await this.notification?.stop?.();
     const applicationIds = [
       ...new Set(
@@ -522,6 +657,144 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
 
   confirmManualApplication(campaignId: string, jobId: string): Promise<CareerJob> {
     return this.service.confirmManualApplication(campaignId, jobId, this.submissionAuthority);
+  }
+
+  /**
+   * While any job waits on DONE (or on Submit), look for the employer's
+   * "thanks for applying" email. A receipt that names one waiting job marks
+   * it Applied exactly as DONE would; an ambiguous one is reported once and
+   * changes nothing.
+   */
+  async checkApplicationReceipts(): Promise<{ confirmed: string[]; ambiguous: string[] }> {
+    const result = { confirmed: [] as string[], ambiguous: [] as string[] };
+    if (!this.receiptInbox || this.receiptCheckRunning) return result;
+    this.receiptCheckRunning = true;
+    try {
+      (this.stateStorage as { reload?: () => void } | undefined)?.reload?.();
+      if (!this.service.listJobs().some(isAwaitingReceipt)) return result;
+      const emails = [...await this.receiptInbox.recentEmails(2, { skipIds: this.seenReceiptEmails, maxResults: 25 })]
+        .sort((left, right) => left.receivedAt.localeCompare(right.receivedAt));
+      for (const email of emails) {
+        this.seenReceiptEmails.add(email.id);
+        (this.stateStorage as { reload?: () => void } | undefined)?.reload?.();
+        const match = matchReceiptToJob(email, this.service.listJobs());
+        if (match.kind === "none") continue;
+        if (match.kind === "ambiguous") {
+          result.ambiguous.push(email.subject);
+          await this.notification?.adapter.publishInfoNotice?.(
+            `A "thanks for applying" email arrived ("${email.subject.slice(0, 100)}"), but it could be for ${match.jobs.map((job) => `${job.job.company} — ${job.job.title}`).join(" or ")}. Reply DONE on the right one.`,
+          ).catch(() => undefined);
+          continue;
+        }
+        const job = match.job;
+        const confirm = async () => {
+          (this.stateStorage as { reload?: () => void } | undefined)?.reload?.();
+          const current = this.service.getJob(job.id);
+          if (!isAwaitingReceipt(current)) return undefined;
+          const applied = await this.service.confirmManualApplication(current.campaignId, current.id, this.submissionAuthority, { fromReceipt: true });
+          this.service.recordReceiptConfirmation(current.campaignId, current.id, email);
+          return applied;
+        };
+        const storage = this.stateStorage as { withExclusiveLockAsync?: <R>(operation: () => Promise<R>) => Promise<R> } | undefined;
+        let applied: CareerJob | undefined;
+        try {
+          applied = storage?.withExclusiveLockAsync ? await storage.withExclusiveLockAsync(confirm) : await confirm();
+        } catch (error) {
+          // One job that cannot be confirmed this way (for example, one older
+          // than the submission fence) must not stop the remaining emails.
+          console.warn(`[career-agent-receipts] ${job.job.company}: ${error instanceof Error ? error.message.slice(0, 200) : "confirmation failed"}; reply DONE instead`);
+          continue;
+        }
+        if (!applied) continue;
+        const queueNote = await this.confirmQueueRowForAppliedJob(applied.id).catch(() => "the queue row could not be updated; confirm it in the Sheet");
+        result.confirmed.push(`${applied.job.company} — ${applied.job.title}`);
+        await this.notification?.adapter.publishInfoNotice?.(
+          `${applied.job.company} — ${applied.job.title}: their confirmation email arrived ("${email.subject.slice(0, 100)}"), so I marked it Applied. No DONE needed.${queueNote && !/confirmed/i.test(queueNote) ? ` (${queueNote})` : ""}`,
+        ).catch(() => undefined);
+        console.info(`[career-agent-receipts] ${applied.job.company} marked Applied from a confirmation email`);
+      }
+      return result;
+    } finally {
+      this.receiptCheckRunning = false;
+    }
+  }
+
+  /**
+   * Refresh the Slack "Waiting on you" board from job state: post any recent
+   * question that never reached Slack, then, only when the board's content
+   * changed, post the new board and delete the old one. Run by the
+   * long-lived runtime service on an interval.
+   */
+  async refreshWaitingBoard(now = new Date()): Promise<"posted" | "unchanged" | "unavailable"> {
+    const adapter = this.notification?.adapter as Partial<WaitingBoardPort> | undefined;
+    if (typeof adapter?.replaceWaitingBoard !== "function") return "unavailable";
+    const storage = this.stateStorage as { reload?: () => void; withExclusiveLockAsync?: <R>(operation: () => Promise<R>) => Promise<R> } | undefined;
+    const recentSince = new Date(now.getTime() - WAITING_BOARD_RECENT_MS).toISOString();
+    const postMissing = async () => { storage?.reload?.(); return this.service.publishUnaskedAttention(recentSince); };
+    await (storage?.withExclusiveLockAsync ? storage.withExclusiveLockAsync(postMissing) : postMissing()).catch(() => 0);
+    storage?.reload?.();
+    const events = this.careerRepository.listCampaigns().flatMap((campaign) => campaign.attentionEvents ?? []);
+    const board = waitingBoardItems(this.service.listJobs(), events,
+      (blocker, job) => attentionDescriptorSignature(blocker, job.job.compensation) !== undefined, now, this.readReviewCards());
+    const signature = waitingBoardSignature(board);
+    const saved = this.readWaitingBoardState();
+    if (saved?.ts && saved.signature === signature) return "unchanged";
+    for (const item of board.items) {
+      if (item.link && !this.boardPermalinks.has(item.link)) {
+        const url = await adapter.permalink?.(item.link).catch(() => undefined);
+        if (url) this.boardPermalinks.set(item.link, url);
+      }
+    }
+    const ts = await adapter.replaceWaitingBoard(renderWaitingBoard(board, now, (messageTs) => this.boardPermalinks.get(messageTs)), saved?.ts);
+    this.writeWaitingBoardState({ ts, signature });
+    return "posted";
+  }
+
+  /**
+   * Keep Slack showing only what still needs the candidate: delete the bot's
+   * own messages more than a day old unless they are the current board, a
+   * question for a job still waiting, or the Submit card of a job still ready.
+   */
+  async tidySlack(now = new Date(), options: { maxDeletes?: number; pauseMs?: number } = {}): Promise<number> {
+    const adapter = this.notification?.adapter as Partial<SlackTidyPort> | undefined;
+    if (typeof adapter?.listTidyCandidates !== "function" || typeof adapter.deleteOwnMessage !== "function") return 0;
+    (this.stateStorage as { reload?: () => void } | undefined)?.reload?.();
+    const waiting = new Set(this.service.listJobs().filter((job) => job.status === "needs_input" || job.status === "ready_to_submit").map((job) => job.id));
+    const keep = new Set<string>();
+    const board = this.readWaitingBoardState()?.ts;
+    if (board) keep.add(board);
+    for (const campaign of this.careerRepository.listCampaigns()) {
+      for (const event of campaign.attentionEvents ?? []) {
+        if (event.status !== "open" || !event.providerDelivery || (event.jobId && !waiting.has(event.jobId))) continue;
+        keep.add(event.providerDelivery.messageTs);
+        if (event.providerDelivery.threadTs) keep.add(event.providerDelivery.threadTs);
+      }
+    }
+    for (const [jobId, ts] of this.readReviewCards()) if (waiting.has(jobId)) keep.add(ts);
+    const before = ((now.getTime() - SLACK_TIDY_MIN_AGE_MS) / 1_000).toFixed(6);
+    const doomed = slackMessagesToTidy(await adapter.listTidyCandidates(before), keep, now, SLACK_TIDY_MIN_AGE_MS)
+      .slice(0, options.maxDeletes ?? 40);
+    let deleted = 0;
+    for (const ts of doomed) {
+      if (await adapter.deleteOwnMessage(ts)) deleted += 1;
+      if (options.pauseMs !== 0) await new Promise((resolvePromise) => setTimeout(resolvePromise, options.pauseMs ?? 1_200));
+    }
+    return deleted;
+  }
+
+  private get waitingBoardStatePath(): string {
+    return resolve(this.stateFilePath ? dirname(this.stateFilePath) : ".local/career-agent", "slack-waiting-board.json");
+  }
+
+  private readWaitingBoardState(): { ts?: string; signature?: string } | undefined {
+    try { return JSON.parse(readFileSync(this.waitingBoardStatePath, "utf8")) as { ts?: string; signature?: string }; } catch { return undefined; }
+  }
+
+  private writeWaitingBoardState(state: { ts: string; signature: string }): void {
+    const path = this.waitingBoardStatePath;
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(`${path}.tmp`, JSON.stringify(state));
+    renameSync(`${path}.tmp`, path);
   }
 
   correctFalseManualSubmissionConfirmation(campaignId: string, jobId: string, reason?: string): CareerJob {
@@ -698,6 +971,46 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
     return this.service.getApplication(applicationId);
   }
 
+  async submitFromHumanApproval(campaignId: string, jobId: string, applicationId: string, executionHostBaseUrl: string): Promise<{ submitted: boolean; message: string }> {
+    const storage = this.stateStorage as (KeyValueStorage & {
+      reload?: () => void;
+      withExclusiveLockAsync?: <R>(operation: () => Promise<R>) => Promise<R>;
+    }) | undefined;
+    if (!storage?.withExclusiveLockAsync) throw new Error("Submitting requires the file-backed runtime state.");
+    let label = "this application";
+    const job = await authorizeThenSubmit(storage.withExclusiveLockAsync.bind(storage), () => {
+      storage.reload?.();
+      const current = this.service.getJob(jobId);
+      const application = this.service.getApplication(applicationId);
+      label = `${current.job.company} — ${current.job.title}`;
+      assertSubmitPreparedApplicationPreflight({ campaignId, jobId, applicationId, job: current, application, executionHostBaseUrl });
+      // An unknown fence means an earlier click may have landed; only the
+      // CLI's explicit duplicate-risk authorization can retry that.
+      assertDuplicateRiskRetryAuthorization(this.getSubmissionFence(applicationId, jobId)?.state, undefined, undefined);
+    }, () => this.submitPreparedApplication(campaignId, jobId));
+    if (job.status === "applied") {
+      const queueNote = await this.confirmQueueRowForAppliedJob(jobId).catch(() => "the queue row could not be updated; confirm it in the Sheet");
+      return { submitted: true, message: `Submitted: ${label}. The employer confirmation was verified and the tracker is being updated.${queueNote ? ` Queue: ${queueNote}.` : ""}` };
+    }
+    return {
+      submitted: false,
+      message: `Not confirmed: ${label} (status ${job.status}). Check the employer site or your email before doing anything else; the agent will not retry automatically.`,
+    };
+  }
+
+  async confirmQueueRowForAppliedJob(jobId: string): Promise<string | undefined> {
+    const job = this.service.getJob(jobId);
+    if (job.status !== "applied" || !(job.submissionProof || job.manualSubmissionConfirmation)) return undefined;
+    return this.confirmQueueRow?.(job);
+  }
+
+  async notifyQueueHandoff(notice: QueueHandoffNotice): Promise<boolean> {
+    const adapter = this.notification?.adapter;
+    if (!adapter?.publishQueueHandoffNotice) return false;
+    await adapter.publishQueueHandoffNotice(notice);
+    return true;
+  }
+
   private async startPreparedHostExecutions(campaignId: string): Promise<void> {
     if (!this.executionHost) return;
     const candidates = this.service
@@ -787,9 +1100,15 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
   private async resumeHostExecution(campaignId: string, jobId: string, options: { verificationHandoff?: boolean } = {}): Promise<void> {
     if (!this.executionHost) return;
     const job = this.service.getJob(jobId);
-    const executionId = job.execution?.mode === "real_local" ? job.execution.hostExecutionId : undefined;
-    if (!executionId) return;
+    if (job.execution?.mode !== "real_local") return;
+    const executionId = job.execution.hostExecutionId;
     const request = executionRequestFor(this.service, this.serviceProfile(), campaignId, jobId);
+    // A refreshed packet has no browser yet; the answer starts its first run.
+    if (!executionId) {
+      if (options.verificationHandoff) return;
+      await this.reconcileHostExecution(campaignId, jobId, await this.executionHost.start(request));
+      return;
+    }
     let snapshot: ExecutionHostSnapshot;
     try {
       snapshot = await this.executionHost.resume(executionId, request);
@@ -809,7 +1128,66 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
     await this.reconcileHostExecution(campaignId, jobId, snapshot);
   }
 
+  private readonly announcedSubmissionReviews = new Set<string>();
+
+  /**
+   * jobId → Slack ts of the latest "Application ready to submit" card, kept in
+   * shared state because the card may be posted by a maintenance command
+   * while the long-lived listener draws the board.
+   */
+  private readReviewCards(): Map<string, string> {
+    try {
+      const raw = this.stateStorage?.getItem(SUBMISSION_REVIEW_CARDS_KEY);
+      const parsed = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+      return new Map(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+    } catch {
+      return new Map();
+    }
+  }
+
+  private rememberReviewCard(jobId: string, ts: string): void {
+    if (!this.stateStorage) return;
+    const cards = this.readReviewCards();
+    const liveJobs = new Set(this.service.listJobs().filter((job) => job.status === "ready_to_submit").map((job) => job.id));
+    for (const id of cards.keys()) if (!liveJobs.has(id)) cards.delete(id);
+    cards.set(jobId, ts);
+    this.stateStorage.setItem(SUBMISSION_REVIEW_CARDS_KEY, JSON.stringify(Object.fromEntries(cards)));
+  }
+
   private async reconcileHostExecution(campaignId: string, jobId: string, initial: ExecutionHostSnapshot): Promise<ExecutionHostSnapshot> {
+    const final = await this.pollHostExecution(campaignId, jobId, initial);
+    await this.announceSubmissionReview(campaignId, jobId, final).catch(() => {
+      console.warn("[career-agent-runtime] submission review notice could not be published");
+    });
+    return final;
+  }
+
+  /** Posts the pre-submit review once per prepared browser execution. */
+  private async announceSubmissionReview(campaignId: string, jobId: string, snapshot: ExecutionHostSnapshot): Promise<void> {
+    const publish = this.notification?.adapter.publishSubmissionReview;
+    if (!publish || snapshot.status !== "ready_to_submit" || snapshot.result?.state !== "ready_to_submit") return;
+    if (this.announcedSubmissionReviews.has(snapshot.id)) return;
+    const job = this.service.getJob(jobId);
+    if (job.status !== "ready_to_submit" || !job.applicationId) return;
+    const application = this.service.getApplication(job.applicationId);
+    const inspection = snapshot.result.inspection;
+    const labels = new Map(inspection.fields.map((field) => [field.id, field.label]));
+    this.announcedSubmissionReviews.add(snapshot.id);
+    const cardTs = await publish.call(this.notification!.adapter, {
+      campaignId,
+      jobId,
+      applicationId: job.applicationId,
+      company: job.job.company,
+      role: job.job.title,
+      ...(application.resume?.familyId ? { resumeFamily: application.resume.familyId } : {}),
+      ...(job.job.sourceUrl ?? job.job.applicationUrl ? { postingUrl: (job.job.sourceUrl ?? job.job.applicationUrl)! } : {}),
+      filled: inspection.reviewSummary ?? inspection.fieldsFilled.map((id) => ({ label: labels.get(id) ?? id, value: "" })),
+      leftBlank: inspection.unresolvedFields,
+    });
+    if (typeof cardTs === "string") this.rememberReviewCard(jobId, cardTs);
+  }
+
+  private async pollHostExecution(campaignId: string, jobId: string, initial: ExecutionHostSnapshot): Promise<ExecutionHostSnapshot> {
     if (!this.executionHost) return initial;
     let snapshot = initial;
     await this.service.recordExecutionHostSnapshot(campaignId, jobId, snapshot);
@@ -850,9 +1228,10 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
     executionConfig = resolveExecutionHostConfig(env);
   }
   const configuredExecutor = browserEnabled ? createConfiguredBrowserExecutor(executionConfig!) : new UnavailableApplicationExecutor();
-  const applicationAnswerDraftGenerator = createConfiguredApplicationAnswerDraftGenerator(env);
-  const stateFilePath = resolve(valueOrDefault(env.ATELIER_CAREER_AGENT_STATE_FILE, DEFAULT_CAREER_AGENT_STATE_FILE));
-  const sharedStorage = new FileKeyValueStorage(stateFilePath);
+  const stateFilePath = resolve(valueOrDefault(env.ATELIER_CAREER_AGENT_STATE_FILE, DEFAULT_CAREER_AGENT_STATE_DB));
+  const modelCallLogger = configuredModelCallLogger(env, stateFilePath);
+  const applicationAnswerDraftGenerator = createConfiguredApplicationAnswerDraftGenerator(env, modelCallLogger);
+  const sharedStorage = openStateStorage(stateFilePath);
   const sharedCareerRepository = new LocalStorageCareerRepository(sharedStorage);
   const sharedApplicationRepository = new LocalStorageApplicationRepository(sharedStorage);
   // The long-lived Slack listener and the browser execution host may be
@@ -871,8 +1250,9 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
     })(),
   );
   const tracker = createConfiguredGoogleSheetsJobTracker(env as GoogleSheetsEnvironment);
+  const executionHostBaseUrl = valueOrDefault(env.ATELIER_EXECUTION_HOST_BASE_URL ?? env.VITE_EXECUTION_HOST_BASE_URL, "http://127.0.0.1:8787");
   const executionHost = new HttpExecutionHostClient({
-    baseUrl: valueOrDefault(env.ATELIER_EXECUTION_HOST_BASE_URL ?? env.VITE_EXECUTION_HOST_BASE_URL, "http://127.0.0.1:8787"),
+    baseUrl: executionHostBaseUrl,
   } satisfies ExecutionHostClientOptions);
   let runtime: BackgroundCareerAgentRuntime | undefined;
   const slack = new SlackNotificationAdapter({
@@ -890,14 +1270,27 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
       try {
         reloadSharedState();
         const result = await runtime.service.resolveAttentionResponse(response);
+        if (result.status === "resolved" && result.event.type === "resume_choice") {
+          const chosen = result.careerJob.queueResumeFamily ?? "";
+          const note = applyResumeChoice
+            ? await applyResumeChoice(result.careerJob, chosen).catch(() => "the Sheet could not be updated, so set Resume Version and Ready in the Sheet")
+            : "no queue Sheet is configured";
+          await slack.publishInfoNotice(`${result.careerJob.job.company}: using ${result.event.answerUsed ?? chosen}; ${note}.`).catch(() => undefined);
+        }
         console.info(
           `[career-agent-slack] ${result.status === "resolved" ? "CareerAgentService resume completed" : "attention event already resolved; no resume needed"}`,
         );
         return { status: result.status };
       } catch (error) {
-        console.warn("[career-agent-slack] CareerAgentService resume failed");
+        console.warn(`[career-agent-slack] CareerAgentService resume failed: ${error instanceof Error ? error.message.slice(0, 200) : "unknown error"}`);
         throw error;
       }
+    },
+    submissionApprovalHandler: async (approval) => {
+      if (!runtime) throw new Error("The Career Agent runtime is not ready.");
+      const result = await runtime.submitFromHumanApproval(approval.campaignId, approval.jobId, approval.applicationId, executionHostBaseUrl);
+      console.info(`[career-agent-slack] human-approved submit ${result.submitted ? "confirmed" : "not confirmed"}`);
+      return result;
     },
     handoffUrlForApplication: executionConfig?.handoffViewer?.enabled
       ? async (applicationId) => {
@@ -909,8 +1302,53 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
         }
       : undefined,
   });
+  const queueSpreadsheetId = env.ATELIER_GOOGLE_SHEET_ID?.trim();
+  const queueSpreadsheetName = env.ATELIER_GOOGLE_SHEET_NAME?.trim();
+  const confirmQueueRow = queueSpreadsheetId && queueSpreadsheetName
+    ? async (job: CareerJob): Promise<string | undefined> => {
+        const queue = new GoogleSheetsJobQueue({
+          spreadsheetId: queueSpreadsheetId,
+          spreadsheetName: queueSpreadsheetName,
+          sheetTab: env.ATELIER_GOOGLE_SHEET_QUEUE_TAB?.trim() || "Application Queue",
+          timeoutMs: 10_000,
+        }, createConfiguredGoogleSheetsTransport(env as GoogleSheetsEnvironment));
+        const key = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        const matches = (await queue.list()).filter((row) =>
+          // After an unconfirmed Submit the row waits in Needs Input until DONE.
+          (row.status === "Ready to Submit" || row.status === "Submitted" || row.status === "Needs Input") &&
+          key(row.company) === key(job.job.company) && key(row.role) === key(job.job.title));
+        if (matches.length !== 1) return matches.length === 0 ? undefined : "more than one matching row; confirm it in the Sheet";
+        const proof = job.submissionProof;
+        const confirmedAt = proof?.submittedAt ?? job.manualSubmissionConfirmation?.confirmedAt ?? new Date().toISOString();
+        await queue.update(matches[0]!.jobId, {
+          status: "Confirmed",
+          ...(proof?.externalApplicationId ? { proofId: proof.externalApplicationId } : {}),
+          confirmationEvidence: `Applied ${confirmedAt} via ${proof?.provider ?? "manual confirmation"}${proof?.evidence ? ` (${proof.evidence})` : ""}`.slice(0, 300),
+          lastError: "",
+        });
+        return "marked Confirmed";
+      }
+    : undefined;
+  const applyResumeChoice = queueSpreadsheetId && queueSpreadsheetName
+    ? async (job: CareerJob, resumeFamily: string): Promise<string> => {
+        const transport = createConfiguredGoogleSheetsTransport(env as GoogleSheetsEnvironment);
+        const queue = new GoogleSheetsJobQueue({
+          spreadsheetId: queueSpreadsheetId,
+          spreadsheetName: queueSpreadsheetName,
+          sheetTab: env.ATELIER_GOOGLE_SHEET_QUEUE_TAB?.trim() || "Application Queue",
+          timeoutMs: 10_000,
+        }, transport);
+        return applyResumeChoiceToSheets({
+          transport, spreadsheetId: queueSpreadsheetId, queue,
+          trackerTab: env.ATELIER_GOOGLE_SHEET_TAB?.trim() || "Job Tracker",
+          company: job.job.company, role: job.job.title, links: [job.job.applicationUrl, job.job.sourceUrl],
+          resumeFamily,
+        });
+      }
+    : undefined;
   const created = createBackgroundCareerAgentRuntime({
     profile,
+    ...(confirmQueueRow ? { confirmQueueRow } : {}),
     stateStorage: sharedStorage,
     careerRepository: sharedCareerRepository,
     applicationRepository: sharedApplicationRepository,
@@ -919,6 +1357,7 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
     officialDestinationCandidates: sources.officialDestinationCandidates,
     executor: configuredExecutor,
     tracker,
+    postingEnricher: (input) => enrichJobIntake(input),
     resumeArtifactAvailable: (familyId) => {
       const path = resumePaths[familyId];
       return Boolean(path && isUsableResumeArtifact(path));
@@ -928,6 +1367,8 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
           applicationAnswerDraftGenerator: applicationAnswerDraftGenerator.generate.bind(applicationAnswerDraftGenerator),
         }
       : {}),
+    ...createConfiguredAnswerBank(env, modelCallLogger),
+    ...createConfiguredReceiptInbox(env),
     notification: {
       adapter: slack,
       hydrate: (events) => {
@@ -970,6 +1411,49 @@ function parsePositiveInteger(value: string | undefined, fallback: number, label
   return parsed;
 }
 
+/**
+ * The answer bank is on unless ATELIER_CAREER_AGENT_ANSWER_BANK=disabled.
+ * When the local model is configured it also matches low-risk questions
+ * worded differently from the saved ones.
+ */
+function createConfiguredAnswerBank(env: Partial<Record<"ATELIER_CAREER_AGENT_ANSWER_BANK" | "ATELIER_CAREER_AGENT_ANSWER_BANK_FILE" | "ATELIER_CAREER_AGENT_OLLAMA_MODEL" | "ATELIER_CAREER_AGENT_OLLAMA_BASE_URL", string | undefined>>, logger?: ModelCallLogger) {
+  const setting = env.ATELIER_CAREER_AGENT_ANSWER_BANK?.trim() || "enabled";
+  if (setting === "disabled") return {};
+  if (setting !== "enabled") throw new Error("ATELIER_CAREER_AGENT_ANSWER_BANK must be enabled or disabled.");
+  const model = env.ATELIER_CAREER_AGENT_OLLAMA_MODEL?.trim();
+  const baseUrl = env.ATELIER_CAREER_AGENT_OLLAMA_BASE_URL?.trim();
+  return {
+    answerBank: new FileAnswerBankStore(env.ATELIER_CAREER_AGENT_ANSWER_BANK_FILE?.trim() || undefined),
+    ...(model ? { answerBankMatcher: createOllamaAnswerBankMatcher({ model, ...(baseUrl ? { baseUrl } : {}), ...(logger ? { logger } : {}) }) } : {}),
+  };
+}
+
+/**
+ * Confirmation emails are read from Gmail (read-only) when Gmail access is on
+ * and Google uses OAuth; ATELIER_CAREER_AGENT_RECEIPT_WATCH=disabled turns it off.
+ */
+function createConfiguredReceiptInbox(env: BackgroundCareerAgentEnvironment) {
+  if ((env as Record<string, string | undefined>).ATELIER_CAREER_AGENT_RECEIPT_WATCH?.trim() === "disabled") return {};
+  try {
+    const googleEnv = env as never;
+    if (!gmailSecurityCodesEnabled(googleEnv) || resolveGoogleAuthMode(googleEnv).mode !== "oauth") return {};
+    const tokens = createGoogleOAuthAccessTokenProvider(googleEnv, 10_000);
+    return { receiptInbox: gmailInbox(() => tokens.getAccessToken()) };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Every local-model call is logged next to the state database
+ * (model-calls.jsonl) unless ATELIER_MODEL_CALL_LOG=disabled (2026-11-14).
+ */
+function configuredModelCallLogger(env: Record<string, string | undefined> | object, stateFilePath: string): ModelCallLogger | undefined {
+  const values = env as Record<string, string | undefined>;
+  if (values.ATELIER_MODEL_CALL_LOG?.trim() === "disabled") return undefined;
+  return new FileModelCallLogger(values.ATELIER_MODEL_CALL_LOG_FILE?.trim() || resolve(dirname(stateFilePath), "model-calls.jsonl"));
+}
+
 function createConfiguredApplicationAnswerDraftGenerator(
   env: Pick<
     BackgroundCareerAgentEnvironment,
@@ -978,6 +1462,7 @@ function createConfiguredApplicationAnswerDraftGenerator(
     | "ATELIER_CAREER_AGENT_OLLAMA_MODEL"
     | "ATELIER_CAREER_AGENT_OLLAMA_TIMEOUT_MS"
   >,
+  logger?: ModelCallLogger,
 ): OllamaApplicationAnswerDraftGenerator | undefined {
   const mode =
     env.ATELIER_CAREER_AGENT_ANSWER_DRAFT_MODE?.trim() || (env.ATELIER_CAREER_AGENT_OLLAMA_MODEL?.trim() ? "ollama" : "disabled");
@@ -987,6 +1472,7 @@ function createConfiguredApplicationAnswerDraftGenerator(
   if (!model) throw new Error("ATELIER_CAREER_AGENT_OLLAMA_MODEL is required when answer-draft mode is ollama.");
   return new OllamaApplicationAnswerDraftGenerator({
     model,
+    ...(logger ? { logger } : {}),
     ...(env.ATELIER_CAREER_AGENT_OLLAMA_BASE_URL?.trim() ? { baseUrl: env.ATELIER_CAREER_AGENT_OLLAMA_BASE_URL.trim() } : {}),
     ...(env.ATELIER_CAREER_AGENT_OLLAMA_TIMEOUT_MS?.trim()
       ? {

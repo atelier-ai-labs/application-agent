@@ -109,6 +109,10 @@ export interface SearchCriteria {
   excludedSeniorities: readonly string[];
   /** Optional whole-word title exclusions materialized from search intent. */
   excludedTitleTerms?: readonly string[];
+  /** Skip postings whose stated minimum experience is more than this many years. */
+  maxYearsExperience?: number;
+  /** Applications per company in a rolling window, counting ones still in progress. */
+  companyApplicationLimit?: import("./companyLimit").CompanyApplicationLimit;
   excludedCompanies: readonly string[];
 }
 
@@ -122,6 +126,11 @@ export interface FitPolicy {
 export interface ApplicationPolicy {
   autoPrepare: boolean;
   allowGroundedDrafts: boolean;
+  /**
+   * When true, a local-model answer to an exact ATS question is never typed
+   * into the form on its own; it is sent to Slack as a draft for approval.
+   */
+  reviewModelDrafts?: boolean;
   approvedResumeFamilies: readonly ResumeFamilyId[];
 }
 
@@ -477,6 +486,7 @@ export type CareerEventType =
   | "application.ready_to_submit"
   | "application.submitted"
   | "application.applied"
+  | "application.receipt_confirmed"
   | "application.failed"
   | "tracker.update_started"
   | "tracker.updated"

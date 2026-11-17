@@ -4,8 +4,10 @@ import type {
   AttentionProviderDelivery,
   NotificationAdapter,
   PersistedAttentionEvent,
+  QueueHandoffNotice,
+  SubmissionReviewNotice,
 } from "../../src/domain/attention";
-import { formatPostedCompensation } from "../../src/domain/attention";
+import { isPostingUrl, formatPostedCompensation } from "../../src/domain/attention";
 import type { SlackNotificationConfig } from "./config";
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -27,12 +29,21 @@ export interface SlackInteractionResult {
 }
 
 export type SlackAttentionResponseHandler = (response: AttentionResponse) => Promise<{
-  status: "resolved" | "duplicate";
+  status: "resolved" | "duplicate" | "partial";
 }>;
+
+/** Runs one explicit, human-approved submit of an exact prepared application. */
+export type SlackSubmissionApprovalHandler = (approval: {
+  campaignId: string;
+  jobId: string;
+  applicationId: string;
+  actorIdentity: { provider: "slack"; userId: string; workspaceId?: string };
+}) => Promise<{ submitted: boolean; message: string }>;
 
 export interface SlackNotificationAdapterOptions {
   config: SlackNotificationConfig;
   responseHandler?: SlackAttentionResponseHandler;
+  submissionApprovalHandler?: SlackSubmissionApprovalHandler;
   eventLookup?: (eventId: string) => AttentionEvent | undefined;
   persistedAttentionEventsLookup?: () => readonly PersistedAttentionEvent[] | Promise<readonly PersistedAttentionEvent[]>;
   fetcher?: Fetcher;
@@ -58,6 +69,8 @@ interface SlackApiResponse {
 }
 
 const ACTION_ID = "career_agent_attention_option";
+const SUBMIT_ACTION_ID = "career_agent_submit_prepared";
+const SUBMIT_ACTION_VALUE = /^(campaign-[0-9a-f-]{36})\|(career-job-[0-9a-f-]{36})\|(application-[0-9a-f-]{36})$/;
 const GENERATED_ACTION_ID_PATTERN = new RegExp(`^${ACTION_ID}_([0-9]+)$`);
 
 function actionIdForOption(index: number): string {
@@ -70,6 +83,10 @@ function clone<T>(value: T): T {
 
 function safeText(value: string, maximum = 240): string {
   return value.replace(/\s+/g, " ").trim().slice(0, maximum);
+}
+
+function threadReplyOnly(options: { threadReply?: boolean }): boolean {
+  return options.threadReply === true;
 }
 
 function markdownText(value: string, maximum = 240): string {
@@ -92,7 +109,78 @@ function responseData(value: unknown): string {
   return "";
 }
 
+const QUICK_REPLY_ACTION_ID = "career_agent_quick_reply";
+const QUICK_REPLY_ACTION_PATTERN = new RegExp(`^${QUICK_REPLY_ACTION_ID}_(APPROVE|SKIP|DONE)$`);
+type QuickReply = "APPROVE" | "SKIP" | "DONE";
+const QUICK_REPLY_LABELS: Record<QuickReply, string> = { APPROVE: "Approve draft", SKIP: "Skip", DONE: "Done" };
+
+function isHumanVerificationHandoff(event: AttentionEvent): boolean {
+  return event.submissionAlreadyClicked === true || event.blockerType === "captcha" ||
+    (event.blockerType === "external_verification" && /verify whether the application was submitted/i.test(event.question?.prompt ?? ""));
+}
+
+/**
+ * The one-word replies a message asks for (APPROVE, SKIP, DONE), offered as
+ * buttons too. A tap sends exactly what typing the word in the thread sends.
+ */
+export function quickRepliesForEvent(event: AttentionEvent): readonly QuickReply[] {
+  if (event.type !== "needs_input" || !event.question || event.status !== "open") return [];
+  if (event.batch && event.batch.length > 1) return [];
+  if (isHumanVerificationHandoff(event)) return ["DONE"];
+  if (event.blockerType === "resume_missing" || event.blockerType === "required_file_missing") {
+    return event.question.required === false ? ["DONE", "SKIP"] : ["DONE"];
+  }
+  const replies: QuickReply[] = [];
+  if (event.draft) replies.push("APPROVE");
+  if (event.question.required === false && event.question.kind === "free_text") replies.push("SKIP");
+  return replies;
+}
+
 function eventMessage(
+  event: AttentionEvent,
+  renderOptions: { threadReply?: boolean; handoffUrl?: string } = {},
+): {
+  text: string;
+  blocks: readonly Record<string, unknown>[];
+} {
+  const body = eventMessageBody(event, renderOptions);
+  // The posting link sits under the title, so the job can be read before
+  // answering (ElevenLabs, 2026-11-10). Thread replies already have it above.
+  const url = event.context.postingUrl;
+  const message = url && !renderOptions.threadReply && isPostingUrl(url)
+    ? {
+        text: `${body.text}\n\nJob posting: ${url}`,
+        blocks: [
+          ...body.blocks.slice(0, 1),
+          { type: "context", elements: [{ type: "mrkdwn", text: `<${url}|View the job posting>` }] },
+          ...body.blocks.slice(1),
+        ],
+      }
+    : body;
+  const replies = quickRepliesForEvent(event);
+  if (replies.length === 0) return message;
+  return {
+    text: message.text,
+    blocks: [
+      ...message.blocks,
+      {
+        type: "actions",
+        elements: replies.map((reply) => ({
+          type: "button",
+          action_id: `${QUICK_REPLY_ACTION_ID}_${reply}`,
+          text: { type: "plain_text", text: QUICK_REPLY_LABELS[reply] },
+          value: `${event.id}|${reply}`,
+          ...(reply === "APPROVE" || reply === "DONE" ? { style: "primary" } : {}),
+        })),
+      },
+    ],
+  };
+}
+
+/** Longer lists (a 244-country dropdown) are answered by typing instead of buttons. */
+const MAX_CHOICE_BUTTONS = 100;
+
+function eventMessageBody(
   event: AttentionEvent,
   renderOptions: { threadReply?: boolean; handoffUrl?: string } = {},
 ): {
@@ -121,20 +209,20 @@ function eventMessage(
     };
   }
   if (!event.question) throw new Error("An interactive attention event requires a question.");
-  const humanVerificationHandoff = event.submissionAlreadyClicked === true || event.blockerType === "captcha" ||
-    (event.blockerType === "external_verification" && /verify whether the application was submitted/i.test(event.question.prompt));
-  if (humanVerificationHandoff) {
+  if (isHumanVerificationHandoff(event)) {
     const postSubmit = event.submissionAlreadyClicked === true || event.blockerType === "external_verification";
     const handoffText = postSubmit
-      ? "The application Submit action has already crossed the submission boundary, but the employer's confirmation could not be verified automatically. Do not click Submit again."
+      ? "I clicked Submit, but I couldn't confirm that the employer received the application, so I won't click Submit again."
       : "The open browser needs a human verification step before the application can continue.";
     const instruction = postSubmit
       ? renderOptions.handoffUrl
-        ? "Do not click Submit again. Use the protected browser handoff below to verify the employer result, then reply with what you observed."
-        : "Do not click Submit again. Verify the employer result through the available handoff, then reply with what you observed. No interactive browser link is provided by this notifier."
+        ? "Open the link below (works on your phone: tap, type, and scroll the page) or check the agent's Chromium window. If the page says the application was submitted, reply DONE and I'll mark it Applied. Otherwise, reply with what you see."
+        : "Check the agent's Chromium window on your computer. If the page says the application was submitted, reply DONE and I'll mark it Applied. Otherwise, reply with what you see."
       : renderOptions.handoffUrl
-        ? "Use the protected browser handoff below to complete the verification, then reply DONE in this thread."
-        : "Complete the verification in the open local browser, then reply DONE in this thread. If the browser session has closed, reply DONE and I will report that the session expired without retrying submission.";
+        // The handoff page forwards taps, typing, and scrolling to the waiting
+        // window, so the CAPTCHA can be solved from a phone.
+        ? "Solve it from the link below (works on your phone: tap the page, use Zoom in for small tiles) or in the agent's Chromium window, then reply DONE in this thread."
+        : "Solve it in the agent's Chromium window on your computer, then reply DONE in this thread. If the browser session has closed, reply DONE and I will report that the session expired without retrying submission.";
     const link = renderOptions.handoffUrl ? `\n\nOpen the protected browser handoff: ${markdownText(renderOptions.handoffUrl, 500)}` : "";
     const text = `${markdownText(event.title, 160)}\n${markdownText(event.context.company, 160)} — ${markdownText(event.context.role, 200)}\n\n${handoffText}\n\n${instruction}${link}`;
     return {
@@ -142,6 +230,52 @@ function eventMessage(
       blocks: [
         { type: "header", text: { type: "plain_text", text: safeText(event.title, 150) } },
         { type: "section", text: { type: "mrkdwn", text: `${handoffText}\n\n${instruction}${link}` } },
+      ],
+    };
+  }
+  // A dropped or missing resume is a file to attach, not a question to answer in text.
+  if (event.blockerType === "resume_missing" || event.blockerType === "required_file_missing") {
+    const problem = event.blockerType === "resume_missing"
+      ? "I attached your résumé, but the page dropped it (sites sometimes clear an upload when the form re-renders), and attaching it again didn't stick."
+      : "The résumé file chosen for this application isn't on this computer, so I couldn't attach it.";
+    const where = renderOptions.handoffUrl ? "from the link below or in the agent's Chromium window" : "in the agent's Chromium window";
+    const optional = event.question.required === false ? " The field is optional: reply SKIP to continue without a résumé." : "";
+    const instruction = `Attach your résumé ${where}, then reply DONE in this thread.${optional}`;
+    const link = renderOptions.handoffUrl ? `\n\nOpen the protected browser handoff: ${markdownText(renderOptions.handoffUrl, 500)}` : "";
+    const body = `${problem}\n\n${instruction}${link}`;
+    if (threadReplyOnly(renderOptions)) return { text: body, blocks: [{ type: "section", text: { type: "mrkdwn", text: body } }] };
+    const text = `${markdownText(event.title, 160)}\n${markdownText(event.context.company, 160)} — ${markdownText(event.context.role, 200)}\n\n${body}`;
+    return {
+      text,
+      blocks: [
+        { type: "header", text: { type: "plain_text", text: safeText(event.title, 150) } },
+        { type: "section", text: { type: "mrkdwn", text: body } },
+      ],
+    };
+  }
+  // Every open question for this application in one message, answered with one numbered reply.
+  if (event.batch && event.batch.length > 1) {
+    const items = event.batch.map((item, index) => {
+      const optional = item.required === false ? " _(optional)_" : "";
+      const choices = item.kind === "single_choice" && item.options.length > 0
+        ? `\n      Choices: ${item.options.map((option) => markdownText(option.label, 120)).join(" · ")}`
+        : "";
+      return `*${index + 1}.* ${markdownText(item.prompt, 240)}${optional}${choices}`;
+    });
+    const postedCompensation = event.batch.some((_, index) => index === 0 && event.blockerType === "salary")
+      ? formatPostedCompensation(event.context.postingCompensation)
+      : undefined;
+    const pay = postedCompensation ? `\n\n_The posting lists ${postedCompensation}._` : "";
+    const optionalNote = event.batch.some((item) => item.required === false) ? " Optional ones take SKIP." : "";
+    const howTo = `Reply once in this thread with numbered answers, for example:\n\`1. Yes\`\n\`2. No\`${optionalNote} You can answer some now and the rest later.`;
+    const body = `${event.batch.length} questions for this application:\n\n${items.join("\n")}${pay}\n\n${howTo}`;
+    if (renderOptions.threadReply === true) return { text: body, blocks: [{ type: "section", text: { type: "mrkdwn", text: body.slice(0, 2900) } }] };
+    const text = `${markdownText(event.title, 160)}\n${markdownText(event.context.company, 160)} — ${markdownText(event.context.role, 200)}\n\n${body}`;
+    return {
+      text,
+      blocks: [
+        { type: "header", text: { type: "plain_text", text: safeText(`${event.context.company} — ${event.batch.length} questions`, 150) } },
+        { type: "section", text: { type: "mrkdwn", text: `*${markdownText(event.context.company, 160)} — ${markdownText(event.context.role, 200)}*\n\n${body}`.slice(0, 2900) } },
       ],
     };
   }
@@ -159,7 +293,7 @@ function eventMessage(
       : "";
   const answerOptions =
     event.question.kind === "single_choice" && event.question.options.length > 0
-      ? `Options: ${event.question.options.map((option) => markdownText(option.label, 64)).join(" / ")}`
+      ? `Options: ${event.question.options.map((option) => markdownText(option.label, 200)).join(" / ")}`
       : "";
   const draftReview = event.draft
     ? [
@@ -188,11 +322,14 @@ function eventMessage(
   ]
     .filter(Boolean)
     .join("\n\n");
-  const replyInstruction = event.draft
-    ? "\n\nReply APPROVE to use this draft, or reply with your edited answer. The draft is never used without your explicit approval."
+  const optionalNote = event.question.required === false && event.question.kind === "free_text"
+    ? " This question is optional: reply SKIP to leave it blank."
+    : "";
+  const replyInstruction = (event.draft
+    ? "\n\nTap *Approve draft* (or reply APPROVE) to use this draft, or reply with your edited answer. The draft is never used without your explicit approval."
     : event.question.kind === "free_text"
       ? "\n\nReply in this Slack thread with one grounded answer."
-      : "";
+      : "") + (optionalNote && (event.draft || event.question.kind === "free_text") ? optionalNote : "");
   const threadReply = renderOptions.threadReply === true;
   const text = threadReply
     ? `${questionDetails}${replyInstruction}`
@@ -220,16 +357,17 @@ function eventMessage(
           },
         },
       ];
-  if (event.question.kind === "single_choice" && event.question.options.length > 0) {
-    blocks.push({
-      type: "actions",
-      elements: event.question.options.map((option, index) => ({
-        type: "button",
-        action_id: actionIdForOption(index),
-        text: { type: "plain_text", text: safeText(option.label, 64) },
-        value: `${event.id}|${option.id}`,
-      })),
-    });
+  if (event.question.kind === "single_choice" && event.question.options.length > 0 && event.question.options.length <= MAX_CHOICE_BUTTONS) {
+    // Slack allows 25 elements per actions block; longer lists span several rows.
+    const buttons = event.question.options.map((option, index) => ({
+      type: "button",
+      action_id: actionIdForOption(index),
+      // Slack caps button text at 75 characters; the button value is the
+      // option id, so the full label is still what reaches the form.
+      text: { type: "plain_text", text: safeText(option.label, 75) },
+      value: `${event.id}|${option.id}`,
+    }));
+    for (let start = 0; start < buttons.length; start += 25) blocks.push({ type: "actions", elements: buttons.slice(start, start + 25) });
   }
   return {
     text,
@@ -299,6 +437,7 @@ function slackErrorCode(value: unknown): string | undefined {
 export class SlackNotificationAdapter implements NotificationAdapter {
   private readonly config: SlackNotificationConfig;
   private readonly responseHandler?: SlackAttentionResponseHandler;
+  private readonly submissionApprovalHandler?: SlackSubmissionApprovalHandler;
   private readonly eventLookup?: (eventId: string) => AttentionEvent | undefined;
   private readonly persistedAttentionEventsLookup?: SlackNotificationAdapterOptions["persistedAttentionEventsLookup"];
   private readonly fetcher: Fetcher;
@@ -320,6 +459,7 @@ export class SlackNotificationAdapter implements NotificationAdapter {
   constructor(options: SlackNotificationAdapterOptions) {
     this.config = options.config;
     this.responseHandler = options.responseHandler;
+    this.submissionApprovalHandler = options.submissionApprovalHandler;
     this.eventLookup = options.eventLookup;
     this.persistedAttentionEventsLookup = options.persistedAttentionEventsLookup;
     this.fetcher = options.fetcher ?? ((input, init) => fetch(input, init));
@@ -381,7 +521,7 @@ export class SlackNotificationAdapter implements NotificationAdapter {
       ...(humanVerificationHandoff ? { unfurl_links: false, unfurl_media: false } : {}),
     });
     const timestamp = typeof result.ts === "string" && result.ts.trim() ? result.ts.trim() : undefined;
-    if (event.type === "needs_input" && !timestamp) {
+    if ((event.type === "needs_input" || event.type === "resume_choice") && !timestamp) {
       throw new Error("Slack chat.postMessage did not return a message timestamp.");
     }
     if (!timestamp) return;
@@ -476,6 +616,206 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     });
   }
 
+  /**
+   * A reply under one of the agent's own messages that is not an open
+   * question (a review or "not confirmed" notice) was silently ignored, so
+   * the user waited for nothing. Say so in that thread and list what is open.
+   */
+  private async pointToOpenQuestions(threadTs: string): Promise<void> {
+    // Questions this adapter posted plus those hydrated from durable state.
+    const ids = new Set([...this.publishedAttentionEvents.keys(), ...[...this.threadEventIds.values()].flatMap((set) => [...set])]);
+    const open = [...ids]
+      .map((id) => this.eventLookup?.(id) ?? this.publishedAttentionEvents.get(id))
+      .filter((event): event is AttentionEvent => Boolean(event && event.status === "open" && event.type === "needs_input" && event.question))
+      .slice(0, 5)
+      .map((event) => `• *${markdownText(event.context.company, 80)}*: ${markdownText(event.question!.prompt, 160)}`);
+    const text = open.length > 0
+      ? `I couldn't match this reply to an open question, so I didn't use it. Reply in the thread of the question you're answering:\n${open.join("\n")}`
+      : "I couldn't match this reply to an open question, so I didn't use it. Nothing is waiting on you right now.";
+    await this.callApi("chat.postMessage", this.config.botToken, { channel: this.config.channelId, thread_ts: threadTs, text });
+  }
+
+  /** Posts an informational message (inbox updates) that asks no question. */
+  /** A link to one message in the configured channel, or undefined when Slack will not say. */
+  /** Top-level messages older than `beforeTs`, with the bot's own thread replies (read-only). */
+  async listTidyCandidates(beforeTs: string, limit = 200): Promise<import("../../src/domain/slackTidy").TidyCandidate[]> {
+    const read = async (method: string, params: Record<string, string>) => {
+      const query = new URLSearchParams({ channel: this.config.channelId, ...params });
+      const response = await this.fetcher(`${this.config.apiBaseUrl}/${method}?${query.toString()}`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${this.config.botToken}` },
+      });
+      const data = responsePayload(await response.json()) as { ok?: boolean; messages?: unknown[] } | undefined;
+      if (!data?.ok || !Array.isArray(data.messages)) throw new Error(`Slack ${method} was not accepted.`);
+      return data.messages.map((message) => responsePayload(message) ?? {}) as { ts?: unknown; bot_id?: unknown; reply_count?: unknown }[];
+    };
+    const ts = (value: unknown) => typeof value === "string" && /^\d+\.\d+$/.test(value) ? value : undefined;
+    const candidates: import("../../src/domain/slackTidy").TidyCandidate[] = [];
+    for (const message of await read("conversations.history", { latest: beforeTs, limit: String(Math.min(limit, 200)) })) {
+      const messageTs = ts(message.ts);
+      if (!messageTs) continue;
+      const botReplyTs = typeof message.reply_count === "number" && message.reply_count > 0
+        ? (await read("conversations.replies", { ts: messageTs, limit: "200" })).slice(1)
+            .filter((reply) => typeof reply.bot_id === "string").map((reply) => ts(reply.ts)).filter((value): value is string => Boolean(value))
+        : [];
+      candidates.push({ ts: messageTs, fromBot: typeof message.bot_id === "string", botReplyTs });
+    }
+    return candidates;
+  }
+
+  /** Deletes one of the bot's own messages; false when Slack refuses (e.g. rate limit). */
+  async deleteOwnMessage(messageTs: string): Promise<boolean> {
+    try {
+      await this.callApi("chat.delete", this.config.botToken, { channel: this.config.channelId, ts: messageTs });
+      return true;
+    } catch (error) {
+      return error instanceof Error && /message_not_found/.test(error.message);
+    }
+  }
+
+  async permalink(messageTs: string): Promise<string | undefined> {
+    try {
+      const query = new URLSearchParams({ channel: this.config.channelId, message_ts: messageTs });
+      const response = await this.fetcher(`${this.config.apiBaseUrl}/chat.getPermalink?${query.toString()}`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${this.config.botToken}` },
+      });
+      const data = responsePayload(await response.json()) as { ok?: boolean; permalink?: unknown } | undefined;
+      return data?.ok && typeof data.permalink === "string" && /^https:\/\//.test(data.permalink) ? data.permalink : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Post the "Waiting on you" board as the newest message, then delete the
+   * previous board, so the channel holds exactly one board, near the bottom.
+   * Returns the new board's message timestamp.
+   */
+  async replaceWaitingBoard(board: { text: string; blocks: unknown[] }, previousTs?: string): Promise<string> {
+    const result = await this.callApi("chat.postMessage", this.config.botToken, {
+      channel: this.config.channelId, text: board.text, blocks: board.blocks, unfurl_links: false, unfurl_media: false,
+    });
+    const ts = typeof result.ts === "string" && result.ts.trim() ? result.ts.trim() : undefined;
+    if (!ts) throw new Error("Slack chat.postMessage did not return a message timestamp.");
+    if (previousTs && previousTs !== ts) {
+      await this.callApi("chat.delete", this.config.botToken, { channel: this.config.channelId, ts: previousTs }).catch(async () => {
+        await this.callApi("chat.update", this.config.botToken, {
+          channel: this.config.channelId, ts: previousTs, text: "(An updated Waiting on you board is below.)", blocks: [],
+        }).catch(() => undefined);
+      });
+    }
+    return ts;
+  }
+
+  async publishInfoNotice(text: string): Promise<void> {
+    await this.callApi("chat.postMessage", this.config.botToken, {
+      channel: this.config.channelId,
+      text: markdownText(text, 3_000),
+      unfurl_links: false,
+      unfurl_media: false,
+    });
+  }
+
+  /** Posts a link-only notice for a queue row the agent will not open itself. */
+  async publishQueueHandoffNotice(notice: QueueHandoffNotice): Promise<void> {
+    let url: URL;
+    try {
+      url = new URL(notice.url);
+    } catch {
+      throw new Error("Queue handoff notice requires a valid HTTPS link.");
+    }
+    if (url.protocol !== "https:") throw new Error("Queue handoff notice requires a valid HTTPS link.");
+    const title = "Career Agent needs you to open this application";
+    const job = `${markdownText(notice.company, 160)} — ${markdownText(notice.role, 200)}`;
+    const body = `${markdownText(notice.reason, 400)}\n\nOpen the listing yourself: ${markdownText(url.toString(), 500)}\n\nThe agent did not sign in, create an account, or fill anything on this page. Queue row: ${markdownText(notice.jobId, 120)}`;
+    await this.callApi("chat.postMessage", this.config.botToken, {
+      channel: this.config.channelId,
+      text: `${title}\n${job}\n\n${body}`,
+      blocks: [
+        { type: "header", text: { type: "plain_text", text: title } },
+        { type: "section", text: { type: "mrkdwn", text: `*${job}*\n\n${body}` } },
+      ],
+    });
+  }
+
+  /** Posts what the agent filled and one explicit Submit button for that exact application. */
+  async publishSubmissionReview(notice: SubmissionReviewNotice): Promise<string | undefined> {
+    const value = `${notice.campaignId}|${notice.jobId}|${notice.applicationId}`;
+    if (!SUBMIT_ACTION_VALUE.test(value)) throw new Error("Submission review requires exact campaign, job, and application IDs.");
+    const job = `${markdownText(notice.company, 160)} — ${markdownText(notice.role, 200)}`;
+    const filled = notice.filled.slice(0, 40)
+      .map((entry) => `• ${markdownText(entry.label, 80)}: ${entry.value ? `\`${markdownText(entry.value, 120).replace(/`/g, "'")}\`` : "_(empty)_"}`)
+      .join("\n") || "_No filled fields were reported._";
+    const blank = notice.leftBlank.length > 0
+      ? `Left blank: ${notice.leftBlank.slice(0, 12).map((label) => markdownText(label, 60)).join(", ")}`
+      : "Nothing was left blank.";
+    const resume = [
+      notice.resumeFamily ? `Résumé: *${markdownText(notice.resumeFamily, 60)}*` : "",
+      notice.postingUrl && isPostingUrl(notice.postingUrl) ? `<${notice.postingUrl}|View the job posting>` : "",
+    ].filter(Boolean).join(" · ");
+    const text = `Ready to submit: ${job}\n\n${filled}\n\n${blank}`;
+    const posted = await this.callApi("chat.postMessage", this.config.botToken, {
+      channel: this.config.channelId,
+      text,
+      blocks: [
+        { type: "header", text: { type: "plain_text", text: "Application ready to submit" } },
+        { type: "section", text: { type: "mrkdwn", text: `*${job}*${resume ? `\n${resume}` : ""}` } },
+        { type: "section", text: { type: "mrkdwn", text: filled.slice(0, 2900) } },
+        { type: "context", elements: [{ type: "mrkdwn", text: blank.slice(0, 2900) }] },
+        {
+          type: "actions",
+          elements: [{
+            type: "button",
+            style: "primary",
+            text: { type: "plain_text", text: "Submit application" },
+            action_id: SUBMIT_ACTION_ID,
+            value,
+            confirm: {
+              title: { type: "plain_text", text: "Submit this application?" },
+              text: { type: "mrkdwn", text: `The agent will click Submit once for *${job}*. This can't be undone.` },
+              confirm: { type: "plain_text", text: "Submit" },
+              deny: { type: "plain_text", text: "Cancel" },
+            },
+          }],
+        },
+      ],
+    });
+    return typeof posted.ts === "string" && posted.ts.trim() ? posted.ts.trim() : undefined;
+  }
+
+  private async handleSubmissionApproval(
+    body: Record<string, unknown>,
+    rawValue: string | undefined,
+    actorIdentity: { provider: "slack"; userId: string; workspaceId?: string },
+  ): Promise<SlackInteractionResult> {
+    const match = rawValue?.match(SUBMIT_ACTION_VALUE);
+    if (!match) return { status: "rejected", reason: "malformed_action_value" };
+    if (!this.submissionApprovalHandler) return { status: "rejected", reason: "listener_not_ready" };
+    const container = responsePayload(body.container);
+    const message = responsePayload(body.message);
+    const messageTs = stringValue(container?.message_ts, 64) ?? stringValue(message?.ts, 64);
+    const update = async (text: string) => {
+      if (!messageTs) return;
+      await this.callApi("chat.update", this.config.botToken, {
+        channel: this.config.channelId,
+        ts: messageTs,
+        text,
+        blocks: [{ type: "section", text: { type: "mrkdwn", text: markdownText(text, 2900) } }],
+      }).catch(() => undefined);
+    };
+    // Remove the button before the browser click so a second tap cannot queue.
+    await update("Submitting… the agent is clicking Submit once for this application.");
+    try {
+      const result = await this.submissionApprovalHandler({ campaignId: match[1]!, jobId: match[2]!, applicationId: match[3]!, actorIdentity });
+      await update(result.message);
+      return { status: result.submitted ? "resolved" : "rejected", ...(result.submitted ? {} : { reason: "submission_not_completed" }) };
+    } catch (error) {
+      await update(`Not submitted: ${error instanceof Error ? error.message : "the submission was refused."}`);
+      return { status: "rejected", reason: "submission_refused" };
+    }
+  }
+
   /** Hydrates durable application threads and open event message correlations before Socket Mode starts. */
   hydratePublishedAttentionEvents(events: readonly PersistedAttentionEvent[]): number {
     this.messageTimestamps.clear();
@@ -493,7 +833,7 @@ export class SlackNotificationAdapter implements NotificationAdapter {
       const delivery = event.providerDelivery;
       if (!delivery || delivery.provider !== "slack" || delivery.channelId !== this.config.channelId) continue;
       this.publishedAttentionEvents.set(event.id, event);
-      if (event.publishedAt && event.type === "needs_input" && event.status === "open") {
+      if (event.publishedAt && (event.type === "needs_input" || event.type === "resume_choice") && event.status === "open") {
         this.rememberMessageTimestamp(event.id, delivery.messageTs);
         hydrated += 1;
       }
@@ -636,7 +976,10 @@ export class SlackNotificationAdapter implements NotificationAdapter {
       return;
     }
     if (payload.type === "block_actions") {
-      await this.handleInteraction(payload);
+      // A rejected tap used to vanish silently ("I click the buttons and
+      // nothing works", 2026-11-12); log the outcome and reason.
+      const result = await this.handleInteraction(payload).catch((error: unknown) => ({ status: "rejected" as const, reason: error instanceof Error ? error.message.slice(0, 120) : "error" }));
+      this.diagnosticLogger.info(`button tap: ${result.status}${"reason" in result && result.reason ? ` (${result.reason})` : ""}`);
       return;
     }
     if (payload.type === "event_callback") {
@@ -670,7 +1013,7 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     const userId = stringValue(message.user, 128);
     const channelId = stringValue(message.channel, 128);
     const threadTs = stringValue(message.thread_ts, 128);
-    const text = stringValue(message.text, 512) ?? richTextMessageValue(message, 512);
+    const text = stringValue(message.text, 2000) ?? richTextMessageValue(message, 2000);
     const teamId = stringValue(payload.team_id, 128) ?? stringValue(message.team, 128);
     if (!userId) {
       this.diagnosticLogger.info("ignored: message had no user");
@@ -705,6 +1048,9 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     const eventIds = this.threadEventIds.get(threadTs);
     if (!eventIds) {
       this.diagnosticLogger.info("ignored: unmatched thread");
+      await this.pointToOpenQuestions(threadTs).catch(() => {
+        this.diagnosticLogger.warn("could not reply to an unmatched thread");
+      });
       return;
     }
     // A listener can receive a reply for an event persisted by another
@@ -727,7 +1073,8 @@ export class SlackNotificationAdapter implements NotificationAdapter {
       return;
     }
     const event = openEvents[0];
-    if (event.type !== "needs_input" || !event.question || event.question.kind !== "free_text") {
+    // A batch takes typed answers even when its first question is a choice.
+    if (event.type !== "needs_input" || !event.question || (event.question.kind !== "free_text" && !(event.batch && event.batch.length > 1))) {
       this.diagnosticLogger.info("ignored: attention event is not a free-text input");
       return;
     }
@@ -792,6 +1139,13 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     if (!userId || userId !== this.config.allowedUserId) return { status: "rejected", reason: "unauthorized_user" };
     if (this.config.allowedTeamId && teamId !== this.config.allowedTeamId) return { status: "rejected", reason: "unauthorized_workspace" };
     if (channelId !== this.config.channelId) return { status: "rejected", reason: "unexpected_channel" };
+    if (Array.isArray(body.actions) && body.actions.length === 1 && responsePayload(body.actions[0])?.action_id === SUBMIT_ACTION_ID) {
+      return this.handleSubmissionApproval(body, stringValue(responsePayload(body.actions[0])?.value, 256), {
+        provider: "slack",
+        userId,
+        ...(teamId ? { workspaceId: teamId } : {}),
+      });
+    }
     if (!this.responseHandler || !Array.isArray(body.actions) || body.actions.length !== 1) {
       return { status: "rejected", reason: "listener_not_ready" };
     }
@@ -799,6 +1153,8 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     if (!action) return { status: "rejected", reason: "unexpected_action" };
     const actionId = typeof action.action_id === "string" && action.action_id.length <= 255 ? action.action_id : undefined;
     if (!actionId) return { status: "rejected", reason: "unexpected_action" };
+    const quickReply = actionId.match(QUICK_REPLY_ACTION_PATTERN)?.[1] as QuickReply | undefined;
+    if (quickReply) return this.handleQuickReply(action, quickReply, { provider: "slack", userId, ...(teamId ? { workspaceId: teamId } : {}) });
     const generatedAction = actionId.match(GENERATED_ACTION_ID_PATTERN);
     if (actionId !== ACTION_ID && !generatedAction) return { status: "rejected", reason: "unexpected_action" };
     const optionIndex = generatedAction ? Number(generatedAction[1]) : undefined;
@@ -818,7 +1174,7 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     await this.refreshPublishedAttentionEvents();
     const event = this.eventLookup?.(eventId) ?? this.publishedAttentionEvents.get(eventId);
     if (!event || event.status !== "open") return { status: "rejected", reason: "unknown_or_closed_event" };
-    if (event && (event.type !== "needs_input" || !event.question)) {
+    if (event && ((event.type !== "needs_input" && event.type !== "resume_choice") || !event.question)) {
       return { status: "rejected", reason: "non_interactive_event" };
     }
     if (
@@ -827,12 +1183,13 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     ) {
       return { status: "rejected", reason: "unexpected_action" };
     }
-    if (event?.type === "needs_input" && event.question && !event.question.options.some((option) => option.id === selectedOption)) {
+    if ((event?.type === "needs_input" || event?.type === "resume_choice") && event.question && !event.question.options.some((option) => option.id === selectedOption)) {
       return { status: "rejected", reason: "invalid_option" };
     }
     if (optionIndex !== undefined && event?.question?.options[optionIndex]?.id !== selectedOption) {
       return { status: "rejected", reason: "invalid_option" };
     }
+    await this.acknowledgeTap(event, event.question?.options.find((option) => option.id === selectedOption)?.label ?? selectedOption);
     try {
       const result = await this.responseHandler({
         eventId,
@@ -844,7 +1201,53 @@ export class SlackNotificationAdapter implements NotificationAdapter {
         },
         respondedAt: new Date().toISOString(),
       });
-      return { status: result.status };
+      // A button press is never a numbered reply, so "partial" cannot come back here.
+      return { status: result.status === "partial" ? "ignored" : result.status };
+    } catch {
+      return { status: "rejected", reason: "attention_response_rejected" };
+    }
+  }
+
+  /**
+   * Resuming the browser after a tap takes a while (often 20+ seconds), and
+   * until the message changes Slack keeps showing the old buttons, which looks
+   * like nothing happened. Replace them right away with what was chosen.
+   */
+  private async acknowledgeTap(event: AttentionEvent, choice: string): Promise<void> {
+    const timestamp = this.messageTimestamps.get(event.id);
+    if (!timestamp) return;
+    const prompt = event.question ? `"${markdownText(event.question.prompt, 240)}"\n\n` : "";
+    const body = `*${markdownText(event.context.company, 160)}* — ${markdownText(event.context.role, 200)}\n\n${prompt}✅ You chose *${markdownText(choice, 120)}*. Filling the form now…`;
+    try {
+      await this.callApi("chat.update", this.config.botToken, {
+        channel: this.config.channelId,
+        ts: timestamp,
+        text: `${safeText(event.title, 150)}: ${safeText(choice, 120)}`,
+        blocks: [{ type: "section", text: { type: "mrkdwn", text: body } }],
+      });
+    } catch {
+      // The acknowledgement is cosmetic; the answer itself still goes through.
+    }
+  }
+
+  /** An Approve / Skip / Done button: the same as typing that word in the thread. */
+  private async handleQuickReply(
+    action: Record<string, unknown>,
+    reply: QuickReply,
+    actorIdentity: { provider: "slack"; userId: string; workspaceId?: string },
+  ): Promise<SlackInteractionResult> {
+    const rawValue = stringValue(action.value, 256);
+    const separator = rawValue?.lastIndexOf("|") ?? -1;
+    if (!rawValue || separator <= 0 || rawValue.slice(separator + 1) !== reply) return { status: "rejected", reason: "malformed_action_value" };
+    const eventId = rawValue.slice(0, separator);
+    await this.refreshPublishedAttentionEvents();
+    const event = this.eventLookup?.(eventId) ?? this.publishedAttentionEvents.get(eventId);
+    if (!event || event.status !== "open") return { status: "rejected", reason: "unknown_or_closed_event" };
+    if (!quickRepliesForEvent(event).includes(reply)) return { status: "rejected", reason: "invalid_option" };
+    await this.acknowledgeTap(event, reply === "APPROVE" ? "Approve draft" : reply === "SKIP" ? "Skip" : "Done");
+    try {
+      const result = await this.responseHandler!({ eventId, selectedOption: reply, actorIdentity, respondedAt: new Date().toISOString() });
+      return { status: result.status === "partial" ? "ignored" : result.status };
     } catch {
       return { status: "rejected", reason: "attention_response_rejected" };
     }

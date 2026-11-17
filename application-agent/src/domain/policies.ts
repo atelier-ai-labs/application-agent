@@ -8,6 +8,9 @@ import type {
   SearchCriteria,
   SubmissionPolicy,
 } from "./campaignTypes";
+import { locationAllowed } from "./discoveryFilter";
+import { requiredYearsOfExperience } from "./experienceYears";
+import { companyKey } from "./companyLimit";
 import type { FitAssessment, JobPosting, ResumeFamilyId } from "./types";
 
 export interface HardFilterResult {
@@ -62,6 +65,22 @@ function matchingAny(value: string | undefined, choices: readonly string[]): boo
 }
 
 /**
+ * Employers title the same job "Engineer" or "Developer" and hyphenate
+ * freely ("Full-Stack", "Front-End"), so a lane matches any of those wordings.
+ */
+function roleTitleWording(value: string | undefined): string {
+  return normalized(value).replace(/\s*-\s*/g, " ").replace(/\bfront end\b/g, "frontend").replace(/\bdevelopers?\b/g, "engineer").replace(/\bengineers\b/g, "engineer");
+}
+
+function matchingRoleLane(title: string | undefined, lanes: readonly string[]): boolean {
+  const wording = roleTitleWording(title);
+  return lanes.some((lane) => {
+    const needle = roleTitleWording(lane);
+    return Boolean(wording && needle) && wording.includes(needle);
+  });
+}
+
+/**
  * A queue row may carry an explicit resume family selected for that posting.
  * Keep this mapping deliberately narrow: it adds only the known Agentic-AI
  * title aliases and only for an explicitly queue-selected job. The generic
@@ -113,8 +132,10 @@ export function applyHardFilters(job: JobPosting, criteria: SearchCriteria): Har
   if (isContractRole(job)) {
     return { decision: "reject", reason: "Contract, 1099, freelance, or task-based roles are excluded by candidate policy.", evidence: [`employment-type:${job.employmentType ?? "unspecified"}`] };
   }
-  const company = normalized(job.company);
-  const excludedCompany = criteria.excludedCompanies.find((candidate) => company === normalized(candidate));
+  // Any spelling: "Sparksoft" excludes "Sparksoft Corporation" (2026-11-11).
+  const company = companyKey(job.company);
+  const excludedCompany = criteria.excludedCompanies.find((candidate) => company === companyKey(candidate) ||
+    (companyKey(candidate).length >= 4 && company.startsWith(`${companyKey(candidate)} `)));
   if (excludedCompany) {
     return {
       decision: "reject",
@@ -142,7 +163,18 @@ export function applyHardFilters(job: JobPosting, criteria: SearchCriteria): Har
     };
   }
 
-  if (criteria.roleLanes.length > 0 && !matchingAny(job.title, criteria.roleLanes)) {
+  if (criteria.maxYearsExperience !== undefined) {
+    const required = requiredYearsOfExperience(job.description);
+    if (required !== undefined && required > criteria.maxYearsExperience) {
+      return {
+        decision: "reject",
+        reason: `Posting asks for ${required}+ years of experience; the search allows up to ${criteria.maxYearsExperience}.`,
+        evidence: [`required-years:${required}`, `max-years:${criteria.maxYearsExperience}`],
+      };
+    }
+  }
+
+  if (criteria.roleLanes.length > 0 && !matchingRoleLane(job.title, criteria.roleLanes)) {
     return {
       decision: "reject",
       reason: "Role title does not match any configured campaign role lane.",
@@ -175,7 +207,10 @@ export function applyHardFilters(job: JobPosting, criteria: SearchCriteria): Har
         evidence: ["location:missing"],
       };
     }
-    if (!matchingLocation(job.location, criteria.locations)) {
+    // Same rule as discovery: a listed city (on-site/hybrid) or a remote role
+    // open to a listed country passes even without the literal word "US".
+    if (!matchingLocation(job.location, criteria.locations) &&
+      !locationAllowed(job, { locations: criteria.locations, remotePreference: criteria.remoteOnly ? "remote_only" : "remote_preferred" })) {
       return {
         decision: "reject",
         reason: "Posting location does not match the campaign location preference.",

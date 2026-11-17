@@ -393,6 +393,27 @@ describe("Career Agent human attention seam", () => {
     expect(isAttentionEvent(generated?.event)).toBe(true);
   });
 
+  it("keeps every provider option and its full label for a long single-choice question", () => {
+    const labels = [
+      "I was already familiar with Upstart",
+      "I had heard of Upstart, but didn’t know much",
+      "I learned about Upstart through this job posting or from a recruiter",
+      ...Array.from({ length: 17 }, (_, index) => `Another job site ${index + 1}`),
+    ];
+    const blocker = { ...unknownBlocker(), evidence: unknownBlocker().evidence.map((item) => item.startsWith("options:") ? `options:${labels.join("|")}` : item) };
+    const generated = attentionEventForCareerBlocker({
+      campaignId: "campaign-1",
+      jobId: "job-1",
+      blocker: asCareerBlocker(blocker),
+      createdAt: capturedAt,
+      createId: (prefix) => `${prefix}-long`,
+    });
+    const question = generated?.event.question;
+    expect(question?.kind).toBe("single_choice");
+    expect(question?.kind === "single_choice" && question.options.map((option) => option.label)).toEqual(labels);
+    expect(isAttentionEvent(generated?.event)).toBe(true);
+  });
+
   it("distinguishes ATS, preparation, policy, and configuration question provenance", () => {
     const preparation = attentionEventForCareerBlocker({
       campaignId: "campaign-1",

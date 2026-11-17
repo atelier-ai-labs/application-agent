@@ -138,6 +138,29 @@ class BlockingPreparationExecutor implements ApplicationExecutor {
   }
 }
 
+/** Holds its first execute open so a second resume can arrive mid-run. */
+class SlowFirstResumeExecutor extends BlockingPreparationExecutor {
+  readonly seenUpdatedAt: string[] = [];
+  private release?: () => void;
+
+  async execute(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult> {
+    this.executeCalls += 1;
+    this.seenUpdatedAt.push(request.careerJob.updatedAt);
+    if (this.executeCalls === 1) {
+      await new Promise<void>((resolve) => { this.release = resolve; });
+      return {
+        state: "requires_human",
+        blocker: { kind: "unknown_form_field", unit: "submission", field: "q2", question: "Second question", reason: "Not answered yet.", evidence: [], resumeAfterHuman: true },
+      };
+    }
+    return { state: "ready_to_submit", inspection: inspection() };
+  }
+
+  finishFirstRun(): void {
+    this.release?.();
+  }
+}
+
 class SubmittedProofExecutor extends BlockingPreparationExecutor {
   async execute(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult> {
     return {
@@ -334,6 +357,12 @@ describe("trusted local execution host", () => {
     expect(() => resolveExecutionHostConfig({ ATELIER_EXECUTION_SUBMISSION_TARGET: "campaign-only" })).toThrow(/campaignId\|careerJobId\|applicationId/);
   });
 
+  it("parses an optional watchable slow-motion delay and defaults it off", () => {
+    expect(resolveExecutionHostConfig({}).slowMoMs).toBe(0);
+    expect(resolveExecutionHostConfig({ ATELIER_EXECUTION_SLOW_MO_MS: "600" }).slowMoMs).toBe(600);
+    expect(() => resolveExecutionHostConfig({ ATELIER_EXECUTION_SLOW_MO_MS: "-1" })).toThrow(/ATELIER_EXECUTION_SLOW_MO_MS/);
+  });
+
   it("supports explicit preparation-only mode and defaults it off", () => {
     expect(resolveExecutionHostConfig({}).preparationOnly).toBe(false);
     expect(resolveExecutionHostConfig({ ATELIER_EXECUTION_PREPARATION_ONLY: "true" }).preparationOnly).toBe(true);
@@ -378,6 +407,51 @@ describe("trusted local execution host", () => {
     expect(submitted.result?.state).toBe("submitted");
     expect(executor.submitPreparedCalls).toBe(1);
     expect(authority.reconcile(request.application.id, request.careerJob.id).state).toBe("submitted");
+  });
+
+  it("records a human-approved manual submission as applied under a never-submit campaign", async () => {
+    const executor = new PreparedManualSubmissionExecutor();
+    const { request, service, campaign, careerJob, tracker } = await fixture("manual-submit-lifecycle", executor);
+    expect(campaign.submissionPolicy.authority).toBe("never");
+    const authority = new DurableSubmissionAuthority("manual-test", {
+      stateFile: `/tmp/atelier-manual-submit-${request.application.id}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+    });
+    const registry = new ExecutionSessionRegistry({ executor, allowAutomaticSubmission: false, preparationOnly: true, submissionAuthority: authority });
+    const started = registry.start(request);
+    const ready = await registry.waitForStatus(started.id, ["ready_to_submit"]);
+    await service.recordExecutionHostSnapshot(campaign.id, careerJob.id, ready);
+    const submitted = await registry.submitManually(started.id, {
+      approval: "SUBMIT_APPLICATION",
+      campaignId: request.campaign.id,
+      careerJobId: request.careerJob.id,
+      applicationId: request.application.id,
+    });
+    expect(submitted.manualSubmission).toBe(true);
+
+    const applied = await service.recordExecutionHostSnapshot(campaign.id, careerJob.id, submitted);
+    expect(applied.status).toBe("applied");
+    expect(applied.blockers.filter((blocker) => blocker.status === "open" && blocker.kind === "submission_approval")).toHaveLength(0);
+    expect(service.getApplication(careerJob.applicationId!).status).toBe("applied");
+    expect(tracker.listUpdates()).toHaveLength(1);
+  });
+
+  it("still blocks an unflagged submitted snapshot under a never-submit campaign", async () => {
+    const executor = new PreparedManualSubmissionExecutor();
+    const { request, service, campaign, careerJob, tracker } = await fixture("manual-submit-unflagged", executor);
+    const authority = new DurableSubmissionAuthority("manual-test", {
+      stateFile: `/tmp/atelier-manual-submit-${request.application.id}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+    });
+    const registry = new ExecutionSessionRegistry({ executor, allowAutomaticSubmission: false, preparationOnly: true, submissionAuthority: authority });
+    const started = registry.start(request);
+    const ready = await registry.waitForStatus(started.id, ["ready_to_submit"]);
+    await service.recordExecutionHostSnapshot(campaign.id, careerJob.id, ready);
+    const submitted = await registry.submitManually(started.id, {
+      approval: "SUBMIT_APPLICATION", campaignId: request.campaign.id, careerJobId: request.careerJob.id, applicationId: request.application.id,
+    });
+    const { manualSubmission: _flag, ...unflagged } = submitted;
+    const recorded = await service.recordExecutionHostSnapshot(campaign.id, careerJob.id, unflagged);
+    expect(recorded.status).not.toBe("applied");
+    expect(tracker.listUpdates()).toHaveLength(0);
   });
 
   it("does not require an automatic target allowlist in preparation-only mode", async () => {
@@ -893,6 +967,25 @@ describe("trusted local execution host", () => {
     };
 
     expect(trustedExecutionRequestReason(request)).toContain("not independently verified");
+  });
+
+  it("applies a resume that arrives while the previous one is still filling the form", async () => {
+    const executor = new SlowFirstResumeExecutor();
+    const { request } = await fixture("held-resume", executor);
+    const registry = new ExecutionSessionRegistry({ executor, sessionTimeoutMs: 30_000 });
+
+    const started = registry.start(request);
+    await registry.waitForStatus(started.id, ["waiting_for_human"]);
+    executor.completeHumanStep();
+    registry.resume(started.id, request);
+    while (executor.executeCalls === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+    const second = { ...request, careerJob: { ...request.careerJob, updatedAt: "2026-11-02T01:29:43.583Z" } };
+    expect(() => registry.resume(started.id, second)).not.toThrow();
+
+    executor.finishFirstRun();
+    const ready = await registry.waitForStatus(started.id, ["ready_to_submit"]);
+    expect(ready.result?.state).toBe("ready_to_submit");
+    expect(executor.seenUpdatedAt).toEqual([request.careerJob.updatedAt, "2026-11-02T01:29:43.583Z"]);
   });
 
   it("keeps the browser handle server-side and resumes the same session", async () => {

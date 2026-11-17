@@ -71,33 +71,81 @@ function readEnvelope(filePath: string): StateEnvelope {
 export class FileKeyValueStorage implements KeyValueStorage {
   readonly filePath: string;
   private values: Map<string, string>;
+  /** The file version `values` was read from or written as (inode, size, mtime). */
+  private loadedVersion: string | undefined;
+  private syncLockDepth = 0;
 
   constructor(filePath = DEFAULT_CAREER_AGENT_STATE_FILE) {
     this.filePath = resolve(filePath);
-    this.values = new Map(Object.entries(readEnvelope(this.filePath).values));
+    this.values = new Map();
+    this.reload();
   }
 
+  private fileVersion(): string | undefined {
+    try {
+      const stat = statSync(this.filePath);
+      return `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Re-read only when another process replaced the file since we last saw it (it is large). */
+  private refreshIfChanged(): void {
+    const version = this.fileVersion();
+    // A missing file is never read as "no jobs"; keep the last good copy.
+    if (version !== undefined && version !== this.loadedVersion) this.reload();
+  }
+
+  /**
+   * Each write changes one key on top of the file as it is now. The host and
+   * the Slack listener share this file; saving a stale in-memory copy erased a
+   * submission fence the host had just written, so a Slack-approved Submit
+   * was refused (Upstart, 2026-11-10). Plain writes don't wait on the lock:
+   * maintenance commands hold it for minutes while a browser runs, and the
+   * listener must keep answering Slack meanwhile.
+   */
+  private update(change: (next: Map<string, string>) => boolean): void {
+    this.refreshIfChanged();
+    const next = new Map(this.values);
+    if (!change(next)) return;
+    this.persist(next);
+    this.values = next;
+    this.loadedVersion = this.fileVersion();
+  }
+
+  /**
+   * Reads see the file as it is now. Repositories read a whole list, change
+   * one record and write the list back; reading a stale copy let the Slack
+   * listener put back a job the restart command had just marked failed
+   * (Affirm, 2026-11-10). The check is a file stat; the file is re-read only
+   * when another process replaced it.
+   */
   getItem(key: string): string | null {
+    // An unreadable or broken file keeps serving the last good copy; writes
+    // still fail loudly.
+    try { this.refreshIfChanged(); } catch { /* keep the cached values */ }
     return this.values.get(key) ?? null;
   }
 
   setItem(key: string, value: string): void {
-    const next = new Map(this.values);
-    next.set(key, value);
-    this.persist(next);
-    this.values = next;
+    this.update((next) => { next.set(key, value); return true; });
   }
 
   removeItem(key: string): void {
-    if (!this.values.has(key)) return;
-    const next = new Map(this.values);
-    next.delete(key);
-    this.persist(next);
-    this.values = next;
+    this.update((next) => next.delete(key));
+  }
+
+  /** Every key and value (for the history report and the one-time SQLite import). */
+  entries(): [string, string][] {
+    try { this.refreshIfChanged(); } catch { /* keep the cached values */ }
+    return [...this.values.entries()];
   }
 
   reload(): void {
+    const version = this.fileVersion();
     this.values = new Map(Object.entries(readEnvelope(this.filePath).values));
+    this.loadedVersion = version;
   }
 
   /** Execute a read/modify/write transaction under an OS-visible lock. */
@@ -106,7 +154,7 @@ export class FileKeyValueStorage implements KeyValueStorage {
     // async transaction on this same storage instance. Re-entering here is
     // safe because AsyncLocalStorage proves it is the owning async context;
     // another process still contends on the OS-visible lock below.
-    if (exclusiveLockContext.getStore() === this) return operation();
+    if (exclusiveLockContext.getStore() === this || this.syncLockDepth > 0) return operation();
     const directory = dirname(this.filePath);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const lockPath = `${this.filePath}.lock`;
@@ -123,10 +171,12 @@ export class FileKeyValueStorage implements KeyValueStorage {
         Atomics.wait(lockWaitBuffer, 0, 0, 5);
       }
     }
+    this.syncLockDepth += 1;
     try {
-      this.reload();
+      this.refreshIfChanged();
       return operation();
     } finally {
+      this.syncLockDepth -= 1;
       try { closeSync(descriptor); } finally { try { unlinkSync(lockPath); } catch { /* already released */ } }
     }
   }
@@ -154,6 +204,7 @@ export class FileKeyValueStorage implements KeyValueStorage {
       try { utimesSync(lockPath, new Date(), new Date()); } catch { /* The owner or cleanup already released the lock. */ }
     }, 5_000);
     try {
+      this.refreshIfChanged();
       return await exclusiveLockContext.run(this, operation);
     } finally {
       clearInterval(heartbeat);

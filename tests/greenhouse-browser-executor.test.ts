@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { greenhouseEmbedApplicationUrl, isVerifiedGreenhouseEmbedUrl } from "../application-agent/src/domain/greenhouseJobSource";
+import { classifyLeverApplicationField, isGreenhouseClosedPostingRedirect, isTrustedAutomaticConfirmation, isTruthfulnessCertification } from "../application-agent/src/domain/leverBrowserExecutor";
+import { OPTIONAL_ANSWER_SKIPPED } from "../application-agent/src/domain/executor";
 import {
   greenhouseLocationOptionMatches,
   greenhouseOptionMatches,
+  typedPlaceMatchesOption,
 } from "../application-agent/automation/playwrightLeverBrowserSession";
 
 import {
@@ -33,6 +37,7 @@ class FakeField implements LeverBrowserField {
   readonly required: boolean;
   readonly options?: readonly ApplicationFieldOption[];
   readonly questionDescriptor?: LeverBrowserField["questionDescriptor"];
+  readonly fullPrompt?: string;
   current: string | boolean | null;
   fillCalls = 0;
   uploadCalls = 0;
@@ -45,6 +50,7 @@ class FakeField implements LeverBrowserField {
     required?: boolean;
     options?: readonly ApplicationFieldOption[];
     questionDescriptor?: LeverBrowserField["questionDescriptor"];
+    fullPrompt?: string;
     current?: string | boolean | null;
   }) {
     this.id = options.id;
@@ -53,6 +59,7 @@ class FakeField implements LeverBrowserField {
     this.required = options.required ?? false;
     this.options = options.options;
     this.questionDescriptor = options.questionDescriptor;
+    this.fullPrompt = options.fullPrompt;
     this.current = options.current ?? null;
   }
 
@@ -61,8 +68,11 @@ class FakeField implements LeverBrowserField {
     this.current = value;
   }
 
-  async select(value: string): Promise<void> {
+  selectContexts: unknown[] = [];
+
+  async select(value: string, context?: unknown): Promise<void> {
     this.selectCalls += 1;
+    this.selectContexts.push(context);
     this.current = value;
   }
 
@@ -198,6 +208,15 @@ function request(session: FakeSession): ApplicationExecutionRequest {
 }
 
 describe("Greenhouse destination execution through the existing browser policy", () => {
+  it("matches a typed place to the full typeahead option (Ramp's payroll location)", () => {
+    expect(typedPlaceMatchesOption("Pittsburgh, Pennsylvania, United States", "Pittsburgh, PA")).toBe(true);
+    expect(typedPlaceMatchesOption("Palo Alto, California, United States", "Pittsburgh, PA")).toBe(false);
+    expect(typedPlaceMatchesOption("Pittsburgh, Kansas, United States", "Pittsburgh, PA")).toBe(false);
+    expect(typedPlaceMatchesOption("Austin, Texas, United States", "Austin, TX, USA")).toBe(true);
+    // Not a place: plain answers keep exact matching only.
+    expect(typedPlaceMatchesOption("Yes, I consent", "Yes")).toBe(false);
+  });
+
   it("maps a grounded US location to the Greenhouse country option without guessing a candidate fact", async () => {
     expect(greenhouseOptionMatches("United States+1", null, "United States")).toBe(true);
     expect(greenhouseOptionMatches("Male", "male", "Male")).toBe(true);
@@ -206,9 +225,23 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(greenhouseOptionMatches("North McDonald, Pennsylvania, United States", null, "McDonald")).toBe(false);
     expect(greenhouseLocationOptionMatches("McDonald, PA, United States", "McDonald", "McDonald, Pennsylvania, United States")).toBe(true);
     expect(greenhouseLocationOptionMatches("McDonald, TN, United States", "McDonald", "McDonald, Pennsylvania, United States")).toBe(false);
+    // Samsara (2026-11-12): "Man" must not match "Cis-man"; dialing labels still match their country.
+    expect(greenhouseOptionMatches("Cis-man", "Cis-man", "Man")).toBe(false);
+    expect(greenhouseOptionMatches("Man", "Man", "Man")).toBe(true);
+    expect(greenhouseOptionMatches("+1 US - United States", null, "United States")).toBe(true);
+    // Affirm (2026-11-10): "Which U.S. State or Canadian Province do you reside in?" lists bare states.
+    expect(greenhouseLocationOptionMatches("Pennsylvania", "Pennsylvania", "McDonald, Pennsylvania, USA")).toBe(true);
+    expect(greenhouseLocationOptionMatches("Pennsylvania", "Pennsylvania", "Pittsburgh, PA")).toBe(true);
+    expect(greenhouseLocationOptionMatches("Ohio", "Ohio", "McDonald, Pennsylvania, USA")).toBe(false);
+    expect(greenhouseLocationOptionMatches("United States", "United States", "McDonald, Pennsylvania, USA")).toBe(true);
     expect(greenhouseLocationOptionMatches("McDonald, Pennsylvania, United States", "McDonald", "McDonald, Pennsylvania, United States")).toBe(true);
     expect(greenhouseLocationOptionMatches("McDonald, Pennsylvania, United States", "McDonald, Pennsylvania, USA", "McDonald, Pennsylvania, USA")).toBe(true);
     expect(greenhouseLocationOptionMatches("McDonald, Tennessee, United States", "McDonald, Pennsylvania, USA", "McDonald, Pennsylvania, USA")).toBe(false);
+    // Country-only questions (Upstart's "What is your current location?").
+    expect(greenhouseLocationOptionMatches("United States", "United States", "McDonald, Pennsylvania, USA")).toBe(true);
+    expect(greenhouseLocationOptionMatches("Canada", "Canada", "McDonald, Pennsylvania, USA")).toBe(false);
+    expect(greenhouseLocationOptionMatches("United States +1", "United States +1", "McDonald, Pennsylvania, USA")).toBe(true);
+    expect(greenhouseLocationOptionMatches("Canada +1", "Canada +1", "McDonald, Pennsylvania, USA")).toBe(false);
     expect(greenhouseOptionMatches("United States+1", null, "Canada")).toBe(false);
 
     const country = new FakeField({ id: "country", label: "Country", type: "select", required: true });
@@ -238,6 +271,39 @@ describe("Greenhouse destination execution through the existing browser policy",
 
     expect(result.state).toBe("ready_to_submit");
     expect(country.current).toBe("United States");
+  });
+
+  it("fills the start date as two weeks after the day it applies, in the format the box asks for", async () => {
+    const field = (id: string, label: string) => new FakeField({ id, label, type: "text", required: true,
+      questionDescriptor: { promptText: label, sourceStrategy: "question_container", confidence: "high" } });
+    const run = async (workPreferences: CandidateProfile["workPreferences"], label: string, now: string) => {
+      const start = field("question_start", label);
+      const session = new FakeSession([start]);
+      const base = request(session);
+      await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse", now: () => now })
+        .execute({ ...base, profile: { ...exampleCandidateProfile, workPreferences } });
+      return start.current;
+    };
+    const notice = { ...exampleCandidateProfile.workPreferences, availabilityStartDate: "2026-10-01", availabilityNoticeDays: 14 };
+    expect(await run(notice, "Earliest available start date", "2026-11-05T17:00:00.000Z")).toBe("2026-11-19");
+    expect(await run(notice, "When can you start? (MM/DD/YYYY)", "2026-11-05T17:00:00.000Z")).toBe("11/19/2026");
+    // Across a month end, and a later application gets a later date.
+    expect(await run(notice, "Earliest available start date", "2026-12-20T17:00:00.000Z")).toBe("2027-01-03");
+    // Without the setting, the fixed profile date is used as before.
+    expect(await run({ ...notice, availabilityNoticeDays: undefined }, "Earliest available start date", "2026-11-05T17:00:00.000Z")).toBe("2026-10-01");
+  });
+
+  it("types the posted-range midpoint into a salary box as a plain number", async () => {
+    const salary = new FakeField({ id: "question_salary", label: "What are you compensation expectations for this position?", type: "text", required: true,
+      questionDescriptor: { promptText: "What are you compensation expectations for this position?", sourceStrategy: "question_container", confidence: "high" } });
+    const session = new FakeSession([salary]);
+    const base = request(session);
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({
+      ...base,
+      application: { ...base.application, answers: [{ id: "answer:salary_expectations", field: "salary_expectations", question: "Expected compensation", policy: "ask", value: "140000", status: "resolved", provenance: ["profile:workPreferences.salaryStrategy=posting_midpoint"] }] },
+    });
+    expect(result.state).toBe("ready_to_submit");
+    expect(salary.current).toBe("140000");
   });
 
   it("maps a grounded US location to the Greenhouse state option without using the full location", async () => {
@@ -515,6 +581,85 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(session.submitChecks).toBe(1);
   });
 
+  it("answers Temporal's 'in this location' question with the choice that folds in sponsorship, and fills legal names", async () => {
+    // Temporal (2026-11-08): both were asked in Slack.
+    const profile = {
+      ...exampleCandidateProfile,
+      identity: { ...exampleCandidateProfile.identity, fullName: "Nathaniel Magera" },
+      workAuthorization: { status: "authorized", countries: ["United States"], sponsorshipRequired: false },
+    } satisfies CandidateProfile;
+    const choices = [
+      { label: "Yes, and I will not require sponsorship now or in the future", value: "a" },
+      { label: "Yes, but I will require sponsorship now or in the future to maintain work authorization", value: "b" },
+      { label: "No, I am not currently authorized to work in this location", value: "c" },
+    ];
+    const authorization = new FakeField({
+      id: "authorized-here", label: "Are you legally authorized to work in this location?", type: "select", required: true, options: choices,
+      questionDescriptor: { promptText: "Are you legally authorized to work in this location?", sourceStrategy: "question_container", confidence: "high" },
+    });
+    const legal = (id: string, label: string) => new FakeField({ id, label, type: "text", required: true,
+      questionDescriptor: { promptText: label, sectionTitle: "Application Information", sourceStrategy: "question_container", confidence: "high" } });
+    const first = legal("a1529799-27e4", "Legal First Name");
+    const last = legal("9b5a508c-09ca", "Legal Last Name");
+    const session = new FakeSession([first, last, authorization]);
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse", now: () => capturedAt })
+      .execute({ ...request(session), profile });
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(authorization.current).toBe("a");
+    expect(first.current).toBe("Nathaniel");
+    expect(last.current).toBe("Magera");
+
+    // Someone who needs sponsorship gets the other Yes.
+    const needs = new FakeField({
+      id: "authorized-here-2", label: "Are you legally authorized to work in this location?", type: "select", required: true, options: choices,
+      questionDescriptor: { promptText: "Are you legally authorized to work in this location?", sourceStrategy: "question_container", confidence: "high" },
+    });
+    const second = new FakeSession([needs]);
+    await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(second), provider: "greenhouse", now: () => capturedAt })
+      .execute({ ...request(second), profile: { ...profile, workAuthorization: { ...profile.workAuthorization, sponsorshipRequired: true } } });
+    expect(needs.current).toBe("b");
+  });
+
+  it("answers Gusto's authorization, former-employee, veteran and first-generation questions without asking", async () => {
+    // Gusto (2026-11-10): all four were asked in Slack.
+    const profile = {
+      ...exampleCandidateProfile,
+      workAuthorization: { status: "authorized", countries: ["United States"], sponsorshipRequired: false },
+      approvedReusableAnswers: { ...exampleCandidateProfile.approvedReusableAnswers, veteran_status: "No, I am not a protected veteran" },
+    } satisfies CandidateProfile;
+    const select = (id: string, label: string, options: string[]) => new FakeField({
+      id, label, type: "select", required: true, options: options.map((option) => ({ label: option, value: option })),
+      questionDescriptor: { promptText: label, sourceStrategy: "aria_labelledby", confidence: "high" },
+    });
+    const authorized = select("q1", "Are you legally authorized to work in the country where you are applying?*", ["Yes", "No"]);
+    const former = select("q2", "Have you ever, or are you currently working at Gusto or Symmetry in any capacity (ie: employee or contingent worker)?*", ["Yes", "No"]);
+    const veteran = select("609", "Veteran Status (please select one):*", ["Yes, I am a veteran", "No, I am not a veteran", "I don't wish to answer"]);
+    const firstGeneration = select("1012", "I identify as a first-generation professional (please select one):*", ["Yes", "No", "I don't wish to answer"]);
+    const session = new FakeSession([authorized, former, veteran, firstGeneration]);
+    const base = request(session);
+    const gusto = { ...base, careerJob: { ...base.careerJob, job: { ...base.careerJob.job, company: "Gusto, Inc." } } };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse", now: () => capturedAt })
+      .execute({ ...gusto, profile });
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(authorized.current).toBe("Yes");
+    expect(former.current).toBe("No");
+    expect(veteran.current).toBe("No, I am not a veteran");
+    expect(firstGeneration.current).toBe("I don't wish to answer");
+
+    // Affirm words its No as a sentence (2026-11-10).
+    const affirmFormer = select("q3", "Have you previously been employed at Affirm for any length of time?*", [
+      "I have not previously been employed at Affirm", "I have been employed at Affirm as a full-time employee", "I have been employed at Affirm as a part-time employee",
+    ]);
+    const affirmSession = new FakeSession([affirmFormer]);
+    const affirmBase = request(affirmSession);
+    const affirm = { ...affirmBase, careerJob: { ...affirmBase.careerJob, job: { ...affirmBase.careerJob.job, company: "Affirm" } } };
+    await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(affirmSession), provider: "greenhouse", now: () => capturedAt })
+      .execute({ ...affirm, profile });
+    expect(affirmFormer.current).toBe("I have not previously been employed at Affirm");
+  });
+
   it("does not reuse United States authorization for a different country", async () => {
     const profile = {
       ...exampleCandidateProfile,
@@ -569,6 +714,577 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(result.blocker.questionProvenance).toBe("POLICY");
     expect(firstName.fillCalls).toBe(0);
     expect(session.submitChecks).toBe(0);
+  });
+
+  it("selects the grounded country in Greenhouse's phone-country dropdown", async () => {
+    const options = ["United States +1", "Afghanistan +93", "Canada +1", "Albania +355", "Algeria +213", "Andorra +376"].map((label) => ({ label, value: label }));
+    const country = new FakeField({ id: "country", label: "Country*", type: "select", required: true, options,
+      questionDescriptor: { promptText: "Phone", sectionTitle: "Phone", sourceStrategy: "fieldset_legend", confidence: "high" } });
+    const session = new FakeSession([country]);
+    const base = request(session);
+    const profile: CandidateProfile = { ...exampleCandidateProfile, identity: { ...exampleCandidateProfile.identity, location: "McDonald, Pennsylvania, USA" } };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...base, profile });
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(country.current).toBe("United States +1");
+  });
+
+  it("uses the newest answer when a question was asked again", async () => {
+    const full = "I learned about Upstart through this job posting or from a recruiter";
+    const prompt = "Before applying, how familiar were you with Upstart?*";
+    const familiar = new FakeField({ id: "question_67832269", label: prompt, type: "select", required: true,
+      options: ["I was already familiar with Upstart", full].map((label) => ({ label, value: label })),
+      questionDescriptor: { promptText: prompt, sourceStrategy: "question_container", confidence: "high" } });
+    const session = new FakeSession([familiar]);
+    const base = request(session);
+    const answered = (id: string, value: string, resolvedAt: string): CareerJob["blockers"][number] => ({
+      id, kind: "unknown_form_field", unit: "submission", field: "question_67832269", question: "Before applying, how familiar were you with Upstart?*",
+      context: { jobId: base.careerJob.id, company: "Upstart", role: "DevOps Engineer II" }, reason: "test", evidence: [`question-prompt:${prompt}`], status: "resolved", createdAt: capturedAt, resolvedAt, value,
+    });
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({
+      ...base,
+      careerJob: { ...base.careerJob, blockers: [answered("older", full.slice(0, 64), "2026-11-02T01:16:49.205Z"), answered("newer", full, "2026-11-02T01:29:43.583Z")] },
+    });
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(familiar.current).toBe(full);
+  });
+
+  it("fills the race question Greenhouse reveals after Hispanic/Latino is answered", async () => {
+    const hispanic = new FakeField({ id: "hispanic_ethnicity", label: "Are you Hispanic/Latino?*", type: "select", required: true,
+      options: ["Yes", "No", "Decline To Self Identify"].map((label) => ({ label, value: label })) });
+    const race = new FakeField({ id: "race", label: "Please identify your race*", type: "select", required: true,
+      options: ["Asian", "Black or African American", "White", "Decline To Self Identify"].map((label) => ({ label, value: label })) });
+    const session = new FakeSession([hispanic]);
+    session.inspectFields = async () => hispanic.current === "No" ? [hispanic, race] : [hispanic];
+    const base = request(session);
+    const profile: CandidateProfile = {
+      ...exampleCandidateProfile,
+      approvedReusableAnswers: { ...exampleCandidateProfile.approvedReusableAnswers, hispanic_latino: "No", race_ethnicity: "White" },
+    };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...base, profile });
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(hispanic.current).toBe("No");
+    expect(race.current).toBe("White");
+  });
+
+  it("trusts Greenhouse's embed confirmation only for the same board and posting", () => {
+    const target = { provider: "greenhouse" as const, site: "upstart", postingId: "8030908", applicationUrl: "https://job-boards.greenhouse.io/upstart/jobs/8030908" };
+    const confirmation = (url: string) => ({
+      clicked: true, confirmed: true, externalApplicationId: `confirmation:${url}`, confirmationOrigin: "https://job-boards.greenhouse.io",
+      confirmationUrl: url, evidence: "submit:clicked; confirmation:url; security-code:entered",
+    });
+    expect(isTrustedAutomaticConfirmation(confirmation("https://job-boards.greenhouse.io/embed/job_app/confirmation?for=upstart&token=8030908"), target)).toBe(true);
+    expect(isTrustedAutomaticConfirmation(confirmation("https://job-boards.greenhouse.io/embed/job_app/confirmation?for=upstart&token=1111111"), target)).toBe(false);
+    expect(isTrustedAutomaticConfirmation(confirmation("https://job-boards.greenhouse.io/embed/job_app/confirmation?for=other&token=8030908"), target)).toBe(false);
+  });
+
+  it("answers how-did-you-hear from the ranked list and previous employment with No", async () => {
+    const yesNo = ["Yes", "No"].map((label) => ({ label, value: label }));
+    const source = new FakeField({ id: "question_67832270", label: "Before applying, how did you hear about Kapitus?*", type: "select", required: true,
+      options: ["LinkedIn job post", "Indeed", "Another job site", "Other"].map((label) => ({ label, value: label })) });
+    const employed = new FakeField({ id: "question_67832271", label: "Have you been employed by Kapitus before?*", type: "select", required: true, options: yesNo });
+    const session = new FakeSession([source, employed]);
+    const base = request(session);
+    const profile: CandidateProfile = {
+      ...exampleCandidateProfile,
+      approvedReusableAnswers: { ...exampleCandidateProfile.approvedReusableAnswers, job_source: "Another job site|Job board|Internet" },
+    };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...base, profile });
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(source.current).toBe("Another job site");
+    expect(employed.current).toBe("No");
+  });
+
+  it("asks instead of answering No when the company is in the work history", async () => {
+    const employed = new FakeField({ id: "question_1", label: "Have you been employed by Kapitus before?*", type: "select", required: true,
+      options: ["Yes", "No"].map((label) => ({ label, value: label })) });
+    const session = new FakeSession([employed]);
+    const base = request(session);
+    const profile: CandidateProfile = {
+      ...exampleCandidateProfile,
+      employmentHistory: [...exampleCandidateProfile.employmentHistory, { ...exampleCandidateProfile.employmentHistory[0]!, id: "kapitus", employer: "Kapitus" }],
+    };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...base, profile });
+
+    expect(result.state).toBe("requires_human");
+    expect(employed.current).toBeNull();
+  });
+
+  it("accepts a multi-select's picked chip only when it is the agent's own answer", async () => {
+    const run = async (current: string) => {
+      // The picked option is no longer listed in the menu once it is a chip.
+      const all = ["Man", "Non-binary", "Woman", "I don't wish to answer"];
+      const gender = new FakeField({ id: "4016404008", label: "How would you describe your gender identity?", type: "select", required: true, current,
+        options: all.filter((label) => label !== current).map((label) => ({ label, value: label })) });
+      const session = new FakeSession([gender]);
+      const base = request(session);
+      const profile: CandidateProfile = {
+        ...exampleCandidateProfile,
+        approvedReusableAnswers: { ...exampleCandidateProfile.approvedReusableAnswers, gender_identity: "Male" },
+      };
+      return new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...base, profile });
+    };
+    expect((await run("Man")).state).toBe("ready_to_submit");
+    expect((await run("Woman")).state).toBe("requires_human");
+  });
+
+  it("answers whether the candidate is based in the U.S. from the profile location", async () => {
+    const run = async (location: string) => {
+      const field = new FakeField({ id: "based", label: "This role is open to remote candidates based in the United States. Are you currently based in the U.S?", type: "select", required: true,
+        options: ["Yes", "No"].map((label) => ({ label, value: label })) });
+      const session = new FakeSession([field]);
+      const base = request(session);
+      const profile: CandidateProfile = { ...exampleCandidateProfile, identity: { ...exampleCandidateProfile.identity, location } };
+      const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...base, profile });
+      return { state: result.state, value: field.current };
+    };
+    expect(await run("McDonald, Pennsylvania, USA")).toEqual({ state: "ready_to_submit", value: "Yes" });
+    expect((await run("Toronto, Ontario, Canada")).state).toBe("requires_human");
+  });
+
+  it("picks the work-from state and confirms a listed hiring state from the profile location", async () => {
+    const stateOptions = ["Ontario, Canada", "Philippines", "Arizona (AZ)", "Pennsylvania (PA)", "Virginia (VA)", "West Virginia (WV)", "Washington D.C. (DC)", "Location not listed"];
+    const run = async (location: string, hiringStates: string) => {
+      const workFrom = new FakeField({ id: "work-from", label: "Thumbtack currently supports remote work in a number of locations across the United States, Ontario and the Philippines. Using the drop down list below, please select the location you intend to work from. If you are not currently located in or able to work from a location listed below, please select \"Location not listed.\"", type: "select", required: true,
+        options: stateOptions.map((label) => ({ label, value: label })) });
+      const listed = new FakeField({ id: "listed", label: `We are currently hiring remote candidates in the following states: ${hiringStates}. Please confirm whether or not you live in one of these states`, type: "radio", required: true,
+        options: ["Yes", "No"].map((label) => ({ label, value: label })) });
+      const session = new FakeSession([workFrom, listed]);
+      const base = request(session);
+      const profile: CandidateProfile = { ...exampleCandidateProfile, identity: { ...exampleCandidateProfile.identity, location } };
+      const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...base, profile });
+      // The state option is an exact listed choice, never matched as the full home address.
+      expect(workFrom.selectContexts.every((context) => context === undefined)).toBe(true);
+      return { state: result.state, values: [workFrom.current, listed.current] };
+    };
+    expect(await run("Pittsburgh, Pennsylvania, USA", "California, Colorado, District of Columbia (DC), Ohio, Pennsylvania, Texas and Wisconsin"))
+      .toEqual({ state: "ready_to_submit", values: ["Pennsylvania (PA)", "Yes"] });
+    expect((await run("Morgantown, WV", "California, Virginia and Ohio")).values).toEqual(["West Virginia (WV)", null]);
+    expect((await run("Pittsburgh, Pennsylvania, USA", "California, Colorado and Ohio")).state).toBe("requires_human");
+  });
+
+  it("answers Ashby's Race question despite its Hispanic or Latino definitions, and city-and-state location", async () => {
+    const race = new FakeField({ id: "_systemfield_eeoc_race", label: "Race", type: "radio",
+      questionDescriptor: { promptText: "Race", nearbyInstructionText: "Hispanic or Latino - A person of Cuban, Mexican, Puerto Rican, South or Central American, or other Spanish culture or origin regardless of race.White (Not Hispa", sourceStrategy: "question_container", confidence: "high" },
+      options: ["Hispanic or Latino", "White (Not Hispanic or Latino)", "Black or African American (Not Hispanic or Latino)", "Asian (Not Hispanic or Latino)", "Decline to self-identify"].map((label) => ({ label, value: "on" })) });
+    const cityState = new FakeField({ id: "827d49ed-f528-40d9-a303-d638cc7fc974", label: "Current location (city, state)", type: "text", required: true });
+    const session = new FakeSession([race, cityState]);
+    const profile: CandidateProfile = {
+      ...exampleCandidateProfile,
+      identity: { ...exampleCandidateProfile.identity, location: "McDonald, Pennsylvania, USA" },
+      approvedReusableAnswers: { ...exampleCandidateProfile.approvedReusableAnswers, race_ethnicity: "White" },
+    };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...request(session), profile });
+    expect([race.current, cityState.current]).toEqual(["White (Not Hispanic or Latino)", "McDonald, PA"]);
+    expect(result.state).toBe("ready_to_submit");
+  });
+
+  it("reads a long hiring-state question past the 240-character label bound", async () => {
+    const full = "We are currently hiring remote candidates in the following states: California, Colorado, Connecticut, District of Columbia (DC), Florida, Georgia, Illinois, Indiana, Maryland, Massachusetts, Michigan, New Hampshire, New Jersey, New York, North Carolina, Ohio, Pennsylvania, Rhode Island, South Carolina, Tennessee, Texas, Utah, Virginia, Washington and Wisconsin. Please confirm whether or not you live in one of these states";
+    const listed = new FakeField({ id: "listed", label: full.slice(0, 240), fullPrompt: full, type: "radio", required: true, options: ["Yes", "No"].map((label) => ({ label, value: label })) });
+    const session = new FakeSession([listed]);
+    const profile: CandidateProfile = { ...exampleCandidateProfile, identity: { ...exampleCandidateProfile.identity, location: "Pittsburgh, Pennsylvania, USA" } };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...request(session), profile });
+    expect({ state: result.state, value: listed.current }).toEqual({ state: "ready_to_submit", value: "Yes" });
+  });
+
+  it("answers Phantom's work region, city-and-country location, and an unmatched how-did-you-hear with Other", async () => {
+    const region = new FakeField({ id: "bdb788f2", label: "We currently support remote work from North America, South America, and Europe. Which of these three locations will you be working from?", type: "radio", required: true,
+      options: ["North America", "South America", "Europe", "Other"].map((label) => ({ label, value: label })) });
+    const cityCountry = new FakeField({ id: "work-location", label: "Anticipated Work Location (City, Country)", type: "text", required: true });
+    const heard = new FakeField({ id: "993e2ba3", label: "How did you hear about Phantom?", type: "select", required: true,
+      options: ["Phantom User", "Phantom Employee", "Cryptocurrency Jobs", "Other", "LinkedIn - Employee Post", "Twitter - Phantom Tweet"].map((label) => ({ label, value: label })) });
+    const session = new FakeSession([region, cityCountry, heard]);
+    const profile: CandidateProfile = {
+      ...exampleCandidateProfile,
+      identity: { ...exampleCandidateProfile.identity, location: "McDonald, Pennsylvania, USA" },
+      approvedReusableAnswers: { ...exampleCandidateProfile.approvedReusableAnswers, job_source: "Another job site|Job board" },
+    };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...request(session), profile });
+    expect([region.current, cityCountry.current, heard.current]).toEqual(["North America", "McDonald, United States", "Other"]);
+    expect(result.state).toBe("ready_to_submit");
+  });
+
+  it("never pours a prepared answer into an unrelated question (skills into a clearance box, your name into a reference)", async () => {
+    const clearance = new FakeField({ id: "question_13062993007", label: "Do you currently hold an active security clearance? If yes, please provide details. *", type: "text", required: true });
+    const referrer = new FakeField({ id: "question_referrer", label: "Were you referred by a Kapitus employee? If yes, please provide the employee's full name.", type: "text", required: true });
+    const refEmail = new FakeField({ id: "cards[r][field3]", label: "Email Address", type: "text", required: true, questionDescriptor: { sectionTitle: "References", promptText: "Email Address", sourceStrategy: "question_container", confidence: "high" } });
+    const session = new FakeSession([clearance, referrer, refEmail]);
+    const base = request(session);
+    const answers = [
+      { id: "answer:name", field: "name", question: "Full name", policy: "auto", value: "Nathaniel Magera", status: "resolved", provenance: ["profile:name"] },
+      { id: "answer:verified_skills", field: "verified_skills", question: "Verified skills", policy: "auto", value: "Terraform, Python (FastAPI), TypeScript", status: "resolved", provenance: ["profile:verified_skills"] },
+      { id: "answer:employment_history", field: "employment_history", question: "Employment history", policy: "auto", value: "Team Lead at Walmart", status: "resolved", provenance: ["profile:employment_history"] },
+    ] as Application["answers"];
+    await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" })
+      .execute({ ...base, application: { ...base.application, answers } });
+    expect([clearance.current, referrer.current, refEmail.current]).toEqual([null, null, null]);
+  });
+
+  it("checks the 'I certify my information is true' box but still asks about anything that signs away more", async () => {
+    const certify = "I hereby certify that all information I have provided in this application is true, complete and correct to the best of my knowledge. I understand that any misrepresentation, omission or falsification may disqualify me from further consideration or may result in termination of employment if discovered later. *";
+    const truthful = new FakeField({ id: "question_13062997007[]_35634078007", label: "I Acknowledge", type: "checkbox", required: true, fullPrompt: certify });
+    const arbitration = new FakeField({ id: "arb", label: "I Agree", type: "checkbox", required: true,
+      fullPrompt: "I certify that the information in my application is true and complete, and I agree to resolve any dispute through binding arbitration." });
+    const signature = new FakeField({ id: "sig", label: "I certify that my answers are true and correct. Type your full name as your electronic signature.", type: "text", required: true });
+    const session = new FakeSession([truthful]);
+    await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute(request(session));
+    expect(truthful.current).toBe(true);
+    const arbitrationSession = new FakeSession([arbitration]);
+    const asked = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(arbitrationSession), provider: "greenhouse" }).execute(request(arbitrationSession));
+    expect(arbitration.current).toBeNull();
+    expect(asked.state).not.toBe("ready_to_submit");
+    expect(isTruthfulnessCertification(certify)).toBe(true);
+    expect(isTruthfulnessCertification(signature.label)).toBe(false);
+    expect(isTruthfulnessCertification("I certify the information is accurate and I authorize a background check.")).toBe(false);
+  });
+
+  it("treats Greenhouse's redirect to the board with ?error=true as a closed posting", async () => {
+    class RedirectingSession extends FakeSession {
+      override async navigate(): Promise<void> { await super.navigate("https://job-boards.greenhouse.io/kapitus?error=true"); }
+    }
+    const session = new RedirectingSession([]);
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute(request(session));
+    expect(result.state).toBe("failed");
+    expect("inspection" in result ? result.inspection?.evidence : []).toContain("posting:unavailable");
+    expect(isGreenhouseClosedPostingRedirect("https://job-boards.greenhouse.io/kapitus?error=true", "kapitus")).toBe(true);
+    expect(isGreenhouseClosedPostingRedirect("https://job-boards.greenhouse.io/kapitus/jobs/4390052009", "kapitus")).toBe(false);
+    expect(isGreenhouseClosedPostingRedirect("https://job-boards.greenhouse.io/other?error=true", "kapitus")).toBe(false);
+  });
+
+  it("uses the candidate's answer for a question whose page exposes no prompt text (Sparksoft clearance loop)", async () => {
+    const label = "Do you currently hold an active security clearance? If yes, please provide details. *";
+    const answered = (fieldLabel: string) => ({
+      id: "career-blocker-clearance", kind: "unknown_form_field", unit: "submission", questionProvenance: "ATS_FORM",
+      field: "question_13063270007", question: label, reason: "The field could not be classified safely; no value was guessed.",
+      evidence: ["executor:greenhouse-browser", "field-id:question_13063270007", "field-type:text", `field-label:${fieldLabel}`, "field-required:true", "classification:unknown", "question-source:unavailable"],
+      resumeAfterHuman: true, status: "resolved", value: "No", createdAt: capturedAt, resolvedAt: capturedAt,
+    }) as unknown as CareerJob["blockers"][number];
+    const run = async (fieldLabel: string) => {
+      const clearance = new FakeField({ id: "question_13063270007", label, type: "text", required: true });
+      const session = new FakeSession([clearance]);
+      const base = request(session);
+      await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" })
+        .execute({ ...base, careerJob: { ...base.careerJob, blockers: [answered(fieldLabel)] } });
+      return clearance.current;
+    };
+    expect(await run(label)).toBe("No");
+    // A different question on the same control id is not the answered one.
+    expect(await run("Do you currently hold a professional license? *")).toBeNull();
+  });
+
+  it("answers Instructure's citizen status, residence, +1 phone and text-message consent from the profile", async () => {
+    const radio = (id: string, label: string, options: string[]) => new FakeField({ id, label, type: "radio", required: true,
+      options: options.map((option) => ({ label: option, value: "on" })), questionDescriptor: { promptText: label, sourceStrategy: "question_container", confidence: "high" } });
+    const phone = new FakeField({ id: "992441f2", label: "Phone", type: "tel", required: true,
+      questionDescriptor: { promptText: "Phone", nearbyInstructionText: "Please include your international country code starting with '+' (e.g., +1 555-123-4567 or +44 20 7946 0912).", sourceStrategy: "question_container", confidence: "high" } });
+    const sms = new FakeField({ id: "992441f2--2", label: "Phone", type: "radio", required: true,
+      options: [{ label: "Yes - I consent to receiving text messages", value: "given" }, { label: "No - I do not consent to receiving text messages", value: "notGiven" }] });
+    const status = radio("0d6a9b73", "What is your current work authorization status in the country where this position is located?",
+      ["Citizen", "Permanent resident / indefinite right to work", "Temporary visa with employer-specific authorization", "Temporary visa with open / transferable work authorization", "I am not currently authorized to work in this country"]);
+    const reside = radio("624c4b82", "Do you currently reside in the country where this position is located?",
+      ["Yes", "No, but I plan to relocate at my own expense", "No, and I would require employer support to relocate"]);
+    const run = async (profile: CandidateProfile, location: string) => {
+      for (const field of [phone, sms, status, reside]) field.current = null;
+      const session = new FakeSession([phone, sms, status, reside]);
+      const base = request(session);
+      await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" })
+        .execute({ ...base, profile, careerJob: { ...base.careerJob, job: { ...base.careerJob.job, location } } });
+      return [phone.current, sms.current, status.current, reside.current];
+    };
+    const citizen: CandidateProfile = {
+      ...exampleCandidateProfile,
+      identity: { ...exampleCandidateProfile.identity, phone: "412-480-0379", location: "McDonald, Pennsylvania, USA" },
+      workAuthorization: { status: "authorized", countries: ["United States"], sponsorshipRequired: false, citizenship: ["United States"] },
+    };
+    expect(await run(citizen, "Remote — U.S.")).toEqual(["+1 412-480-0379", "notGiven", "Citizen", "Yes"]);
+    // Citizenship is never inferred from work authorization, and a non-US job's country is not assumed.
+    const authorizedOnly: CandidateProfile = { ...citizen, workAuthorization: { status: "authorized", countries: ["United States"], sponsorshipRequired: false } };
+    expect((await run(authorizedOnly, "Remote — U.S."))[2]).toBeNull();
+    expect((await run(citizen, "Toronto, Canada")).slice(2)).toEqual([null, null]);
+  });
+
+  it("answers a U.S.-citizens-only Yes/No from profile citizenship, never from work authorization", async () => {
+    const label = "Due to federal contract and security requirements, this position is open to U.S. citizens only. Are you a U.S. citizen?";
+    const field = new FakeField({ id: "db581cf5", label, type: "radio", required: true,
+      options: [{ label: "Yes", value: "on" }, { label: "No", value: "on" }], questionDescriptor: { promptText: label, sourceStrategy: "question_container", confidence: "high" } });
+    const run = async (workAuthorization: CandidateProfile["workAuthorization"]) => {
+      field.current = null;
+      const session = new FakeSession([field]);
+      const base = request(session);
+      await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" })
+        .execute({ ...base, profile: { ...exampleCandidateProfile, workAuthorization } });
+      return field.current;
+    };
+    expect(await run({ status: "authorized", countries: ["United States"], sponsorshipRequired: false, citizenship: ["United States"] })).toBe("Yes");
+    expect(await run({ status: "authorized", countries: ["United States"], sponsorshipRequired: false })).toBeNull();
+  });
+
+  it("fills D.A. Davidson-style education and employment cards without misplacing values", async () => {
+    const card = (id: string, sectionTitle: string, promptText: string, type: "text" | "textarea" = "text") =>
+      new FakeField({ id: `cards[c][${id}]`, label: promptText, type, required: true, questionDescriptor: { sectionTitle, promptText, sourceStrategy: "question_container", confidence: "high" } });
+    const institution = card("field1", "Education", "Institution Name");
+    const schoolLocation = card("field2", "Education", "Location of Institution (City, State, Country)");
+    const degree = card("field3", "Education", "Degree or Certification Earned");
+    const attendStart = card("field4", "Education", "Attendance Start Date (MM/YYYY)");
+    const training = card("field6", "Education", "Additional Training or Certifications", "textarea");
+    const employerPhone = card("field2b", "Employment", "Employer Phone Number");
+    const employmentStart = card("field5b", "Employment", "Employment Start Date (MM/YYYY)");
+    const referenceEmail = card("field3r", "References", "Email Address");
+    const referencePhone = card("field4r", "References", "Phone Number");
+    const fields = [institution, schoolLocation, degree, attendStart, training, employerPhone, employmentStart, referenceEmail, referencePhone];
+    const session = new FakeSession(fields);
+    const profile: CandidateProfile = {
+      ...exampleCandidateProfile,
+      workPreferences: { ...exampleCandidateProfile.workPreferences, availabilityStartDate: "2026-10-01" },
+      education: [{ id: "ptc", institution: "Pittsburgh Technical College", degree: "Associate of Science", field: "Information Technology", completionDate: "2013", provenance: "test" }],
+      employmentHistory: [{ id: "ntt", employer: "NTT Security", title: "Security Analyst", location: null, startDate: "2014-03", endDate: "2018-12", provenance: "test" } as never],
+    };
+    await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...request(session), profile });
+    expect([institution.current, degree.current, employmentStart.current]).toEqual(["Pittsburgh Technical College", "Associate of Science", "03/2014"]);
+    // The profile holds none of these; the candidate's own location, availability date,
+    // field of study, employer name, email, and phone must not stand in for them.
+    expect([schoolLocation, attendStart, training, employerPhone, referenceEmail, referencePhone].map((field) => field.current)).toEqual([null, null, null, null, null, null]);
+  });
+
+  it("answers immigration-law work authorization, highest education, and current-employee questions from the profile", async () => {
+    const select = (id: string, label: string, options: readonly string[]) =>
+      new FakeField({ id, label, type: "select", required: true, options: options.map((option) => ({ label: option, value: option })) });
+    const authorized = select("auth", "Are you presently authorized under U.S. immigration laws to work in the United States?*", ["Yes", "No"]);
+    const education = select("edu", "Please select your highest completed level of education.*", ["High School or equivalent", "Some College", "Associate's Degree", "Bachelor's Degree", "Master's Degree", "Doctorate"]);
+    const current = select("current", "Are you a current Kapitus employee? If yes, please apply via our Internal Job Board.*", ["Yes", "No"]);
+    const session = new FakeSession([authorized, education, current]);
+    const base = request(session);
+    const profile: CandidateProfile = {
+      ...exampleCandidateProfile,
+      workAuthorization: { status: "authorized", countries: ["United States"], sponsorshipRequired: false },
+      education: [{ id: "ptc", institution: "Pittsburgh Technical College", degree: "Associate of Science", field: "Information Technology", completionDate: "2013", provenance: "test" }],
+    };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...base, profile });
+
+    expect(result.state).toBe("ready_to_submit");
+    expect([authorized.current, education.current, current.current]).toEqual(["Yes", "Associate's Degree", "No"]);
+  });
+
+  it("accepts a location typeahead's own spelling and a shortened company name", async () => {
+    // The typeahead commits "McDonald, PA, USA" for "McDonald, Pennsylvania, USA".
+    class TypeaheadField extends FakeField {
+      override async fill(_value: string): Promise<void> { this.fillCalls += 1; this.current = "McDonald, PA, USA"; }
+    }
+    const location = new TypeaheadField({ id: "location-input", label: "Current location", type: "text", required: true });
+    const current = new FakeField({ id: "current", label: "Are you a current Kapi employee? If yes, please apply internally.*", type: "select", required: true,
+      options: ["Yes", "No"].map((label) => ({ label, value: label })) });
+    const session = new FakeSession([location, current]);
+    const base = request(session);
+    const profile: CandidateProfile = { ...exampleCandidateProfile, identity: { ...exampleCandidateProfile.identity, location: "McDonald, Pennsylvania, USA" } };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({
+      ...base,
+      profile,
+      careerJob: { ...base.careerJob, job: { ...base.careerJob.job, company: "Kapi Capital" } },
+    });
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(location.current).toBe("McDonald, PA, USA");
+    expect(current.current).toBe("No");
+  });
+
+  it("asks an optional essay question once, and leaves it blank after SKIP", async () => {
+    const prompt = "We understand that applicants don’t always have all the preferred requirements. Please highlight which requirement you have the least experience in.";
+    const essay = () => new FakeField({ id: "question_essay", label: prompt, type: "textarea", required: false,
+      questionDescriptor: { promptText: prompt, sourceStrategy: "question_container", confidence: "high" } });
+    const other = new FakeField({ id: "anything", label: "Is there anything else you would like us to know about you? Please share.", type: "textarea", required: false });
+
+    const first = essay();
+    const firstSession = new FakeSession([first, other]);
+    const asked = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(firstSession), provider: "greenhouse" }).execute(request(firstSession));
+    expect(asked.state).toBe("requires_human");
+    expect(asked.state === "requires_human" && asked.blocker.kind).toBe("subjective_answer");
+    expect(asked.state === "requires_human" && asked.blocker.field).toBe("question_essay");
+
+    const second = essay();
+    const secondSession = new FakeSession([second]);
+    const base = request(secondSession);
+    const skipped = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(secondSession), provider: "greenhouse" }).execute({
+      ...base,
+      careerJob: { ...base.careerJob, blockers: [{
+        id: "skip", kind: "subjective_answer", unit: "submission", field: "question_essay", question: prompt,
+        context: { jobId: base.careerJob.id, company: "Kapitus", role: "Engineer" }, reason: "optional", evidence: [],
+        status: "resolved", createdAt: capturedAt, resolvedAt: capturedAt, value: OPTIONAL_ANSWER_SKIPPED,
+      }] },
+    });
+    expect(skipped.state).toBe("ready_to_submit");
+    expect(second.current).toBeNull();
+    expect(second.fillCalls).toBe(0);
+  });
+
+  it("treats a question that mentions résumés as a question, not the résumé upload", () => {
+    // Temporal (2026-11-09): the file path was typed into this essay box.
+    const prompt = "We know resumes only tell part of the story. Choose one to share with us (150 words max) Tell us something we won't learn from your resume.";
+    expect(classifyLeverApplicationField({ id: "q1", label: prompt, type: "textarea", questionDescriptor: { promptText: prompt, sourceStrategy: "question_container", confidence: "high" } }))
+      .toBe("free_text");
+    expect(classifyLeverApplicationField({ id: "q2", label: "Anything not on your resume you'd like us to know?", type: "text" })).not.toBe("resume_upload");
+    // The real upload controls still are.
+    expect(classifyLeverApplicationField({ id: "resume", label: "Resume/CV", type: "file" })).toBe("resume_upload");
+    expect(classifyLeverApplicationField({ id: "resume_text", label: "Resume", type: "text" })).toBe("resume_upload");
+  });
+
+  it("asks short optional essay prompts too, but not follow-ups or short facts", async () => {
+    // Temporal and ElevenLabs (2026-11-08): these were left blank because they were under 60 characters.
+    const asks = ["What made you decide to apply?", "What makes you excited about the ElevenLabs mission?", "Finally, tell us about a hard problem in your past!"];
+    for (const prompt of asks) {
+      const field = new FakeField({ id: "question_short", label: prompt, type: "textarea", required: false,
+        questionDescriptor: { promptText: prompt, sourceStrategy: "question_container", confidence: "high" } });
+      const session = new FakeSession([field]);
+      const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute(request(session));
+      expect(result.state, prompt).toBe("requires_human");
+      expect(result.state === "requires_human" && result.blocker.kind, prompt).toBe("subjective_answer");
+    }
+    const leaves = ["If other, please specify below", "Name Pronunciation", "Preferred Pronouns", "How did you hear about us?"];
+    for (const prompt of leaves) {
+      const field = new FakeField({ id: "question_short", label: prompt, type: "textarea", required: false,
+        questionDescriptor: { promptText: prompt, sourceStrategy: "question_container", confidence: "high" } });
+      const session = new FakeSession([field]);
+      const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute(request(session));
+      expect(result.state, prompt).toBe("ready_to_submit");
+      expect(field.fillCalls, prompt).toBe(0);
+    }
+  });
+
+  it("answers a location-preference checkbox group with Remote only", async () => {
+    const descriptor = { promptText: "Location Preference", sectionTitle: "Application questions", sourceStrategy: "question_container", confidence: "high" } as const;
+    const options = ["Burlingame, CA", "Austin, TX", "Remote"].map((label, index) =>
+      new FakeField({ id: `question_67832267[]_${index}`, label, type: "checkbox", required: true, questionDescriptor: descriptor }));
+    const session = new FakeSession(options);
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute(request(session));
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(options.map((field) => field.current === true)).toEqual([false, false, true]);
+  });
+
+  it("asks a 'select all that apply' group once, with its boxes as choices, and checks only the chosen box", async () => {
+    // Gusto (2026-11-10): every box was asked on its own with no choices, and a
+    // saved "Job Board" answer fit no box, so the question looped.
+    const prompt = "How did you hear about this opportunity? (select all that apply) *";
+    const descriptor = { promptText: prompt, sectionTitle: "Application questions", sourceStrategy: "question_container", confidence: "high" } as const;
+    const boxes = () => ["LinkedIn", "Indeed", "Company Website"].map((label, index) =>
+      new FakeField({ id: `question_70524493[]_${index}`, label, type: "checkbox", required: true, questionDescriptor: descriptor }));
+    const run = async (answer?: string) => {
+      const fields = boxes();
+      const session = new FakeSession(fields);
+      const base = request(session);
+      const answered = answer === undefined ? base : {
+        ...base,
+        careerJob: { ...base.careerJob, blockers: [{
+          id: "blocker-hear", kind: "unknown_form_field", unit: "submission", field: "question_70524493[]", question: prompt,
+          reason: "asked", evidence: [], resumeAfterHuman: true, status: "resolved", value: answer,
+          createdAt: capturedAt, resolvedAt: capturedAt, context: { jobId: base.careerJob.id, applicationId: base.application.id, company: "Gusto", role: "Engineer" },
+        } as never] },
+      };
+      const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute(answered);
+      return { result, fields };
+    };
+
+    const asked = await run();
+    expect(asked.result.state).toBe("requires_human");
+    const blockers = (asked.result as { blockers?: { field?: string; evidence: string[] }[] }).blockers ?? [];
+    expect(blockers.map((blocker) => blocker.field)).toEqual(["question_70524493[]"]);
+    expect(blockers[0]!.evidence).toContain("options:LinkedIn|Indeed|Company Website");
+
+    const chosen = await run("Company Website");
+    expect(chosen.result.state).toBe("ready_to_submit");
+    expect(chosen.fields.map((field) => field.current === true)).toEqual([false, false, true]);
+
+    const noFit = await run("Job Board (Indeed, Monster, etc)");
+    expect(noFit.result.state).toBe("requires_human");
+    expect(((noFit.result as { blockers?: { field?: string }[] }).blockers ?? []).map((blocker) => blocker.field)).toEqual(["question_70524493[]"]);
+    expect(noFit.fields.every((field) => field.current !== true)).toBe(true);
+  });
+
+  it("answers Samsara's 'How do you identify? (gender identity)' with Man, not a crash", async () => {
+    // Samsara (2026-11-12): the run failed with "Selected option was empty".
+    const options = ["Agender", "Cis-man", "Cis-woman", "Gender Fluid", "Genderqueer", "Man", "Non-Binary", "Transgender", "Trans non-binary", "Woman", "I prefer to self describe", "I don't wish to answer"];
+    const gender = new FakeField({ id: "498", label: "How do you identify? (gender identity)*", type: "select", required: true,
+      options: options.map((label) => ({ label, value: label })),
+      questionDescriptor: { promptText: "How do you identify? (gender identity)*", sourceStrategy: "aria_labelledby", confidence: "high" } });
+    const session = new FakeSession([gender]);
+    const profile = { ...exampleCandidateProfile, approvedReusableAnswers: { ...exampleCandidateProfile.approvedReusableAnswers, gender_identity: "Male" } } satisfies CandidateProfile;
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...request(session), profile });
+    expect(result.state, JSON.stringify(result).slice(0, 400)).toBe("ready_to_submit");
+    expect(gender.current).toBe("Man");
+  });
+
+  it("answers Samsara's disability and US-residence questions, and asks instead of failing on a dropdown the form won't take", async () => {
+    const select = (id: string, label: string, options: string[]) => new FakeField({ id, label, type: "select", required: true,
+      options: options.map((option) => ({ label: option, value: option })),
+      questionDescriptor: { promptText: label, sourceStrategy: "aria_labelledby", confidence: "high" } });
+    const disability = select("502", "Do you have a physical or mental disability, impairment, or condition that substantially limits major life activity? *",
+      ["Yes, I have a disability (or previously had a disability)", "No, I don’t have a disability", "I prefer to self describe", "I don't wish to answer"]);
+    const resides = select("question_67495931", "I confirm that I reside in the US. *", ["Yes", "No"]);
+    const stubborn = select("question_67496150", "Do you have a physical or mental disability, impairment, or condition? (second copy) *",
+      ["Yes, I have a disability (or previously had a disability)", "No, I don’t have a disability"]);
+    stubborn.select = async () => { throw new Error("The custom select control did not commit its verified option."); };
+    const session = new FakeSession([disability, resides, stubborn]);
+    const profile = {
+      ...exampleCandidateProfile,
+      identity: { ...exampleCandidateProfile.identity, location: "McDonald, Pennsylvania, USA" },
+      approvedReusableAnswers: { ...exampleCandidateProfile.approvedReusableAnswers, disability_status: "No, I do not have a disability" },
+    } satisfies CandidateProfile;
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...request(session), profile });
+    expect(disability.current).toBe("No, I don’t have a disability");
+    expect(resides.current).toBe("Yes");
+    expect(result.state).toBe("requires_human");
+    expect(((result as { blockers?: { field?: string }[] }).blockers ?? []).map((blocker) => blocker.field)).toEqual(["question_67496150"]);
+  });
+
+  it("treats 'Do you accept the listed salary range?' Yes/No as a yes/no question, not a salary amount", () => {
+    // Samsara (2026-11-12): the salary figure was tried on Yes/No and the question came back after every answer.
+    const field = (options: string[]) => ({ id: "q", label: "Do you accept the listed salary range for this position? *", type: "select" as const,
+      options: options.map((label) => ({ label, value: label })),
+      questionDescriptor: { promptText: "Do you accept the listed salary range for this position? *", sourceStrategy: "aria_labelledby" as const, confidence: "high" as const } });
+    expect(classifyLeverApplicationField(field(["Yes", "No"]))).toBe("unknown");
+    expect(classifyLeverApplicationField({ ...field([]), type: "text" as const, label: "Desired salary", questionDescriptor: undefined })).toBe("salary");
+  });
+
+  it("treats a dropdown with listed choices as a choice question, never an essay", () => {
+    // Samsara (2026-11-12): these got essay drafts and no buttons in Slack.
+    const options = ["LinkedIn", "Podcast", "Other"].map((label) => ({ label, value: label }));
+    for (const prompt of ["Where have you learned about Samsara? Select all that apply.*", "AI Policy for Interviewers*", "How many years of experience do you have in a a data software engineering role? *"]) {
+      const field = { id: "q", label: prompt, type: "select" as const, options, questionDescriptor: { promptText: prompt, sourceStrategy: "aria_labelledby" as const, confidence: "high" as const } };
+      expect(classifyLeverApplicationField(field), prompt).toBe("unknown");
+      expect(classifyLeverApplicationField({ ...field, type: "textarea" as const, options: [] }), prompt).toBe("free_text");
+    }
+  });
+
+  it("answers pronouns from the profile's saved pronouns", async () => {
+    const pronouns = new FakeField({ id: "question_33213610003", label: "Pronouns *", type: "select", required: true,
+      options: ["He/him/his", "She/her/hers", "They/them/theirs", "I prefer not to say"].map((label) => ({ label, value: label })),
+      questionDescriptor: { promptText: "Pronouns *", sourceStrategy: "aria_labelledby", confidence: "high" } });
+    const session = new FakeSession([pronouns]);
+    const profile = { ...exampleCandidateProfile, approvedReusableAnswers: { ...exampleCandidateProfile.approvedReusableAnswers, pronouns: "He/him" } } satisfies CandidateProfile;
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute({ ...request(session), profile });
+    expect(result.state).toBe("ready_to_submit");
+    expect(pronouns.current).toBe("He/him/his");
+  });
+
+  it("opens the same posting's embed form when the hosted page redirects to the employer's site", async () => {
+    const firstName = new FakeField({ id: "first_name", label: "First Name", type: "text", required: true });
+    const session = new FakeSession([firstName]);
+    const visited: string[] = [];
+    const navigate = session.navigate.bind(session);
+    session.navigate = async (url: string) => {
+      visited.push(url);
+      // careers.example.com plays the employer site that the hosted page redirects to.
+      await navigate(url.includes("/embed/job_app") ? url : "https://careers.example.com/jobs?gh_jid=1");
+    };
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute(request(session));
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(visited).toEqual([applicationUrl, greenhouseEmbedApplicationUrl("kapitus", new URL(applicationUrl).pathname.split("/").pop()!)]);
+    expect(isVerifiedGreenhouseEmbedUrl(session.currentUrl(), "kapitus", new URL(applicationUrl).pathname.split("/").pop()!)).toBe(true);
+    expect(isVerifiedGreenhouseEmbedUrl("https://job-boards.greenhouse.io/embed/job_app?for=other&token=1", "kapitus", "1")).toBe(false);
   });
 
   it("rejects a Greenhouse-looking URL without independent destination verification", () => {

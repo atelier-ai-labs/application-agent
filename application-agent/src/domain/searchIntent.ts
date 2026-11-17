@@ -27,6 +27,12 @@ export interface JobSearchIntent {
   remotePreference: SearchRemotePreference;
   employmentTypes?: readonly string[];
   minimumSalary?: number;
+  /** Skip postings whose stated minimum experience is more than this many years. */
+  maxYearsExperience?: number;
+  /** Applications per company in a rolling window ({ max, windowDays, overrides }). */
+  companyApplicationLimit?: import("./companyLimit").CompanyApplicationLimit;
+  /** Companies never to apply to, matched by name in any spelling ("Sparksoft" = "Sparksoft Corporation"). */
+  excludedCompanies?: readonly string[];
   breadth: SearchBreadth;
 }
 
@@ -84,6 +90,23 @@ function optionalSalary(value: unknown): number | undefined {
   return value;
 }
 
+export function isCompanyApplicationLimit(value: unknown): value is import("./companyLimit").CompanyApplicationLimit {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  const whole = (n: unknown, min: number) => typeof n === "number" && Number.isInteger(n) && n >= min && n <= 365;
+  const overrides = candidate.overrides;
+  return whole(candidate.max, 1) && whole(candidate.windowDays, 1) &&
+    (overrides === undefined || (typeof overrides === "object" && overrides !== null && !Array.isArray(overrides) &&
+      Object.keys(overrides).length <= 50 && Object.values(overrides as Record<string, unknown>).every((n) => whole(n, 1))));
+}
+
+function normalizeCompanyLimit(value: unknown): import("./companyLimit").CompanyApplicationLimit {
+  if (!isCompanyApplicationLimit(value)) {
+    throw new Error("Search intent companyApplicationLimit must be { max, windowDays, overrides? } with whole numbers from 1 to 365.");
+  }
+  return { max: value.max, windowDays: value.windowDays, ...(value.overrides ? { overrides: { ...value.overrides } } : {}) };
+}
+
 /** Normalize one user-authored intent without adding facts or provider syntax. */
 export function normalizeJobSearchIntent(value: unknown): JobSearchIntent {
   if (!value || typeof value !== "object") throw new Error("Search intent must be an object.");
@@ -96,6 +119,10 @@ export function normalizeJobSearchIntent(value: unknown): JobSearchIntent {
   }
 
   const minimumSalary = optionalSalary(candidate.minimumSalary);
+  const maxYearsExperience = candidate.maxYearsExperience;
+  if (maxYearsExperience !== undefined && (typeof maxYearsExperience !== "number" || !Number.isInteger(maxYearsExperience) || maxYearsExperience < 0)) {
+    throw new Error("Search intent maxYearsExperience must be a non-negative whole number.");
+  }
   const normalized: JobSearchIntent = {
     primaryLanes: cleanLaneList(candidate.primaryLanes, "Search intent primary lanes"),
     adjacentLanes: cleanLaneList(candidate.adjacentLanes, "Search intent adjacent lanes"),
@@ -110,6 +137,9 @@ export function normalizeJobSearchIntent(value: unknown): JobSearchIntent {
       ? []
       : cleanList(candidate.employmentTypes, "Search intent employment types"),
     ...(minimumSalary !== undefined ? { minimumSalary } : {}),
+    ...(maxYearsExperience !== undefined ? { maxYearsExperience } : {}),
+    ...(candidate.companyApplicationLimit !== undefined ? { companyApplicationLimit: normalizeCompanyLimit(candidate.companyApplicationLimit) } : {}),
+    ...(candidate.excludedCompanies !== undefined ? { excludedCompanies: cleanList(candidate.excludedCompanies, "Search intent excluded companies") } : {}),
     breadth: candidate.breadth as SearchBreadth,
   };
 
@@ -182,6 +212,9 @@ export function searchCriteriaFromJobSearchIntent(
     ...(normalized.minimumSalary !== undefined ? { minimumSalary: normalized.minimumSalary } : {}),
     excludedSeniorities: [...normalized.excludedSeniorities],
     excludedTitleTerms: [...normalized.excludedTitleTerms],
-    excludedCompanies: [...excludedCompanies],
+    ...(normalized.maxYearsExperience !== undefined ? { maxYearsExperience: normalized.maxYearsExperience } : {}),
+    ...(normalized.companyApplicationLimit ? { companyApplicationLimit: normalized.companyApplicationLimit } : {}),
+    // Companies from the search settings and from the caller, in any spelling.
+    excludedCompanies: [...new Set([...(normalized.excludedCompanies ?? []), ...excludedCompanies])],
   };
 }

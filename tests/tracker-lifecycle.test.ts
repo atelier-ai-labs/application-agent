@@ -51,7 +51,7 @@ class RecordingTracker implements JobTracker {
   }
 }
 
-async function readyFixture(tracker: JobTracker = new RecordingTracker()) {
+async function readyFixture(tracker: JobTracker = new RecordingTracker(), notices?: string[]) {
   const profile = privateProfile();
   const applicationRepository = new InMemoryApplicationRepository();
   const careerRepository = new InMemoryCareerRepository();
@@ -63,6 +63,10 @@ async function readyFixture(tracker: JobTracker = new RecordingTracker()) {
     applicationService,
     careerRepository,
     tracker,
+    ...(notices ? { notificationAdapter: {
+      publishAttentionEvent: async () => ({ status: "delivered" as const }),
+      publishInfoNotice: async (text: string) => { notices.push(text); },
+    } as never } : {}),
   }, {
     now: () => at,
     createId: (prefix) => `${prefix}-test`,
@@ -112,6 +116,21 @@ describe("manual applied state and tracker sync", () => {
     expect(fixture.applicationService.getApplication(fixture.careerJob.applicationId!).status).toBe("ready_for_review");
     expect(tracker.calls).toHaveLength(0);
     expect(fixture.service.getJob(fixture.careerJob.id).status).toBe("ready_to_submit");
+  });
+
+  it("tells Slack once when an application stops, so it never just goes quiet (Ramp)", async () => {
+    const notices: string[] = [];
+    const fixture = await readyFixture(new RecordingTracker(), notices);
+    const failed: ExecutionHostSnapshot = {
+      id: "host-ramp", mode: "real_local", campaignId: fixture.campaign.id, jobId: fixture.careerJob.id,
+      applicationId: fixture.careerJob.applicationId!, status: "failed", startedAt: at, updatedAt: at,
+      result: { state: "failed", reason: "Could not fill Where do you plan on working from?: The select option Pittsburgh, PA was not found", retryable: false },
+    };
+    await fixture.service.recordExecutionHostSnapshot(fixture.campaign.id, fixture.careerJob.id, failed);
+    await fixture.service.recordExecutionHostSnapshot(fixture.campaign.id, fixture.careerJob.id, failed);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain("the application stopped and nothing was submitted");
+    expect(notices[0]).toContain("Pittsburgh, PA was not found");
   });
 
   it("does not let a stale host snapshot downgrade an Applied packet", async () => {
@@ -246,6 +265,23 @@ describe("manual applied state and tracker sync", () => {
     expect(applied.manualSubmissionConfirmation?.mode).toBe("manual");
     expect(applied.blockers.find((candidate) => candidate.id === blocker.id)?.status).toBe("resolved");
     expect(authority.reconcile(fixture.careerJob.applicationId!, fixture.careerJob.id).state).toBe("submitted");
+  });
+
+  it("recovers a submission whose Submit was never clicked after the same explicit assertion", async () => {
+    const fixture = await readyFixture(new RecordingTracker());
+    const blocker = { id: "submission-confirmation", kind: "external_verification" as const, unit: "submission" as const, field: "submission-confirmation", questionProvenance: "POLICY" as const, question: "Verify whether the application was submitted", context: { jobId: fixture.careerJob.id, applicationId: fixture.careerJob.applicationId, company: fixture.careerJob.job.company, role: fixture.careerJob.job.title }, reason: "A pre-click check stopped Submit", evidence: ["submit:not-clicked; submit:rejected; error:validation-error"], status: "open" as const, createdAt: at, resumeAfterHuman: false };
+    fixture.careerRepository.saveJob({ ...fixture.careerJob, status: "needs_input", blockers: [blocker] });
+    const authority = new DurableSubmissionAuthority("test-worker", { stateFile: `/tmp/atelier-recover-unclicked-${fixture.careerJob.id}-${Math.random().toString(36).slice(2)}.json` });
+    const fence = authority.claim(fixture.careerJob.applicationId!, fixture.careerJob.id, at);
+    authority.beforeClick(fence, at);
+    authority.markUnknown(fence, at);
+
+    const recovered = await fixture.service.recoverUnsubmittedHumanVerification(
+      fixture.campaign.id, fixture.careerJob.id, fixture.careerJob.applicationId!, authority,
+      { confirmedNotSubmitted: true, reason: "User saw the unsubmitted form in the handoff browser." },
+    );
+    expect(recovered.status).toBe("ready_to_submit");
+    expect(authority.get(fixture.careerJob.applicationId!, fixture.careerJob.id)?.state).toBe("recovered");
   });
 
   it("recovers a CAPTCHA-stopped submission only after an explicit no-submission assertion", async () => {
