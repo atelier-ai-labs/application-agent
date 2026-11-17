@@ -202,10 +202,19 @@ listener for about a minute until `contract-to-hire` was dropped ("contract" alr
     restarted.
   - Fixed today: the Arize human-check answer had been saved as "100 lol" and is now "100".
     `knows_employee=No` is set.
+- **7fa00d9:**
+  - **A lone checkbox** (Twilio's "By clicking Acknowledge…") now gets Yes/No buttons
+    (`questionOptions` in attention.ts). Before, it was posted as a typed question with no button.
+    Twilio's old message was deleted and re-posted (one-off).
+  - **`answerWaitingQuestionsFromBank`.** The listener rechecks open questions whenever the saved
+    answers change (a sha256 of key, value and disabled for each entry, checked every minute) and
+    once at start. It then resumes the form or posts the next question. On start it answered
+    Smartsheet's "know anyone" question with "No, I don't know anyone at Smartsheet." from the
+    standing answer.
 - **Waiting at end of session:**
-  - Twilio: its window was closed by the restart, and its next answer reopens it.
-  - Smartsheet SE I: answered at 14:38, and its window is open at needs_input with new
-    questions.
+  - Twilio: the privacy-policy acknowledgement (Yes/No buttons). The candidate-guidelines
+    checkbox comes next, and the window reopens on answer.
+  - Smartsheet SE I: the AI-familiarity rating (buttons).
 - **Seen in passing:**
   - The Muse source returns 404.
   - The inbox check read a Langfuse webinar email as an interview. No row matched, so nothing
