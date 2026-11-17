@@ -28,6 +28,14 @@ const RESPONSE_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+/**
+ * How long Ollama keeps the model loaded after a call. Its default is 5
+ * minutes, and loading qwen2.5:7b back takes about 37 s, longer than this
+ * matcher's 15 s timeout, so every check after a quiet spell timed out
+ * (2026-11-17). Two hours covers a working session; VRAM frees itself after.
+ */
+export const OLLAMA_KEEP_ALIVE = process.env.ATELIER_CAREER_AGENT_OLLAMA_KEEP_ALIVE?.trim() || "2h";
+
 const MATCH_PROMPT_VERSION = promptVersion(SYSTEM_PROMPT, JSON.stringify(RESPONSE_SCHEMA));
 
 /** Asks the local model which saved question, if any, the new one repeats. */
@@ -65,7 +73,7 @@ export function createOllamaAnswerBankMatcher(options: OllamaAnswerBankMatcherOp
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          model: options.model.trim(), system: SYSTEM_PROMPT, prompt, stream: false, format: RESPONSE_SCHEMA,
+          model: options.model.trim(), system: SYSTEM_PROMPT, prompt, stream: false, format: RESPONSE_SCHEMA, keep_alive: OLLAMA_KEEP_ALIVE,
           options: { temperature: 0, num_ctx: 4_096, num_predict: 40 },
         }),
         signal: controller.signal,
