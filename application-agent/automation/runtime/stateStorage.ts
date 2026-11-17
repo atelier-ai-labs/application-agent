@@ -34,3 +34,14 @@ export function openStateStorage(path?: string): CareerAgentStateStorage {
   }
   return new SqliteKeyValueStorage(resolved);
 }
+
+/**
+ * The SQLite file that holds the state for `path` (or the configured default),
+ * by the same rules as `openStateStorage`: a `.json` state path means the
+ * database beside it. Tables other than the key-value state (the answer
+ * bank) live in this same file.
+ */
+export function stateDatabasePath(path?: string): string {
+  const resolved = resolve(path ?? (process.env.ATELIER_CAREER_AGENT_STATE_FILE?.trim() || DEFAULT_CAREER_AGENT_STATE_DB));
+  return /\.json$/i.test(resolved) ? siblingDb(resolved) : resolved;
+}

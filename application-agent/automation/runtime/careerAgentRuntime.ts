@@ -59,7 +59,6 @@ import { resolveSlackConfig, type SlackEnvironment } from "../slack/config";
 import { createPlaywrightLeverBrowserExecutor } from "../createLeverBrowserExecutor";
 import { OllamaApplicationAnswerDraftGenerator } from "../answerDraft/ollamaApplicationAnswerDraftGenerator";
 import { enrichJobIntake } from "../../src/domain/postingEnrichment";
-import { FileAnswerBankStore } from "../answerBank/fileAnswerBankStore";
 import { isAwaitingReceipt, matchReceiptToJob } from "../../src/domain/applicationReceipt";
 import { renderWaitingBoard, waitingBoardItems, waitingBoardSignature, WAITING_BOARD_RECENT_MS } from "../../src/domain/waitingBoard";
 import { slackMessagesToTidy } from "../../src/domain/slackTidy";
@@ -79,7 +78,8 @@ import { createGoogleOAuthAccessTokenProvider, gmailSecurityCodesEnabled, resolv
 import { createOllamaAnswerBankMatcher } from "../answerBank/ollamaAnswerBankMatcher";
 import { isUsableResumeArtifact } from "../resume/resumeArtifact";
 import { normalizeJobSearchIntent, searchCriteriaFromJobSearchIntent, type JobSearchIntent } from "../../src/domain/searchIntent";
-import { DEFAULT_CAREER_AGENT_STATE_DB, openStateStorage } from "./stateStorage";
+import { DEFAULT_CAREER_AGENT_STATE_DB, openStateStorage, stateDatabasePath } from "./stateStorage";
+import { openAnswerBankStore } from "../answerBank/sqliteAnswerBankStore";
 import { FileModelCallLogger, type ModelCallLogger } from "../modelCallLog";
 import { assertDuplicateRiskRetryAuthorization, assertSubmitPreparedApplicationPreflight } from "./submitPreparedApplicationPreflight";
 import { authorizeThenSubmit } from "./submitPreparedApplicationFlow";
@@ -1542,7 +1542,7 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
           applicationAnswerDraftGenerator: applicationAnswerDraftGenerator.generate.bind(applicationAnswerDraftGenerator),
         }
       : {}),
-    ...createConfiguredAnswerBank(env, modelCallLogger),
+    ...createConfiguredAnswerBank(env, modelCallLogger, stateFilePath),
     ...createConfiguredReceiptInbox(env),
     notification: {
       adapter: slack,
@@ -1591,14 +1591,15 @@ function parsePositiveInteger(value: string | undefined, fallback: number, label
  * When the local model is configured it also matches low-risk questions
  * worded differently from the saved ones.
  */
-function createConfiguredAnswerBank(env: Partial<Record<"ATELIER_CAREER_AGENT_ANSWER_BANK" | "ATELIER_CAREER_AGENT_ANSWER_BANK_FILE" | "ATELIER_CAREER_AGENT_OLLAMA_MODEL" | "ATELIER_CAREER_AGENT_OLLAMA_BASE_URL", string | undefined>>, logger?: ModelCallLogger) {
+function createConfiguredAnswerBank(env: Partial<Record<"ATELIER_CAREER_AGENT_ANSWER_BANK" | "ATELIER_CAREER_AGENT_ANSWER_BANK_FILE" | "ATELIER_CAREER_AGENT_OLLAMA_MODEL" | "ATELIER_CAREER_AGENT_OLLAMA_BASE_URL", string | undefined>>, logger?: ModelCallLogger, stateFilePath?: string) {
   const setting = env.ATELIER_CAREER_AGENT_ANSWER_BANK?.trim() || "enabled";
   if (setting === "disabled") return {};
   if (setting !== "enabled") throw new Error("ATELIER_CAREER_AGENT_ANSWER_BANK must be enabled or disabled.");
   const model = env.ATELIER_CAREER_AGENT_OLLAMA_MODEL?.trim();
   const baseUrl = env.ATELIER_CAREER_AGENT_OLLAMA_BASE_URL?.trim();
   return {
-    answerBank: new FileAnswerBankStore(env.ATELIER_CAREER_AGENT_ANSWER_BANK_FILE?.trim() || undefined),
+    // In the state database (answer_bank table) since 2026-11-17.
+    answerBank: openAnswerBankStore(env, stateDatabasePath(stateFilePath)),
     ...(model ? { answerBankMatcher: createOllamaAnswerBankMatcher({ model, ...(baseUrl ? { baseUrl } : {}), ...(logger ? { logger } : {}) }) } : {}),
   };
 }

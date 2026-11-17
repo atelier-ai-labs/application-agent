@@ -87,7 +87,7 @@ Some other useful commands:
 | `npm run career-agent:inbox` | Dry run of the email check |
 | `npm run career-agent:replay -- --quiet` | Replays every saved form against the current code |
 | `npm run career-agent:eval-essays` | Runs the essay eval and compares it with the last baseline |
-| `npm run career-agent:answers` | Lists the answer bank |
+| `npm run career-agent:answers` | Lists the answer bank; `-- --help` shows how to change, turn off or remove an answer |
 | `npm run career-agent:history` | Builds an HTML report of every application so far |
 
 ## Where to read more

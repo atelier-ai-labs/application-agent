@@ -122,7 +122,7 @@ import {
 } from "../domain/jobUrlClassifier";
 import { isVerifiedAshbyApplicationUrl, isVerifiedAshbyHostedUrl } from "../domain/jobUrlClassifier";
 import { isPostSubmitHumanCheck } from "../domain/applicationReceipt";
-import { answerBankKey, answerRiskTier, findAnswerBankMatch, isBankableQuestion, questionFromBlocker, standingRecordsFromJobs, withRecordedAnswer, type AnswerBankSemanticMatcher, type AnswerBankStore } from "../domain/answerBank";
+import { answerBankKey, answerRiskTier, findAnswerBankMatch, isBankableQuestion, questionFromBlocker, standingRecordsFromJobs, withRecordedAnswer, type AnswerBankEntry, type AnswerBankSemanticMatcher, type AnswerBankStore } from "../domain/answerBank";
 import { isVerifiedLeverApplicationUrl, isVerifiedLeverHostedUrl } from "../domain/leverJobSource";
 
 let fallbackId = 0;
@@ -3484,7 +3484,7 @@ export class CareerAgentService {
     const question = questionFromBlocker(blocker);
     if (!isBankableQuestion(question, value)) return;
     try {
-      this.answerBank.save(withRecordedAnswer(this.answerBank.entries(), {
+      const recorded: AnswerBankEntry = {
         id: this.createId("answer"),
         key: answerBankKey(question.question, question.company),
         question: question.question,
@@ -3496,7 +3496,8 @@ export class CareerAgentService {
         ...(blocker.context.jobId ? { jobId: blocker.context.jobId } : {}),
         source,
         recordedAt: this.now(),
-      }));
+      };
+      this.answerBank.update((entries) => withRecordedAnswer(entries, recorded));
     } catch {
       // The bank is a convenience: failing to write it never fails the answer.
     }
@@ -3535,7 +3536,7 @@ export class CareerAgentService {
         ],
       });
       try {
-        this.answerBank.save(this.answerBank.entries().map((entry) => entry.id === match.entry.id
+        this.answerBank.update((entries) => entries.map((entry) => entry.id === match.entry.id
           ? { ...entry, usedCount: (entry.usedCount ?? 0) + 1, lastUsedAt: this.now() }
           : entry));
       } catch { /* usage counts are informational */ }

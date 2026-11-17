@@ -576,15 +576,44 @@ export function withRecordedAnswer(entries: readonly AnswerBankEntry[], entry: A
   return [...entries.filter((candidate) => candidate.key !== entry.key), entry];
 }
 
-/** Where the bank lives. The service reads and writes it through this. */
+/**
+ * Where the bank lives. The service reads and writes it through this.
+ *
+ * There is no "save the whole list": a change is a function from the current
+ * entries to the new ones, run as one atomic step against whatever is stored
+ * now. Two programs answering at the same moment both keep their answer
+ * (2026-11-17; the JSON file it replaced was read, changed and rewritten whole).
+ */
 export interface AnswerBankStore {
   entries(): readonly AnswerBankEntry[];
-  save(entries: readonly AnswerBankEntry[]): void;
+  update(change: (entries: readonly AnswerBankEntry[]) => readonly AnswerBankEntry[]): void;
 }
 
 export class InMemoryAnswerBankStore implements AnswerBankStore {
   private current: AnswerBankEntry[];
   constructor(entries: readonly AnswerBankEntry[] = []) { this.current = [...entries]; }
   entries(): readonly AnswerBankEntry[] { return this.current; }
-  save(entries: readonly AnswerBankEntry[]): void { this.current = [...entries]; }
+  update(change: (entries: readonly AnswerBankEntry[]) => readonly AnswerBankEntry[]): void { this.current = [...change(this.current)]; }
+}
+
+/** A stored entry has the fields every reader relies on. */
+export function isAnswerBankEntry(value: unknown): value is AnswerBankEntry {
+  if (!value || typeof value !== "object") return false;
+  const entry = value as Record<string, unknown>;
+  return typeof entry.id === "string" && typeof entry.key === "string" && entry.key.length > 0 && typeof entry.question === "string" &&
+    ["string", "number", "boolean"].includes(typeof entry.value) && ["low", "medium", "high"].includes(entry.tier as string) &&
+    ["slack", "history", "manual"].includes(entry.source as string) && typeof entry.recordedAt === "string";
+}
+
+/**
+ * Finds the entries a typed reference means: an exact key, the same question
+ * once normalized, or else the only entry whose question contains the text.
+ */
+export function findAnswerBankEntries(entries: readonly AnswerBankEntry[], reference: string): AnswerBankEntry[] {
+  const wanted = reference.trim();
+  if (!wanted) return [];
+  const exact = entries.filter((entry) => entry.key === wanted || entry.key === answerBankKey(wanted, entry.company));
+  if (exact.length > 0) return exact;
+  const lower = wanted.toLowerCase();
+  return entries.filter((entry) => entry.question.toLowerCase().includes(lower) || entry.key.includes(lower));
 }

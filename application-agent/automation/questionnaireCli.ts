@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { applyQuestionnaireAnswer, questionnaireRows, type QuestionnaireRow } from "../src/domain/questionnaire";
 import type { CandidateProfile } from "../src/domain/types";
-import { FileAnswerBankStore } from "./answerBank/fileAnswerBankStore";
+import { openAnswerBankStore } from "./answerBank/sqliteAnswerBankStore";
 
 /**
  * `career-agent:questionnaire` shows the common application questions and
@@ -26,18 +26,25 @@ function printRows(rows: readonly QuestionnaireRow[], onlyMissing: boolean): voi
 }
 
 export async function runQuestionnaireCli(argv = process.argv.slice(2), env = process.env): Promise<void> {
-  const store = new FileAnswerBankStore(env.ATELIER_CAREER_AGENT_ANSWER_BANK_FILE?.trim() || undefined);
+  const store = openAnswerBankStore(env);
   const profilePath = resolve(env.ATELIER_CAREER_AGENT_PROFILE_FILE?.trim() || ".local/career-agent/profile.json");
   let profile = JSON.parse(readFileSync(profilePath, "utf8")) as ProfileFile;
-  let entries = [...store.entries()];
   const before = JSON.stringify(profile.workPreferences);
   const now = new Date().toISOString();
+  // Answers are collected first and applied in one atomic bank update at the
+  // end, so an answer saved by the agent meanwhile is kept (2026-11-17).
+  const answers: { id: string; value: string }[] = [];
+  let preview = [...store.entries()];
+  const apply = (id: string, value: string) => {
+    ({ entries: preview, profile } = applyQuestionnaireAnswer(id, value, preview, profile, now));
+    answers.push({ id, value });
+  };
 
   const setIndex = argv.indexOf("--set");
   if (setIndex >= 0) {
     for (const pair of argv.slice(setIndex + 1).filter((arg) => !arg.startsWith("--"))) {
       const [id, ...rest] = pair.split("=");
-      ({ entries, profile } = applyQuestionnaireAnswer(id ?? "", rest.join("="), entries, profile, now));
+      apply(id ?? "", rest.join("="));
       console.log(`Saved ${id}.`);
     }
   }
@@ -45,11 +52,11 @@ export async function runQuestionnaireCli(argv = process.argv.slice(2), env = pr
   if (argv.includes("--ask")) {
     const prompt = createInterface({ input: process.stdin, output: process.stdout });
     try {
-      for (const row of questionnaireRows(entries, profile).filter((candidate) => candidate.value === undefined)) {
+      for (const row of questionnaireRows(preview, profile).filter((candidate) => candidate.value === undefined)) {
         const reply = (await prompt.question(`${row.item.prompt}${row.item.hint ? ` (${row.item.hint})` : ""}: `)).trim();
         if (!reply) continue;
         try {
-          ({ entries, profile } = applyQuestionnaireAnswer(row.item.id, reply, entries, profile, now));
+          apply(row.item.id, reply);
         } catch (error) {
           console.log(`  Not saved: ${(error as Error).message}`);
         }
@@ -59,8 +66,13 @@ export async function runQuestionnaireCli(argv = process.argv.slice(2), env = pr
     }
   }
 
-  if (setIndex >= 0 || argv.includes("--ask")) {
-    store.save(entries);
+  if (answers.length > 0) {
+    let latestProfile = profile;
+    store.update((current) => answers.reduce((entries, { id, value }) => {
+      const result = applyQuestionnaireAnswer(id, value, entries, latestProfile, now);
+      latestProfile = result.profile as ProfileFile;
+      return result.entries;
+    }, current));
     if (JSON.stringify(profile.workPreferences) !== before) {
       const temporary = `${profilePath}.${process.pid}.tmp`;
       writeFileSync(temporary, JSON.stringify(profile, null, 2) + "\n");
@@ -68,7 +80,8 @@ export async function runQuestionnaireCli(argv = process.argv.slice(2), env = pr
     }
     console.log("");
   }
-  printRows(questionnaireRows(entries, profile), argv.includes("--missing"));
+  printRows(questionnaireRows(store.entries(), profile), argv.includes("--missing"));
+  store.close();
 }
 
 await runQuestionnaireCli();
