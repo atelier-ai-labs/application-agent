@@ -1,6 +1,6 @@
 # Future updates
 
-These are ideas we've parked for later. None of them are scheduled; Nate picks what's next.
+These are ideas we've parked for later. The ones that are scheduled, and in what order, are in [ROADMAP.md](ROADMAP.md). Nate picks what's next.
 
 ## For other users (open-source prep)
 
@@ -26,18 +26,18 @@ These are ideas we've parked for later. None of them are scheduled; Nate picks w
   - Make it opt-in, keep Ollama as the default, and fall back to Ollama when Groq is down or rate-limited.
   - Not urgent: Nate writes or edits the important essays himself, and other users can do the same.
 
-- **Headless browser.** Set `ATELIER_EXECUTION_HEADLESS=true` and restart the host; review still happens through the handoff link. Planned for about 2026-11-14, after a week more of tuning.
+- **Headless browser.** Set `ATELIER_EXECUTION_HEADLESS=true` and restart the host; review still happens through the handoff link. Now Stage 3 of the roadmap: it waits until the agent has earned more trust.
 - **Answer-length check.** Hold drafts to a form's word or character limit, e.g. "150 words max".
 - **Redo command.** A Slack command to restart an application from scratch.
 - **Standing no-range salary answer.** An answer for postings that list no pay range, so the agent doesn't have to ask.
 - **Title-drift check.** Flag when the posting's title differs from the tracker row's, e.g. "AI Engineer" vs "Lead AI Engineer" at Reflow.
-- **Done 2026-11-11: per-company limits.** `companyApplicationLimit` in search intent (Nate: 3 per 60 days, Upstart listed). Possible follow-up: when several roles at one company arrive together, apply to the best-fitting ones first instead of queue order.
+- **Done 2026-11-11, tightened 2026-11-17: per-company limits.** `companyApplicationLimit` in search intent, now one application per company in 365 days, best fit only. On 11-17 it was also wired into the pre-apply check, which had never seen it.
 - **Higher daily throughput.** Raise the limit from 3 to 5, or add a midday run.
 - **Screenshot (vision) fallback.** For Workday or custom sites the form reader can't parse. Declined for now (2026-11-07).
 
 ## Applied-AI depth (interview material)
 
-- **Essay eval.** A dataset of real questions and postings. Score drafts with simple checks plus an LLM judge on a rubric: grounded, specific, nothing made up.
+- **Done 2026-11-14: essay eval** (13 real cases, six automatic checks, baseline 0.48). Still to do: an LLM judge on a rubric (grounded, specific, nothing made up). That's Stage 2 of the roadmap.
 - **Structured output for unknown questions.** The local model maps a question to a known answer topic as strict JSON with a confidence score. The stored answer is what gets filled, never the model's own text. Measured on the form replay set.
-- **Log every model call.** Prompt version, inputs, output, latency and tokens.
+- **Done 2026-11-14: log every model call** (prompt version, outcome, latency, tokens) in `model-calls.jsonl`.
 - **Prompt versions plus a regression gate.** A prompt change that lowers the eval score fails the tests.
