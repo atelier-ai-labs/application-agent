@@ -211,10 +211,25 @@ listener for about a minute until `contract-to-hire` was dropped ("contract" alr
     once at start. It then resumes the form or posts the next question. On start it answered
     Smartsheet's "know anyone" question with "No, I don't know anyone at Smartsheet." from the
     standing answer.
-- **Waiting at end of session:**
-  - Twilio: the privacy-policy acknowledgement (Yes/No buttons). The candidate-guidelines
-    checkbox comes next, and the window reopens on answer.
-  - Smartsheet SE I: the AI-familiarity rating (buttons).
+- **Applied 11-17:** Smartsheet SE I (15:29, Slack Submit).
+- **Lost question, fixed in 1262578.** Twilio's Yes did nothing: every tap logged
+  `unknown_or_closed_event`.
+  - Two code paths in the listener (answer → post next question, and the minute loop's stale
+    replacement) each read the campaign, added a question and saved it whole. One question was
+    erased, and its Slack message kept buttons that pointed at nothing.
+  - `saveCampaign` now merges `attentionEvents` and `runHistory` by id inside the transaction
+    (`mergeCampaignWrite`). Closed questions never reopen from an older copy, and a recorded
+    Slack delivery is kept.
+  - **Deliberate deletions or clearing a delivery must use `replaceCampaign`.** The re-post
+    one-offs used `saveCampaign` and would no longer work.
+  - `recordAttentionResolution` used to pick the first open copy of a question, see that the ids
+    differed, and silently record nothing. It now closes the answered copy and cancels its twins.
+  - Twilio's dead messages were deleted, and the guidelines question was re-posted top-level.
+  - Test gotcha: vitest's default environment is jsdom, where `SqliteKeyValueStorage` reads
+    return null (`instanceof Uint8Array` fails across realms). Database tests need
+    `// @vitest-environment node`.
+- **Waiting at end of session:** Twilio needs the candidate-guidelines acknowledgement (fresh
+  message, Yes/No). The browser reopens on answer.
 - **Seen in passing:**
   - The Muse source returns 404.
   - The inbox check read a Langfuse webinar email as an interview. No row matched, so nothing
