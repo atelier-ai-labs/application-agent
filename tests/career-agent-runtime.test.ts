@@ -419,7 +419,7 @@ describe("Submit after the browser window closed (2026-11-17)", () => {
       const snapshot = this.sessions.get(id);
       if (!snapshot) throw new ExecutionHostResponseError("Execution session was not found.", 404);
       if (id === "host-1" && this.firstWindowClosed) {
-        return { ...snapshot, status: "failed", failureReasonCode: "session_timeout", error: "The local browser execution session timed out; no application was submitted." } as ExecutionHostSnapshot;
+        return { ...snapshot, status: "failed", failureReasonCode: "timeout", error: "The local browser execution session timed out; no application was submitted." };
       }
       return snapshot;
     }
