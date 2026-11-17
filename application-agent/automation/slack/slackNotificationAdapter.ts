@@ -112,9 +112,23 @@ function responseData(value: unknown): string {
 }
 
 const QUICK_REPLY_ACTION_ID = "career_agent_quick_reply";
-const QUICK_REPLY_ACTION_PATTERN = new RegExp(`^${QUICK_REPLY_ACTION_ID}_(APPROVE|SKIP|DONE)$`);
-type QuickReply = "APPROVE" | "SKIP" | "DONE";
-const QUICK_REPLY_LABELS: Record<QuickReply, string> = { APPROVE: "Approve draft", SKIP: "Skip", DONE: "Done" };
+const QUICK_REPLY_ACTION_PATTERN = new RegExp(`^${QUICK_REPLY_ACTION_ID}_(APPROVE|SKIP|DONE|YES|NO)$`);
+type QuickReply = "APPROVE" | "SKIP" | "DONE" | "YES" | "NO";
+const QUICK_REPLY_LABELS: Record<QuickReply, string> = { APPROVE: "Approve draft", SKIP: "Skip", DONE: "Done", YES: "Yes", NO: "No" };
+/** What a tap sends: the same text as typing the reply in the thread. */
+const QUICK_REPLY_TEXT: Record<QuickReply, string> = { APPROVE: "APPROVE", SKIP: "SKIP", DONE: "DONE", YES: "Yes", NO: "No" };
+
+/**
+ * A typed-answer box whose question is a plain yes/no question ("Do you know
+ * anyone who works at Smartsheet?") gets Yes and No buttons too; typing a
+ * longer answer still works (2026-11-17).
+ */
+export function isYesNoQuestion(prompt: string): boolean {
+  const text = prompt.replace(/[*\s]+$/, "").trim();
+  return /^(?:do|does|did|are|is|was|were|have|has|had|will|would|can|could)\s+you\b[^?]{0,200}\?$/i.test(text) &&
+    // "Do you prefer A or B?" and "...please describe" are not yes/no.
+    !/\b(?:or|describe|explain|list|please provide)\b/i.test(text);
+}
 
 function isHumanVerificationHandoff(event: AttentionEvent): boolean {
   return event.submissionAlreadyClicked === true || event.blockerType === "captcha" ||
@@ -134,6 +148,7 @@ export function quickRepliesForEvent(event: AttentionEvent): readonly QuickReply
   }
   const replies: QuickReply[] = [];
   if (event.draft) replies.push("APPROVE");
+  if (!event.draft && event.question.kind === "free_text" && isYesNoQuestion(event.question.prompt)) replies.push("YES", "NO");
   if (event.question.required === false && event.question.kind === "free_text") replies.push("SKIP");
   return replies;
 }
@@ -335,7 +350,9 @@ function eventMessageBody(
     : (event.draft
     ? "\n\nTap *Approve draft* (or reply APPROVE) to use this draft, or reply with your edited answer. The draft is never used without your explicit approval."
     : event.question.kind === "free_text"
-      ? "\n\nReply in this Slack thread with one grounded answer."
+      ? isYesNoQuestion(event.question.prompt)
+        ? "\n\nTap *Yes* or *No*, or reply in this thread with a longer answer."
+        : "\n\nReply in this Slack thread with one grounded answer."
       : "") + (optionalNote && (event.draft || event.question.kind === "free_text") ? optionalNote : "");
   const threadReply = renderOptions.threadReply === true;
   const text = threadReply
@@ -1251,9 +1268,9 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     const event = this.eventLookup?.(eventId) ?? this.publishedAttentionEvents.get(eventId);
     if (!event || event.status !== "open") return { status: "rejected", reason: "unknown_or_closed_event" };
     if (!quickRepliesForEvent(event).includes(reply)) return { status: "rejected", reason: "invalid_option" };
-    await this.acknowledgeTap(event, reply === "APPROVE" ? "Approve draft" : reply === "SKIP" ? "Skip" : "Done");
+    await this.acknowledgeTap(event, QUICK_REPLY_LABELS[reply]);
     try {
-      const result = await this.responseHandler!({ eventId, selectedOption: reply, actorIdentity, respondedAt: new Date().toISOString() });
+      const result = await this.responseHandler!({ eventId, selectedOption: QUICK_REPLY_TEXT[reply], actorIdentity, respondedAt: new Date().toISOString() });
       return { status: result.status === "partial" ? "ignored" : result.status };
     } catch {
       return { status: "rejected", reason: "attention_response_rejected" };

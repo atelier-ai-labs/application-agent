@@ -29,6 +29,8 @@ export interface JobSearchIntent {
   minimumSalary?: number;
   /** Skip postings whose stated minimum experience is more than this many years. */
   maxYearsExperience?: number;
+  /** Programming languages Nate doesn't work in; postings that require one are skipped (Ruby, 2026-11-17). */
+  excludedLanguages?: readonly string[];
   /** Applications per company in a rolling window ({ max, windowDays, overrides }). */
   companyApplicationLimit?: import("./companyLimit").CompanyApplicationLimit;
   /** Companies never to apply to, matched by name in any spelling ("Sparksoft" = "Sparksoft Corporation"). */
@@ -140,6 +142,7 @@ export function normalizeJobSearchIntent(value: unknown): JobSearchIntent {
     ...(maxYearsExperience !== undefined ? { maxYearsExperience } : {}),
     ...(candidate.companyApplicationLimit !== undefined ? { companyApplicationLimit: normalizeCompanyLimit(candidate.companyApplicationLimit) } : {}),
     ...(candidate.excludedCompanies !== undefined ? { excludedCompanies: cleanList(candidate.excludedCompanies, "Search intent excluded companies") } : {}),
+    ...(candidate.excludedLanguages !== undefined ? { excludedLanguages: cleanList(candidate.excludedLanguages, "Search intent excluded languages") } : {}),
     breadth: candidate.breadth as SearchBreadth,
   };
 
@@ -213,6 +216,7 @@ export function searchCriteriaFromJobSearchIntent(
     excludedSeniorities: [...normalized.excludedSeniorities],
     excludedTitleTerms: [...normalized.excludedTitleTerms],
     ...(normalized.maxYearsExperience !== undefined ? { maxYearsExperience: normalized.maxYearsExperience } : {}),
+    ...(normalized.excludedLanguages?.length ? { excludedLanguages: [...normalized.excludedLanguages] } : {}),
     ...(normalized.companyApplicationLimit ? { companyApplicationLimit: normalized.companyApplicationLimit } : {}),
     // Companies from the search settings and from the caller, in any spelling.
     excludedCompanies: [...new Set([...(normalized.excludedCompanies ?? []), ...excludedCompanies])],

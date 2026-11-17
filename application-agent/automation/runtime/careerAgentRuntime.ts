@@ -393,6 +393,7 @@ export function liveSearchPolicyFromIntentFile(
         excludedCompanies: criteria.excludedCompanies ?? [],
         ...(criteria.maxYearsExperience !== undefined ? { maxYearsExperience: criteria.maxYearsExperience } : {}),
         ...(criteria.companyApplicationLimit ? { companyApplicationLimit: criteria.companyApplicationLimit } : {}),
+        excludedLanguages: criteria.excludedLanguages ?? [],
       };
     } catch (error) {
       console.warn(`[career-agent-runtime] search settings could not be read; using the last good copy (${error instanceof Error ? error.message.slice(0, 120) : "unknown error"})`);

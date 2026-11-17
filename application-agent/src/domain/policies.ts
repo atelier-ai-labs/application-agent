@@ -10,6 +10,7 @@ import type {
 } from "./campaignTypes";
 import { locationAllowed } from "./discoveryFilter";
 import { requiredYearsOfExperience } from "./experienceYears";
+import { requiredExcludedLanguages } from "./requiredLanguages";
 import { companyKey } from "./companyLimit";
 import type { FitAssessment, JobPosting, ResumeFamilyId } from "./types";
 
@@ -160,6 +161,15 @@ export function applyHardFilters(job: JobPosting, criteria: SearchCriteria): Har
       decision: "reject",
       reason: `Title contains a term excluded by campaign search intent: ${excludedTitleTerm}.`,
       evidence: [`title:${job.title}`, `excluded-title-term:${excludedTitleTerm}`],
+    };
+  }
+
+  const languages = requiredExcludedLanguages(job.title, job.description, criteria.excludedLanguages);
+  if (languages.length > 0) {
+    return {
+      decision: "reject",
+      reason: `Posting requires ${languages.join(" and ")}, which the search excludes.`,
+      evidence: languages.map((language) => `required-language:${language}`),
     };
   }
 

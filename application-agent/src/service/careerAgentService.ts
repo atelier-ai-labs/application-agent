@@ -127,7 +127,7 @@ import { isVerifiedLeverApplicationUrl, isVerifiedLeverHostedUrl } from "../doma
 
 let fallbackId = 0;
 
-export type LiveSearchPolicy = Partial<Pick<SearchCriteria, "companyApplicationLimit" | "excludedCompanies" | "maxYearsExperience">>;
+export type LiveSearchPolicy = Partial<Pick<SearchCriteria, "companyApplicationLimit" | "excludedCompanies" | "maxYearsExperience" | "excludedLanguages">>;
 
 export interface CareerAgentServiceOptions {
   now?: () => string;
@@ -4030,6 +4030,7 @@ export class CareerAgentService {
       ...criteria,
       excludedCompanies: [...new Set([...(criteria.excludedCompanies ?? []), ...(live.excludedCompanies ?? [])])],
       ...(live.maxYearsExperience !== undefined ? { maxYearsExperience: live.maxYearsExperience } : {}),
+      ...(live.excludedLanguages ? { excludedLanguages: [...live.excludedLanguages] } : {}),
       ...(live.companyApplicationLimit ? { companyApplicationLimit: live.companyApplicationLimit } : {}),
     };
   }

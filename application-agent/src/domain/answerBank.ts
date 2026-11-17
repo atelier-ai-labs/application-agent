@@ -61,7 +61,7 @@ export interface AnswerBankQuestion {
 export type StandingTopicId =
   | "criminal_conviction" | "terminated" | "financial_judgments" | "financial_license" | "regulatory_discipline"
   | "restrictive_agreements" | "background_check" | "essential_functions" | "previously_applied" | "previously_interviewed"
-  | "related_to_employee" | "security_clearance" | "military_service" | "work_location" | "notice_period" | "certifications";
+  | "related_to_employee" | "knows_employee" | "security_clearance" | "military_service" | "work_location" | "notice_period" | "certifications";
 
 /** A standing value that is looked up from the agent's own records instead of fixed. */
 export const STANDING_FROM_RECORDS = "@records";
@@ -98,6 +98,15 @@ export const STANDING_TOPICS: readonly {
     pattern: /\brelated to\b.{0,30}\b(?:anyone|any(?:one)? (?:current )?employees?|an? (?:current )?employee|someone)\b.{0,30}(?:\{company\}|\bemploy)|\brelated to\b.{0,20}\{company\}|\b(?:relatives?|family members?)\b.{0,40}\b(?:work(?:s|ing)?|employed)\b.{0,20}(?:\{company\}|\bhere\b)/,
     conditional: true,
     asText: (value, company) => /^no\b/i.test(value.trim()) ? `Not applicable. I am not related to anyone at ${company?.trim() || "the company"}.` : undefined,
+  },
+  {
+    // Smartsheet, 2026-11-17. Asked once, answered the same for every company;
+    // when Nate does know someone somewhere, he answers that form by hand.
+    id: "knows_employee", label: "Knows anyone who works at the company",
+    pattern: /\b(?:know|acquainted with)\b.{0,20}\b(?:anyone|anybody|someone|any (?:current )?(?:employees?|team members?))\b.{0,40}(?:\b(?:works?|working|employed)\b.{0,25}(?:\{company\}|\bhere\b)|\{company\})/,
+    // "Who referred you?" asks for a name, and a referral is a different fact.
+    exclude: /\brefer/,
+    asText: (value, company) => /^no\b/i.test(value.trim()) ? `No, I don't know anyone at ${company?.trim() || "the company"}.` : undefined,
   },
   {
     id: "security_clearance", label: "Currently holds an active security clearance",

@@ -261,6 +261,7 @@ function isSearchCriteria(value: unknown): value is SearchCriteria {
     (value.excludedTitleTerms === undefined || isStringArray(value.excludedTitleTerms)) &&
     (value.maxYearsExperience === undefined || (typeof value.maxYearsExperience === "number" && Number.isInteger(value.maxYearsExperience) && value.maxYearsExperience >= 0)) &&
     (value.companyApplicationLimit === undefined || isCompanyApplicationLimit(value.companyApplicationLimit)) &&
+    (value.excludedLanguages === undefined || isStringArray(value.excludedLanguages)) &&
     isStringArray(value.excludedCompanies)
   );
 }
