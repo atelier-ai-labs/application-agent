@@ -228,8 +228,19 @@ listener for about a minute until `contract-to-hire` was dropped ("contract" alr
   - Test gotcha: vitest's default environment is jsdom, where `SqliteKeyValueStorage` reads
     return null (`instanceof Uint8Array` fails across realms). Database tests need
     `// @vitest-environment node`.
-- **Waiting at end of session:** Twilio needs the candidate-guidelines acknowledgement (fresh
-  message, Yes/No). The browser reopens on answer.
+- **No essay drafts on checkboxes (623409c).** Twilio's guidelines checkbox was classified as
+  `free_text` because of its long label, so qwen drafted an essay about PuckPulse for it, and
+  Slack showed Yes/No plus "Approve draft". Four layers fix it:
+  1. `asFreeText` returns "unknown" for a checkbox (staging trick).
+  2. `draftAtsAnswerForBlocker` skips anything that isn't a typed answer.
+  3. `withoutInvalidDraft` drops a draft unless the question is free_text. It used to do that only
+     when the whole record was invalid.
+  4. The Slack render ignores a draft on a choice question.
+
+  Re-posted clean. **The host still runs the old classification**: restart it once no windows are
+  open (Twilio's was open at 15:46).
+- **Waiting at end of session:** Twilio's candidate-guidelines acknowledgement (Yes/No, no draft).
+  Its window is open at needs_input, and a tap resumes it.
 - **Seen in passing:**
   - The Muse source returns 404.
   - The inbox check read a Langfuse webinar email as an interview. No row matched, so nothing
