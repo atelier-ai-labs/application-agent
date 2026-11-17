@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sameProviderOrigin } from "../application-agent/src/domain/leverBrowserExecutor";
+import { classifyLeverApplicationField, sameProviderOrigin } from "../application-agent/src/domain/leverBrowserExecutor";
 import { SlackNotificationAdapter } from "../application-agent/automation/slack/slackNotificationAdapter";
 import type { AttentionEvent } from "../application-agent/src/domain/attention";
 
@@ -34,5 +34,11 @@ describe("form safety stops (Figma, 2026-11-17)", () => {
     expect(bodies[0]).toContain("Nothing to answer here");
     expect(bodies[0]).not.toContain("one grounded answer");
     expect(bodies[0]).not.toContain("needs your review before continuing");
+  });
+
+  it("reads Figma's location wording as a location question", () => {
+    expect(classifyLeverApplicationField({ id: "question_1", label: "From where do you intend to work? *", type: "text" })).toBe("location");
+    expect(classifyLeverApplicationField({ id: "question_2", label: "Where do you plan to work?", type: "text" })).toBe("location");
+    expect(classifyLeverApplicationField({ id: "question_3", label: "Where do you see yourself in five years?", type: "textarea" })).not.toBe("location");
   });
 });

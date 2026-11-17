@@ -974,6 +974,8 @@ export function classifyLeverApplicationField(
   if (hasPhrase(text, /first name|given name|last name|family name|surname|full name|your name|applicant name|email|e-mail|phone|telephone|mobile|linkedin|portfolio|website/)) return "contact";
   // Whole words only: "capacity" contains "city" and "statement" contains "state".
   if (hasPhrase(text, /\b(?:location|city|state|country|address|postal|zip)\b|phone country|dialing code|country code/)) return "location";
+  // "From where do you intend to work?" names no place word (Figma, 2026-11-17).
+  if (hasPhrase(text, /\b(?:from )?where (?:do|will|would) you (?:intend|plan|expect)(?: to)? (?:work|be (?:based|working))\b|\bfrom where\b.{0,30}\bwork\b/)) return "location";
   // Opaque widget labels with a real question prompt are treated by prompt semantics above;
   // remaining long free-response prompts stay free_text rather than unknown.
   const prompt = field.questionDescriptor?.promptText?.trim();
@@ -1417,8 +1419,9 @@ function groundedWorkAuthorizationValue(
   // "in this location" / "in this country" means the posting's location. The
   // agent only applies to postings open where the candidate may work, so it
   // names no other country.
-  // "in the country where you are applying" (Gusto, 2026-11-10) means the same.
-  const workCountry = named && /^(?:(?:this|that|the) (?:location|country|role'?s? location|job'?s? location)|country (?:where|in which)\b.*)(?: (?:where|in which)\b.*)?$/.test(named) ? undefined : named;
+  // "in the country where you are applying" (Gusto, 2026-11-10) means the same,
+  // and so does "the country for which you applied" (Figma, 2026-11-17).
+  const workCountry = named && /^(?:(?:this|that|the) (?:location|country|role'?s? location|job'?s? location)|country (?:where|in which|for which)\b.*)(?: (?:where|in which|for which)\b.*)?$/.test(named) ? undefined : named;
   if (workCountry && !profile.workAuthorization.countries.some((country) =>
     isUnitedStates(workCountry) ? isUnitedStates(country) : normalized(country) === normalized(workCountry))) {
     return undefined;
