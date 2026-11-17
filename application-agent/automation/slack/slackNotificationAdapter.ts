@@ -38,6 +38,8 @@ export type SlackSubmissionApprovalHandler = (approval: {
   jobId: string;
   applicationId: string;
   actorIdentity: { provider: "slack"; userId: string; workspaceId?: string };
+  /** Rewrites the tapped card while a slow submit is underway (e.g. reopening a closed window). */
+  progress?: (text: string) => Promise<void>;
 }) => Promise<{ submitted: boolean; message: string }>;
 
 export interface SlackNotificationAdapterOptions {
@@ -807,7 +809,7 @@ export class SlackNotificationAdapter implements NotificationAdapter {
     // Remove the button before the browser click so a second tap cannot queue.
     await update("Submitting… the agent is clicking Submit once for this application.");
     try {
-      const result = await this.submissionApprovalHandler({ campaignId: match[1]!, jobId: match[2]!, applicationId: match[3]!, actorIdentity });
+      const result = await this.submissionApprovalHandler({ campaignId: match[1]!, jobId: match[2]!, applicationId: match[3]!, actorIdentity, progress: update });
       await update(result.message);
       return { status: result.submitted ? "resolved" : "rejected", ...(result.submitted ? {} : { reason: "submission_not_completed" }) };
     } catch (error) {

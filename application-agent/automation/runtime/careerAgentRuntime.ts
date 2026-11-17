@@ -65,6 +65,15 @@ import { renderWaitingBoard, waitingBoardItems, waitingBoardSignature, WAITING_B
 import { slackMessagesToTidy } from "../../src/domain/slackTidy";
 
 const SUBMISSION_REVIEW_CARDS_KEY = "atelier.application-agent.submission-review-cards.v0";
+/**
+ * jobId → what the "ready to submit" card showed. A Submit tap that arrives
+ * after the browser window closed reopens the form, and the agent submits only
+ * when the refill matches this copy (2026-11-17).
+ */
+const APPROVED_FORMS_KEY = "atelier.application-agent.approved-forms.v0";
+interface ApprovedForm { applicationId: string; executionId: string; filled: ExecutionReviewEntry[]; savedAt: string }
+import { compareApprovedForm } from "./approvedFormCheck";
+import type { ExecutionReviewEntry } from "../../src/domain/executor";
 import { gmailInbox, type InboxSource } from "../gmailInbox";
 import { createGoogleOAuthAccessTokenProvider, gmailSecurityCodesEnabled, resolveGoogleAuthMode } from "../googleOAuth";
 import { createOllamaAnswerBankMatcher } from "../answerBank/ollamaAnswerBankMatcher";
@@ -234,7 +243,10 @@ export interface BackgroundCareerAgentRuntime {
    * (Slack's Submit button). Same preflight as career-agent:submit-prepared;
    * never authorizes duplicate-risk retries.
    */
-  submitFromHumanApproval(campaignId: string, jobId: string, applicationId: string, executionHostBaseUrl: string): Promise<{ submitted: boolean; message: string }>;
+  submitFromHumanApproval(
+    campaignId: string, jobId: string, applicationId: string, executionHostBaseUrl: string,
+    progress?: (text: string) => Promise<void>,
+  ): Promise<{ submitted: boolean; message: string }>;
   /** Marks the matching queue row Confirmed for an applied job; undefined when none matched. */
   confirmQueueRowForAppliedJob(jobId: string): Promise<string | undefined>;
 }
@@ -807,6 +819,13 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
   }
 
   async restartExistingApplication(campaignId: string, jobId: string, applicationId: string): Promise<CareerJob> {
+    const snapshot = await this.startExistingApplication(campaignId, jobId, applicationId);
+    await this.reconcileHostExecution(campaignId, jobId, snapshot);
+    return this.service.getJob(jobId);
+  }
+
+  /** Opens a fresh browser run for an existing proof-free packet; the caller decides what to do with the result. */
+  private async startExistingApplication(campaignId: string, jobId: string, applicationId: string): Promise<ExecutionHostSnapshot> {
     if (!this.executionHost) throw new Error("The execution host is not configured for application restart.");
     const campaign = this.service.getCampaign(campaignId);
     const job = this.service.getJob(jobId);
@@ -836,9 +855,7 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
       ...request.campaign,
       submissionPolicy: { authority: "never", requireExplicitApproval: false },
     };
-    const snapshot = await this.executionHost.start(request);
-    await this.reconcileHostExecution(campaignId, jobId, snapshot);
-    return this.service.getJob(jobId);
+    return this.executionHost.start(request);
   }
 
   recoverStalePreSubmitApplication(
@@ -971,14 +988,18 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
     return this.service.getApplication(applicationId);
   }
 
-  async submitFromHumanApproval(campaignId: string, jobId: string, applicationId: string, executionHostBaseUrl: string): Promise<{ submitted: boolean; message: string }> {
+  async submitFromHumanApproval(
+    campaignId: string, jobId: string, applicationId: string, executionHostBaseUrl: string,
+    progress?: (text: string) => Promise<void>,
+  ): Promise<{ submitted: boolean; message: string }> {
     const storage = this.stateStorage as (KeyValueStorage & {
       reload?: () => void;
       withExclusiveLockAsync?: <R>(operation: () => Promise<R>) => Promise<R>;
     }) | undefined;
     if (!storage?.withExclusiveLockAsync) throw new Error("Submitting requires the file-backed runtime state.");
+    const lock = storage.withExclusiveLockAsync.bind(storage);
     let label = "this application";
-    const job = await authorizeThenSubmit(storage.withExclusiveLockAsync.bind(storage), () => {
+    const authorize = () => {
       storage.reload?.();
       const current = this.service.getJob(jobId);
       const application = this.service.getApplication(applicationId);
@@ -987,15 +1008,136 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
       // An unknown fence means an earlier click may have landed; only the
       // CLI's explicit duplicate-risk authorization can retry that.
       assertDuplicateRiskRetryAuthorization(this.getSubmissionFence(applicationId, jobId)?.state, undefined, undefined);
-    }, () => this.submitPreparedApplication(campaignId, jobId));
+    };
+    await lock(async () => { authorize(); });
+    let note = "";
+    if (!await this.hostSessionIsReady(this.service.getJob(jobId).execution?.hostExecutionId)) {
+      const reopened = await this.reopenApprovedForm(campaignId, jobId, applicationId, label, progress);
+      if (!reopened.proceed) return { submitted: false, message: reopened.message };
+      note = reopened.note;
+      await progress?.(`Submitting… the form was filled in again and matches what you approved, so the agent is clicking Submit once.`);
+    }
+    const job = await authorizeThenSubmit(lock, authorize, () => this.submitPreparedApplication(campaignId, jobId));
     if (job.status === "applied") {
       const queueNote = await this.confirmQueueRowForAppliedJob(jobId).catch(() => "the queue row could not be updated; confirm it in the Sheet");
-      return { submitted: true, message: `Submitted: ${label}. The employer confirmation was verified and the tracker is being updated.${queueNote ? ` Queue: ${queueNote}.` : ""}` };
+      return { submitted: true, message: `Submitted: ${label}. The employer confirmation was verified and the tracker is being updated.${note}${queueNote ? ` Queue: ${queueNote}.` : ""}` };
     }
     return {
       submitted: false,
       message: `Not confirmed: ${label} (status ${job.status}). Check the employer site or your email before doing anything else; the agent will not retry automatically.`,
     };
+  }
+
+  /** True only when the host still holds this exact browser window at Submit. */
+  private async hostSessionIsReady(executionId: string | undefined): Promise<boolean> {
+    if (!executionId || !this.executionHost) return false;
+    try {
+      const snapshot = await this.executionHost.get(executionId);
+      return snapshot.status === "ready_to_submit" && snapshot.result?.state === "ready_to_submit";
+    } catch (error) {
+      // 404: the host restarted and forgot the window. Anything else (the host
+      // is down) is not a reason to open a second browser.
+      if (error instanceof ExecutionHostResponseError && error.statusCode === 404) return false;
+      throw error;
+    }
+  }
+
+  /**
+   * The window behind a Submit card closed (the host's 4-hour limit, or a host
+   * restart). Reopen the same packet, refill it from the saved answers, and
+   * go ahead only when the refill matches the card you approved. Any
+   * difference posts a fresh card instead, so nothing you haven't seen is
+   * ever submitted.
+   */
+  private async reopenApprovedForm(
+    campaignId: string, jobId: string, applicationId: string, label: string,
+    progress?: (text: string) => Promise<void>,
+  ): Promise<{ proceed: true; note: string } | { proceed: false; message: string }> {
+    const approved = this.readApprovedForms().get(jobId);
+    await progress?.(`The browser window for ${label} had closed, so the agent is reopening the form and filling it in again from your saved answers. This usually takes a minute or two.`);
+    let initial: ExecutionHostSnapshot;
+    try {
+      initial = await this.startExistingApplication(campaignId, jobId, applicationId);
+    } catch (error) {
+      const busy = error instanceof ExecutionHostResponseError && error.statusCode === 409 && /capacity/i.test(error.message);
+      await this.republishApprovedCard(campaignId, jobId).catch(() => undefined);
+      return {
+        proceed: false,
+        message: busy
+          ? `Not submitted yet: all the browser windows are busy with other applications. A new Submit card for ${label} is below; tap it again in a few minutes.`
+          : `Not submitted: the form for ${label} could not be reopened (${error instanceof Error ? error.message.slice(0, 160) : "unknown error"}). Nothing was sent.`,
+      };
+    }
+    const final = await this.pollHostExecution(campaignId, jobId, initial);
+    if (final.status !== "ready_to_submit" || final.result?.state !== "ready_to_submit") {
+      const asking = final.status === "needs_input" || final.status === "waiting_for_human";
+      return {
+        proceed: false,
+        message: asking
+          ? `Not submitted: ${label} was reopened, but the form now needs something it didn't before. The question is in Slack; once it's answered, a new Submit card will appear.`
+          : `Not submitted: reopening ${label} didn't get back to the Submit step (${final.error ?? final.status}). Nothing was sent.`,
+      };
+    }
+    const refill = final.result.inspection.reviewSummary;
+    if (!approved || approved.applicationId !== applicationId || !refill?.length) {
+      await this.announceSubmissionReview(campaignId, jobId, final);
+      return {
+        proceed: false,
+        message: `Not submitted yet: ${label} was reopened and filled in again, but this card was posted before the agent kept a copy of it, so the refill can't be checked against what you saw. A new Submit card is below; tap Submit there if it looks right.`,
+      };
+    }
+    const check = compareApprovedForm(approved.filled, refill);
+    if (!check.matches) {
+      await this.announceSubmissionReview(campaignId, jobId, final);
+      const listed = check.differences.slice(0, 5).join("; ") + (check.differences.length > 5 ? `; and ${check.differences.length - 5} more` : "");
+      return {
+        proceed: false,
+        message: `Not submitted: ${label} was reopened, but the form no longer matches what you approved (${listed}). A new card with the current answers is below; tap Submit there if it looks right.`,
+      };
+    }
+    this.rememberApprovedForm(jobId, { applicationId, executionId: final.id, filled: [...refill], savedAt: new Date().toISOString() });
+    return { proceed: true, note: check.movedDates.length ? ` The browser window had closed, so the form was filled in again; ${check.movedDates.join(", ")} moved to today's date.` : " The browser window had closed, so the form was filled in again first and matched what you approved." };
+  }
+
+  private readApprovedForms(): Map<string, ApprovedForm> {
+    try {
+      const raw = this.stateStorage?.getItem(APPROVED_FORMS_KEY);
+      const parsed = raw ? JSON.parse(raw) as Record<string, ApprovedForm> : {};
+      return new Map(Object.entries(parsed).filter((entry) =>
+        typeof entry[1]?.applicationId === "string" && Array.isArray(entry[1].filled)));
+    } catch {
+      return new Map();
+    }
+  }
+
+  private rememberApprovedForm(jobId: string, form: ApprovedForm): void {
+    if (!this.stateStorage) return;
+    const forms = this.readApprovedForms();
+    const waiting = new Set(this.service.listJobs().filter((job) => job.status === "ready_to_submit").map((job) => job.id));
+    for (const id of forms.keys()) if (!waiting.has(id) && id !== jobId) forms.delete(id);
+    forms.set(jobId, form);
+    this.stateStorage.setItem(APPROVED_FORMS_KEY, JSON.stringify(Object.fromEntries(forms)));
+  }
+
+  /** Puts the last approved card back after a reopen could not start (its button was already removed). */
+  private async republishApprovedCard(campaignId: string, jobId: string): Promise<void> {
+    const publish = this.notification?.adapter.publishSubmissionReview;
+    const form = this.readApprovedForms().get(jobId);
+    const job = this.service.getJob(jobId);
+    if (!publish || !form || !job.applicationId || job.status !== "ready_to_submit") return;
+    const application = this.service.getApplication(job.applicationId);
+    const cardTs = await publish.call(this.notification!.adapter, {
+      campaignId,
+      jobId,
+      applicationId: job.applicationId,
+      company: job.job.company,
+      role: job.job.title,
+      ...(application.resume?.familyId ? { resumeFamily: application.resume.familyId } : {}),
+      ...(job.job.sourceUrl ?? job.job.applicationUrl ? { postingUrl: (job.job.sourceUrl ?? job.job.applicationUrl)! } : {}),
+      filled: form.filled,
+      leftBlank: job.execution?.unresolvedFields ?? [],
+    });
+    if (typeof cardTs === "string") this.rememberReviewCard(jobId, cardTs);
   }
 
   async confirmQueueRowForAppliedJob(jobId: string): Promise<string | undefined> {
@@ -1173,6 +1315,9 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
     const inspection = snapshot.result.inspection;
     const labels = new Map(inspection.fields.map((field) => [field.id, field.label]));
     this.announcedSubmissionReviews.add(snapshot.id);
+    if (inspection.reviewSummary?.length) {
+      this.rememberApprovedForm(jobId, { applicationId: job.applicationId, executionId: snapshot.id, filled: [...inspection.reviewSummary], savedAt: new Date().toISOString() });
+    }
     const cardTs = await publish.call(this.notification!.adapter, {
       campaignId,
       jobId,
@@ -1288,7 +1433,7 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
     },
     submissionApprovalHandler: async (approval) => {
       if (!runtime) throw new Error("The Career Agent runtime is not ready.");
-      const result = await runtime.submitFromHumanApproval(approval.campaignId, approval.jobId, approval.applicationId, executionHostBaseUrl);
+      const result = await runtime.submitFromHumanApproval(approval.campaignId, approval.jobId, approval.applicationId, executionHostBaseUrl, approval.progress);
       console.info(`[career-agent-slack] human-approved submit ${result.submitted ? "confirmed" : "not confirmed"}`);
       return result;
     },
