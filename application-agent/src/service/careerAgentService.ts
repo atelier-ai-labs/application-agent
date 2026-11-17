@@ -127,6 +127,8 @@ import { isVerifiedLeverApplicationUrl, isVerifiedLeverHostedUrl } from "../doma
 
 let fallbackId = 0;
 
+export type LiveSearchPolicy = Partial<Pick<SearchCriteria, "companyApplicationLimit" | "excludedCompanies" | "maxYearsExperience">>;
+
 export interface CareerAgentServiceOptions {
   now?: () => string;
   createId?: (prefix: string) => string;
@@ -161,6 +163,13 @@ export interface CareerAgentDependencies {
   answerBank?: AnswerBankStore;
   /** Optional local-model matcher for low-risk questions worded differently. */
   answerBankMatcher?: AnswerBankSemanticMatcher;
+  /**
+   * The search settings as they are now (search-intent.json), read for every
+   * job. A campaign keeps the criteria it was created with, so settings added
+   * later (the per-company limit, excluded companies, the experience cap) never
+   * reached the pre-apply check (found 2026-11-17).
+   */
+  liveSearchPolicy?: () => LiveSearchPolicy | undefined;
 }
 
 export interface LegacyAttentionRepairResult {
@@ -793,6 +802,7 @@ export class CareerAgentService {
   private readonly confirmPostSubmitDone?: (campaignId: string, jobId: string) => Promise<CareerJob>;
   private readonly answerBank?: AnswerBankStore;
   private readonly answerBankMatcher?: AnswerBankSemanticMatcher;
+  private readonly liveSearchPolicy?: () => LiveSearchPolicy | undefined;
   private readonly attentionResponseInFlight = new Map<
     string,
     {
@@ -823,6 +833,7 @@ export class CareerAgentService {
     this.confirmPostSubmitDone = dependencies.confirmPostSubmitDone;
     this.answerBank = dependencies.answerBank;
     this.answerBankMatcher = dependencies.answerBankMatcher;
+    this.liveSearchPolicy = dependencies.liveSearchPolicy;
   }
 
   listCampaigns(): readonly Campaign[] {
@@ -4011,6 +4022,18 @@ export class CareerAgentService {
    * Persist the opaque execution-host ID and high-level state without
    * serializing any browser/session data into the career repository.
    */
+  /** The campaign's criteria with the current search settings laid over them. */
+  private currentCriteria(criteria: SearchCriteria): SearchCriteria {
+    const live = this.liveSearchPolicy?.();
+    if (!live) return criteria;
+    return {
+      ...criteria,
+      excludedCompanies: [...new Set([...(criteria.excludedCompanies ?? []), ...(live.excludedCompanies ?? [])])],
+      ...(live.maxYearsExperience !== undefined ? { maxYearsExperience: live.maxYearsExperience } : {}),
+      ...(live.companyApplicationLimit ? { companyApplicationLimit: live.companyApplicationLimit } : {}),
+    };
+  }
+
   async recordExecutionHostSnapshot(campaignId: string, jobId: string, snapshot: ExecutionHostSnapshot): Promise<CareerJob> {
     const campaign = this.getCampaign(campaignId);
     const job = this.getJob(jobId);
@@ -4632,11 +4655,12 @@ export class CareerAgentService {
         })
       : persistDiscovered();
 
+    const criteria = this.currentCriteria(campaign.searchCriteria);
     const hardFilter = trace
       ? trace.measureSync(
           `job.hard-filter.${careerJob.id}`,
           "deterministic",
-          () => applyHardFilters(careerJob.job, criteriaForQueueSelection(scouted.queueSelected ? { ...campaign.searchCriteria, employmentTypes: [] } : campaign.searchCriteria, Boolean(scouted.queueSelected), scouted.queueResumeFamily)),
+          () => applyHardFilters(careerJob.job, criteriaForQueueSelection(scouted.queueSelected ? { ...criteria, employmentTypes: [] } : criteria, Boolean(scouted.queueSelected), scouted.queueResumeFamily)),
           {
             parentNodeId,
             inputCount: 1,
@@ -4646,7 +4670,7 @@ export class CareerAgentService {
             metadata: { stage: "job.hard-filter", jobId: careerJob.id },
           },
         )
-      : applyHardFilters(careerJob.job, criteriaForQueueSelection(scouted.queueSelected ? { ...campaign.searchCriteria, employmentTypes: [] } : campaign.searchCriteria, Boolean(scouted.queueSelected), scouted.queueResumeFamily));
+      : applyHardFilters(careerJob.job, criteriaForQueueSelection(scouted.queueSelected ? { ...criteria, employmentTypes: [] } : criteria, Boolean(scouted.queueSelected), scouted.queueResumeFamily));
     if (hardFilter.decision === "reject") {
       careerJob = this.decideJob(careerJob, "rejected", hardFilter.reason);
       this.appendEvent(campaign.id, "job.rejected", careerEventMetadata(careerJob, hardFilter));
@@ -4659,7 +4683,7 @@ export class CareerAgentService {
       return { held: true };
     }
     // Upstart allows 3 applications per 60 days and declined the 4th (2026-11-11).
-    const companyLimit = campaign.searchCriteria.companyApplicationLimit;
+    const companyLimit = criteria.companyApplicationLimit;
     const overLimit = companyLimit ? companyLimitReached(careerJob, this.careerRepository.listJobs(), companyLimit, new Date(this.now())) : undefined;
     if (overLimit) {
       const reason = `Already ${overLimit.count} application${overLimit.count === 1 ? "" : "s"} to ${overLimit.company} in the last ${overLimit.windowDays} days or in progress (limit ${overLimit.max}).`;

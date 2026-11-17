@@ -384,6 +384,37 @@ class RestartedHost implements CareerAgentExecutionHostPort {
   }
 }
 
+describe("current search settings reach the pre-apply check (2026-11-17)", () => {
+  it("applies a per-company limit the campaign was created without", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "atelier-career-live-policy-"));
+    try {
+      const runtime = new BackgroundCareerAgentRuntimeImpl({
+        ...runtimeOptions(join(directory, "state.json"), new ReadyExecutor(), new InMemoryNotificationAdapter()),
+        liveSearchPolicy: () => ({ companyApplicationLimit: { max: 1, windowDays: 365 }, excludedCompanies: ["Globex"] }),
+      });
+      const campaign = runtime.createCampaign(campaignInput());
+      runtime.service.activateCampaign(campaign.id);
+      expect(runtime.service.getCampaign(campaign.id).searchCriteria.companyApplicationLimit).toBeUndefined();
+      const input = (path: string, title: string, company = "Acme") => ({
+        ...listing().input, isExample: false, companyHint: company, titleHint: title,
+        sourceUrl: `https://jobs.lever.co/acme/${path}`, applicationUrl: `https://jobs.lever.co/acme/${path}/apply`,
+        rawText: `${company}\n${title}\nRemote United States\n`,
+      });
+      const first = await runtime.service.processCuratedJob(campaign.id, input("post-1", "Data Platform Engineer"));
+      // Still waiting at Submit counts as an application to Acme.
+      expect(first.status).toBe("ready_to_submit");
+      const second = await runtime.service.processCuratedJob(campaign.id, input("post-2", "Cloud Platform Engineer", "Acme Inc."));
+      expect(second.status).toBe("rejected");
+      expect(second.decisionReason).toMatch(/Already 1 application to Acme Inc\. .*limit 1/);
+      const excluded = await runtime.service.processCuratedJob(campaign.id, input("post-3", "Platform Engineer", "Globex"));
+      expect(excluded.status).toBe("rejected");
+      await runtime.stop();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("Submit after the browser window closed (2026-11-17)", () => {
   const filled = [
     { label: "Full name", value: "Ada Example" },

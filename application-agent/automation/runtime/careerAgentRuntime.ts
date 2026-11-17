@@ -78,7 +78,7 @@ import { gmailInbox, type InboxSource } from "../gmailInbox";
 import { createGoogleOAuthAccessTokenProvider, gmailSecurityCodesEnabled, resolveGoogleAuthMode } from "../googleOAuth";
 import { createOllamaAnswerBankMatcher } from "../answerBank/ollamaAnswerBankMatcher";
 import { isUsableResumeArtifact } from "../resume/resumeArtifact";
-import { normalizeJobSearchIntent, type JobSearchIntent } from "../../src/domain/searchIntent";
+import { normalizeJobSearchIntent, searchCriteriaFromJobSearchIntent, type JobSearchIntent } from "../../src/domain/searchIntent";
 import { DEFAULT_CAREER_AGENT_STATE_DB, openStateStorage } from "./stateStorage";
 import { FileModelCallLogger, type ModelCallLogger } from "../modelCallLog";
 import { assertDuplicateRiskRetryAuthorization, assertSubmitPreparedApplicationPreflight } from "./submitPreparedApplicationPreflight";
@@ -174,6 +174,8 @@ export interface BackgroundCareerAgentRuntimeOptions {
   postingEnricher?: (input: import("../../src/domain/types").JobIntakeInput) => Promise<import("../../src/domain/types").JobIntakeInput>;
   answerBank?: import("../../src/domain/answerBank").AnswerBankStore;
   answerBankMatcher?: import("../../src/domain/answerBank").AnswerBankSemanticMatcher;
+  /** Current search settings for the pre-apply check (see CareerAgentService). */
+  liveSearchPolicy?: () => import("../../src/service/careerAgentService").LiveSearchPolicy | undefined;
   /** Read-only inbox checked for "thanks for applying" emails while a job waits on DONE. */
   receiptInbox?: InboxSource;
   receiptPollIntervalMs?: number;
@@ -374,6 +376,31 @@ export function loadBackgroundSearchIntent(
   }
 }
 
+/**
+ * Reads search-intent.json for each job, keeping the last good copy when the
+ * file is mid-edit or invalid, so a typo can't switch the limits off.
+ */
+export function liveSearchPolicyFromIntentFile(
+  env: Pick<BackgroundCareerAgentEnvironment, "ATELIER_CAREER_AGENT_SEARCH_INTENT_FILE">,
+): () => import("../../src/service/careerAgentService").LiveSearchPolicy | undefined {
+  let lastGood: import("../../src/service/careerAgentService").LiveSearchPolicy | undefined;
+  return () => {
+    try {
+      const intent = loadBackgroundSearchIntent(env);
+      if (!intent) return lastGood;
+      const criteria = searchCriteriaFromJobSearchIntent(intent);
+      lastGood = {
+        excludedCompanies: criteria.excludedCompanies ?? [],
+        ...(criteria.maxYearsExperience !== undefined ? { maxYearsExperience: criteria.maxYearsExperience } : {}),
+        ...(criteria.companyApplicationLimit ? { companyApplicationLimit: criteria.companyApplicationLimit } : {}),
+      };
+    } catch (error) {
+      console.warn(`[career-agent-runtime] search settings could not be read; using the last good copy (${error instanceof Error ? error.message.slice(0, 120) : "unknown error"})`);
+    }
+    return lastGood;
+  };
+}
+
 export const DEFAULT_CAREER_AGENT_DESTINATION_EVIDENCE_FILE = ".local/career-agent/destination-evidence.json";
 
 /** Load only a small explicit list of public destination evidence records. */
@@ -556,6 +583,7 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
         ...(options.postingEnricher ? { postingEnricher: options.postingEnricher } : {}),
         ...(options.answerBank ? { answerBank: options.answerBank } : {}),
         ...(options.answerBankMatcher ? { answerBankMatcher: options.answerBankMatcher } : {}),
+        ...(options.liveSearchPolicy ? { liveSearchPolicy: options.liveSearchPolicy } : {}),
         ...(this.executionHost
           ? {
               resumeAttention: async (campaignId, jobId, options) => this.resumeHostExecution(campaignId, jobId, options),
@@ -1503,6 +1531,7 @@ export function createConfiguredBackgroundCareerAgentRuntime(env: BackgroundCare
     executor: configuredExecutor,
     tracker,
     postingEnricher: (input) => enrichJobIntake(input),
+    liveSearchPolicy: liveSearchPolicyFromIntentFile(env),
     resumeArtifactAvailable: (familyId) => {
       const path = resumePaths[familyId];
       return Boolean(path && isUsableResumeArtifact(path));
