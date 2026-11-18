@@ -224,6 +224,30 @@ the day (6cba053). Everything after that is on the branch only.
 - The Muse job source returns 404.
 - The inbox check read a Langfuse webinar email as an interview. No row matched.
 
+## 2026-11-18
+
+- **The inbox check reads Trash and Spam too** (fad0589, `includeSpamTrash=true`, still
+  read-only). Samsara's and Arize's rejections had been sitting in Trash unseen.
+- **New rejection wordings:**
+  - Arize: "don't see a strong mutual fit"
+  - Mercury: "move forward with other candidates whose skills…"
+
+  Mercury's email had already been handled as "received" by the 17:34 run. Its id was removed
+  from `inbox-processed.json` (backup `inbox-processed.json.before-mercury-reread-*.backup`) and it
+  was re-read.
+- **Tracker now Rejected:**
+  - Arize Applied AI
+  - Samsara SWE Data Platform
+  - Upstart SWE Unsecured Installments
+  - Mercury SWE Product
+- **Software-engineer résumé:** drafted in
+  `.local/career-agent/resumes/software-engineer-2026-11-DRAFT.md` and waiting on Nate's review.
+  Six real rejections since 11-01, three of them for plain "Software Engineer" roles, and 22 of
+  39 applications were plain "Software Engineer" roles.
+  - Résumé families are fixed in code (`validation.ts`, `fit.ts`, `policies.ts`), so a fourth
+    family needs a code change. The proposed rule: plain SWE / Full Stack / Backend titles get the
+    new résumé.
+
 ## Known gaps / next
 
 - **Step 3 of Nate's plan:** one daily Slack message with every open question, so they can be
