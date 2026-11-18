@@ -33,6 +33,10 @@ const REJECTION = [
   /\b(?:will|would) not be able to (?:move forward|proceed|continue) with your\b/,
   /\b(?:decided|chosen|elected) not to (?:proceed|move forward|continue) with your (?:candidacy|application)\b/,
   /\bdecided to (?:pursue|go with) other\b/,
+  // Mercury (2026-11-18): "the difficult decision to move forward with other candidates whose skills…".
+  /\bmove forward with other (?:candidates|applicants)\b/,
+  // Arize (2026-11-12): "we unfortunately don't see a strong mutual fit at this time".
+  /\b(?:do not|don['’]t|did not|didn['’]t) see (?:a |the )?(?:strong |good |clear )?(?:mutual )?fit\b/,
 ];
 
 const INTERVIEW = [
