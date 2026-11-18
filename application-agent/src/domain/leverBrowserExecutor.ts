@@ -318,6 +318,19 @@ function isEmploymentScreeningQuestion(field: Pick<LeverBrowserField, "id" | "la
     /\b(?:fired|terminated|asked\s+to\s+resign)\b/.test(text);
 }
 
+/** A Yes/No question asking whether the candidate is in (or can work in) the posting's own location. */
+export function isPostedLocationEligibilityQuestion(field: Pick<ApplicationFieldDescriptor, "label" | "options"> & { questionDescriptor?: ApplicationFieldDescriptor["questionDescriptor"] }): boolean {
+  const labels = (field.options ?? []).map((option) => normalized(option.label));
+  if (labels.length !== 2 || !labels.includes("yes") || !labels.includes("no")) return false;
+  const text = normalized(`${field.questionDescriptor?.promptText ?? ""} ${field.label}`);
+  return /\b(?:located|live|living|reside|residing|based)\b.{0,60}\b(?:the )?location (?:where|that) (?:the |this )?(?:job|role|position) is (?:posted|listed|based|located)\b/.test(text) ||
+    /\bwilling to work in the location (?:where|that) (?:the |this )?(?:job|role|position) is (?:posted|listed|based)\b/.test(text);
+}
+
+function yesOption(field: Pick<ApplicationFieldDescriptor, "options">): string | undefined {
+  return field.options?.find((option) => normalized(option.label) === "yes")?.label;
+}
+
 function approvedDemographicValueForField(
   field: Pick<LeverBrowserField, "id" | "label" | "section" | "options">,
   profile: CandidateProfile,
@@ -362,9 +375,10 @@ function approvedDemographicValueForField(
   // definitions as nearby text, so decide by the question's own title first.
   const title = normalized([field.id, field.label, (field as { questionDescriptor?: { promptText?: string } }).questionDescriptor?.promptText]
     .filter(Boolean).join(" ")).replace(/[_-]+/g, " ");
-  if (/\brace\b/.test(title) && !/\bhispanic\b|\blatin[oax]\b/.test(title)) return approved.race_ethnicity?.trim();
+  // "Which races/ethnicities do you belong to?" (CircleCI, 2026-11-18) is plural.
+  if (/\braces?\b/.test(title) && !/\bhispanic\b|\blatin[oax]\b/.test(title)) return approved.race_ethnicity?.trim();
   if (/\bhispanic\b|\blatino\b|\blatina\b|\blatinx\b/.test(text)) return approved.hispanic_latino?.trim();
-  if (/\brace\b|\bethnic(?:ity| origin)?\b/.test(text)) return approved.race_ethnicity?.trim();
+  if (/\braces?\b|\bethnic(?:ity|ities| origin)?\b/.test(text)) return approved.race_ethnicity?.trim();
   if (/\bdemographic\b.{0,32}\b(?:consent|data)\b|\b(?:consent|data)\b.{0,32}\bdemographic\b/.test(text)) {
     return approved.demographic_consent?.trim();
   }
@@ -1753,6 +1767,9 @@ function explicitValueForField(
     // Dialing-code country lists need the grounded country component, not a full city string.
     return { explicit: false };
   }
+  // A Yes/No "are you in the job's location?" is answered by the grounded
+  // rule, never by the prepared address string (CircleCI, 2026-11-18).
+  if (field.classification === "location" && isPostedLocationEligibilityQuestion(field)) return { explicit: false };
   if (field.classification === "location" && hasPhrase(inspectedPromptText(field), /\b(?:country|states?)\b/)) {
     return { explicit: false };
   }
@@ -1828,6 +1845,11 @@ function profileValueForField(
   }
   if (field.classification === "location") {
     const location = profile.identity.location ?? profile.location;
+    // "Are you located in and willing to work in the location where the job is
+    // posted?" with Yes/No (CircleCI, 2026-11-18). The agent only applies to
+    // postings open to where the candidate lives (discovery and the pre-apply
+    // location filter), so the truthful answer is Yes.
+    if (isPostedLocationEligibilityQuestion(field)) return yesOption(field);
     if (isPhoneCountrySelector(field)) {
       return groundedPhoneCountryFromProfile(profile) ?? groundedCountryFromLocation(location);
     }

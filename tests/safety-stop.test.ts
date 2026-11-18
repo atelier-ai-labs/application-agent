@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyLeverApplicationField, optionValue, sameProviderOrigin } from "../application-agent/src/domain/leverBrowserExecutor";
+import { classifyLeverApplicationField, isPostedLocationEligibilityQuestion, optionValue, sameProviderOrigin } from "../application-agent/src/domain/leverBrowserExecutor";
 import { SlackNotificationAdapter } from "../application-agent/automation/slack/slackNotificationAdapter";
 import type { AttentionEvent } from "../application-agent/src/domain/attention";
 
@@ -53,5 +53,14 @@ describe("form safety stops (Figma, 2026-11-17)", () => {
     expect(optionValue(field, "No, I am not a protected veteran")).toBe("I am not a protected veteran");
     expect(optionValue({ ...field, options: [{ label: "Yes", value: "Yes" }, { label: "No, I am not a veteran", value: "No, I am not a veteran" }] }, "No, I am not a protected veteran"))
       .toBe("No, I am not a veteran");
+  });
+
+  it("recognizes 'are you in the job's location?' Yes/No questions (CircleCI, 2026-11-18)", () => {
+    const yesNo = [{ label: "Yes", value: "Yes" }, { label: "No", value: "No" }];
+    const ask = (label: string, options = yesNo) => isPostedLocationEligibilityQuestion({ label, options });
+    expect(ask("Are you located in and willing to work in the location where the job is posted (Remote, US/UK/CAN)?*")).toBe(true);
+    expect(ask("Are you willing to work in the location where the role is based?")).toBe(true);
+    expect(ask("Are you located in the location where the job is posted?", [{ label: "Pittsburgh", value: "Pittsburgh" }, { label: "Other", value: "Other" }])).toBe(false);
+    expect(ask("Are you willing to relocate?")).toBe(false);
   });
 });
