@@ -3175,7 +3175,10 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
             }
             // A work-from state option ("Pennsylvania (PA)") is an exact listed
             // choice, not the full grounded place, so it skips location matching.
+            // So is the Yes of "are you in the job's location?": location
+            // matching searched for a place called "Yes" (CircleCI, 2026-11-18).
             await field.select(selected, fieldDescriptor.classification === "location" && request.profile &&
+              !isPostedLocationEligibilityQuestion(fieldDescriptor) &&
               workLocationStateValueForField(fieldDescriptor, request.profile) !== selected
               ? { groundedLocation: request.profile.identity.location ?? request.profile.location ?? undefined }
               : undefined);
