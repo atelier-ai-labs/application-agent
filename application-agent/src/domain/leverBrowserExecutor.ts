@@ -318,6 +318,26 @@ function isEmploymentScreeningQuestion(field: Pick<LeverBrowserField, "id" | "la
     /\b(?:fired|terminated|asked\s+to\s+resign)\b/.test(text);
 }
 
+/**
+ * "Are your salary expectations for this role within the posted salary band?"
+ * is a yes/no question, even in a text box. CircleCI's got the midpoint
+ * figure "153000" typed in (2026-11-18). When the profile's rule is the
+ * posting's midpoint and the posting lists a range, the expectation is in
+ * the range by definition, so the answer is Yes. Without a posted range it
+ * stays a question.
+ */
+export function withinPostedSalaryRangeValueForField(field: ApplicationFieldDescriptor, request: ApplicationExecutionRequest): string | undefined {
+  const text = normalized(inspectedPromptText(field));
+  // The inspected text can start with a section heading, so look for the
+  // yes/no shape anywhere rather than at the start.
+  if (!/\b(?:are|is|do|does|would|will) (?:your|you)\b/.test(text)) return undefined;
+  if (!/\b(?:salary|pay|compensation)\b/.test(text) || !/\bwithin\b.{0,40}\b(?:band|range)\b/.test(text)) return undefined;
+  const compensation = request.careerJob.job.compensation;
+  if (request.profile?.workPreferences.salaryStrategy !== "posting_midpoint" || compensation?.minimum === undefined || compensation.maximum === undefined) return undefined;
+  if (field.options?.length) return field.options.find((option) => /^yes\b/.test(normalized(option.label)))?.label;
+  return field.type === "text" || field.type === "textarea" ? "Yes" : undefined;
+}
+
 /** A Yes/No question asking whether the candidate is in (or can work in) the posting's own location. */
 export function isPostedLocationEligibilityQuestion(field: Pick<ApplicationFieldDescriptor, "label" | "options"> & { questionDescriptor?: ApplicationFieldDescriptor["questionDescriptor"] }): boolean {
   const labels = (field.options ?? []).map((option) => normalized(option.label));
@@ -975,7 +995,11 @@ export function classifyLeverApplicationField(
     // after every answer (Samsara, 2026-11-12).
     const labels = (field.options ?? []).map((option) => normalized(option.label));
     const yesNo = labels.length > 0 && labels.length <= 3 && labels.some((label) => /^yes\b/.test(label)) && labels.some((label) => /^no\b/.test(label));
-    return yesNo ? "unknown" : "salary";
+    // "Are your salary expectations within the posted band?" in a text box is
+    // a yes/no question too; as "salary" its Yes was parsed as an amount and
+    // the fill stopped (CircleCI, 2026-11-18).
+    const asksWithinRange = /\b(?:are|is|do|does|would|will) (?:your|you)\b/.test(text) && /\bwithin\b.{0,40}\b(?:band|range)\b/.test(text);
+    return yesNo || asksWithinRange ? "unknown" : "salary";
   }
   // Overall experience ("total work experience in a similar role") is a résumé
   // summary for a reviewed draft; years with one named system stays unknown.
@@ -1693,6 +1717,9 @@ function explicitValueForField(
   if (request.profile && isSmsConsentField(field)) {
     return { value: "No", explicit: true };
   }
+  // Before the prepared salary figure: this question wants Yes, not a number.
+  const withinPostedRange = withinPostedSalaryRangeValueForField(field, request);
+  if (withinPostedRange) return { value: withinPostedRange, explicit: true };
   if (field.classification === "employment_history" &&
     /\b(?:current|present|most recent)\b.{0,24}\b(?:company|employer)\b/.test(fieldText(field))) {
     const approvedCompany = request.profile?.approvedReusableAnswers.current_company?.trim();
@@ -2012,7 +2039,8 @@ export function optionValue(
       // ...and "No, I don’t have a disability" (Samsara, curly apostrophe).
       // "I identify as a veteran but not a protected veteran" is a veteran, not
       // a "no" (Twilio, 2026-11-17).
-      (demographicAliases.includes("no") && labels.some((label) => /not\s+(?:a\s+)?(?:protected\s+)?veteran|(?:do\s+not|don['’]?t)\s+have\s+(?:a\s+)?disability/.test(label) &&
+      // "I do not identify as a protected veteran" (CircleCI, 2026-11-18).
+      (demographicAliases.includes("no") && labels.some((label) => /not\s+(?:a\s+)?(?:protected\s+)?veteran|(?:do\s+not|don['’]?t)\s+identify\s+as\s+(?:a\s+|an\s+)?(?:protected\s+)?veteran|(?:do\s+not|don['’]?t)\s+have\s+(?:a\s+)?disability/.test(label) &&
         !/\b(?:identify as|i am|am) a veteran\b/.test(label))) ||
       // Greenhouse's phone-country control appends the dialing code to the
       // grounded country name (for example, "United States +1"). Preserve
