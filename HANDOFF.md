@@ -240,6 +240,16 @@ the day (6cba053). Everything after that is on the branch only.
   - Samsara SWE Data Platform
   - Upstart SWE Unsecured Installments
   - Mercury SWE Product
+- **CircleCI fixes (2ab23c6):**
+  - Plural "races/ethnicities" now matches race_ethnicity. The "Hispanic/Latinx" option had
+    pulled it into the Hispanic yes/no answer.
+  - `isPostedLocationEligibilityQuestion`: a Yes/No "are you located in and willing to work in the
+    location where the job is posted?" answers Yes, and the prepared address no longer overrides
+    it.
+  - Replay: CircleCI goes from 2 questions to 0, with no regressions. The host was restarted (only
+    CircleCI's window was open) and CircleCI reopened.
+- **MCA Connect skipped** (16 questions; Nate's call, no automatic cap). Its second role was
+  skipped by the one-per-company rule.
 - **Software-engineer résumé:** drafted in
   `.local/career-agent/resumes/software-engineer-2026-11-DRAFT.md` and waiting on Nate's review.
   Six real rejections since 11-01, three of them for plain "Software Engineer" roles, and 22 of
