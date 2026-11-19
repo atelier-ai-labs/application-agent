@@ -3052,6 +3052,8 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
     for (let pass = 0; pass < 3 && pending.length > 0; pass += 1) {
       for (const field of pending) {
         const fieldDescriptor = descriptor(field);
+        // Heartbeat for the host's stuck-run watchdog.
+        request.reportProgress?.(`filling ${fieldDescriptor.label.slice(0, 60)}`);
         let current: string | boolean | null | undefined;
         try {
           current = field.readValue ? await field.readValue() : undefined;

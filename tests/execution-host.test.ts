@@ -1430,3 +1430,69 @@ describe("trusted local execution host", () => {
     expect(() => createExecutionHostServer({ executor, host: "0.0.0.0", port: 0 })).toThrow("loopback");
   });
 });
+
+/** Stuck-run watchdog fakes (2026-11-18). */
+class HangingExecutor extends BlockingPreparationExecutor {
+  constructor(private readonly hangs: number) { super(); this.completeHumanStep(); }
+  async execute(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult> {
+    this.executeCalls += 1;
+    request.reportProgress?.("filling First name");
+    if (this.executeCalls <= this.hangs) return new Promise<ApplicationExecutorResult>(() => undefined);
+    return { state: "ready_to_submit", inspection: inspection() };
+  }
+}
+
+class SlowButAliveExecutor extends BlockingPreparationExecutor {
+  constructor() { super(); this.completeHumanStep(); }
+  async execute(request: ApplicationExecutionRequest): Promise<ApplicationExecutorResult> {
+    this.executeCalls += 1;
+    for (let field = 0; field < 10; field += 1) {
+      request.reportProgress?.(`filling field ${field}`);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return { state: "ready_to_submit", inspection: inspection() };
+  }
+}
+
+describe("stuck-run watchdog (CircleCI, 2026-11-18)", () => {
+  const watchdog = { sessionTimeoutMs: 30_000, stallTimeoutMs: 100, stallCheckIntervalMs: 10 };
+
+  it("closes a stuck browser and retries once, and the retry gets to Submit", async () => {
+    const executor = new HangingExecutor(1);
+    const { request } = await fixture("stall-once", executor);
+    const logs: string[] = [];
+    const registry = new ExecutionSessionRegistry({ executor, ...watchdog, logger: (entry) => logs.push(`${entry.event}:${entry.reason ?? ""}`) });
+    const started = registry.start(request);
+    const ready = await registry.waitForStatus(started.id, ["ready_to_submit", "failed"], 5_000);
+    expect(ready.status).toBe("ready_to_submit");
+    expect(ready.attempt).toBe(2);
+    expect(executor.executeCalls).toBe(2);
+    expect(executor.closeCalls).toBe(1);
+    expect(logs.some((line) => /stalled: no progress/.test(line))).toBe(true);
+  });
+
+  it("stops after a second stall with a plain reason, and submits nothing", async () => {
+    const executor = new HangingExecutor(99);
+    const { request } = await fixture("stall-twice", executor);
+    const registry = new ExecutionSessionRegistry({ executor, ...watchdog });
+    const started = registry.start(request);
+    const failed = await registry.waitForStatus(started.id, ["failed", "ready_to_submit"], 5_000);
+    expect(failed.status).toBe("failed");
+    expect(failed.result).toMatchObject({ state: "failed", retryable: true });
+    expect(failed.result?.state === "failed" ? failed.result.reason : "").toMatch(/got stuck while filling First name.*again after a retry.*Nothing was submitted/);
+    expect(executor.executeCalls).toBe(2);
+  });
+
+  it("never treats a slow form that keeps making progress as stuck", async () => {
+    const executor = new SlowButAliveExecutor();
+    const { request } = await fixture("slow-alive", executor);
+    const registry = new ExecutionSessionRegistry({ executor, ...watchdog });
+    const started = registry.start(request);
+    const ready = await registry.waitForStatus(started.id, ["ready_to_submit", "failed"], 5_000);
+    expect(ready.status).toBe("ready_to_submit");
+    expect(ready.attempt ?? 1).toBe(1);
+    expect(executor.executeCalls).toBe(1);
+    expect(executor.closeCalls).toBe(0);
+  });
+});
+

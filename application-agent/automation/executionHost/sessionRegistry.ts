@@ -43,6 +43,14 @@ export interface ExecutionSessionRegistryOptions {
   captchaPollIntervalMs?: number;
   /** Maximum time to watch a CAPTCHA before leaving the session manually resumable. */
   captchaWaitTimeoutMs?: number;
+  /**
+   * Stuck-run watchdog (2026-11-18). A run with no heartbeat for this long is
+   * stuck: the browser is closed and the run retried, `stallRetries` times,
+   * then it fails with a plain reason. A long form keeps sending heartbeats.
+   */
+  stallTimeoutMs?: number;
+  stallCheckIntervalMs?: number;
+  stallRetries?: number;
   logger?: (entry: ExecutionHostLogEntry) => void;
   /** Stable host identity used by the durable automatic-submission fence. */
   submissionWorkerId?: string;
@@ -84,6 +92,12 @@ interface ExecutionSession {
   attempt: number;
   captchaWatchToken: number;
   captchaWatchRunning: boolean;
+  /** Bumped by every run and by the watchdog; a run whose token is stale is ignored when it finally returns. */
+  runToken: number;
+  /** Monotonic time of the last heartbeat from the running form fill. */
+  lastProgressAt?: number;
+  lastProgressStep?: string;
+  stallRetriesUsed: number;
 }
 
 const ACTIVE_STATUSES: ReadonlySet<ExecutionHostStatus> = new Set([
@@ -123,7 +137,7 @@ function isBoundaryBlocker(result: Extract<ExecutionHostResult, { state: "requir
 function requestForHost(
   request: ExecutionHostRequest,
   now: string,
-  hooks: Pick<ApplicationExecutionRequest, "beforeAutomaticSubmission" | "recordAutomaticSubmissionOutcome"> = {},
+  hooks: Pick<ApplicationExecutionRequest, "beforeAutomaticSubmission" | "recordAutomaticSubmissionOutcome" | "reportProgress"> = {},
 ): ApplicationExecutionRequest {
   return {
     campaign: request.campaign,
@@ -201,6 +215,8 @@ export class ExecutionSessionRegistry {
   private readonly sessionTimeoutMs: number;
   private readonly captchaPollIntervalMs: number;
   private readonly captchaWaitTimeoutMs: number;
+  private readonly stallTimeoutMs: number;
+  private readonly stallRetries: number;
   private readonly logger?: (entry: ExecutionHostLogEntry) => void;
   private readonly submissionAuthority?: DurableSubmissionAuthority;
   private readonly submissionTarget?: ExecutionSessionRegistryOptions["submissionTarget"];
@@ -216,6 +232,10 @@ export class ExecutionSessionRegistry {
     this.sessionTimeoutMs = options.sessionTimeoutMs ?? 30 * 60 * 1_000;
     this.captchaPollIntervalMs = options.captchaPollIntervalMs ?? 250;
     this.captchaWaitTimeoutMs = options.captchaWaitTimeoutMs ?? this.sessionTimeoutMs;
+    this.stallTimeoutMs = options.stallTimeoutMs ?? 5 * 60 * 1_000;
+    this.stallRetries = options.stallRetries ?? 1;
+    const stallTimer = setInterval(() => this.checkForStalledRuns(), options.stallCheckIntervalMs ?? 30_000) as ReturnType<typeof setInterval> & { unref?: () => void };
+    stallTimer.unref?.();
     this.logger = options.logger;
     this.submissionAuthority = options.submissionAuthority ?? new DurableSubmissionAuthority(
       options.submissionWorkerId ?? "local-execution-host",
@@ -296,6 +316,8 @@ export class ExecutionSessionRegistry {
       attempt: 1,
       captchaWatchToken: 0,
       captchaWatchRunning: false,
+      runToken: 0,
+      stallRetriesUsed: 0,
     };
     this.sessions.set(id, session);
     this.touch(session);
@@ -541,6 +563,15 @@ export class ExecutionSessionRegistry {
   private async run(session: ExecutionSession, resuming: boolean): Promise<void> {
     if (session.terminal || session.running) return;
     session.running = true;
+    // A run the watchdog gave up on can still return later; its token is then
+    // stale and it changes nothing.
+    const token = (session.runToken += 1);
+    const heartbeat = (step: string) => {
+      if (session.runToken !== token) return;
+      session.lastProgressAt = monotonicNow();
+      session.lastProgressStep = step.slice(0, 80);
+    };
+    heartbeat("opening the application");
     const browserPreparationStartedAt = monotonicNow();
     try {
       let submissionFence: SubmissionFence | undefined;
@@ -557,6 +588,7 @@ export class ExecutionSessionRegistry {
           }
         : session.request;
       const request = () => requestForHost(hostRequest, this.now(), {
+        reportProgress: heartbeat,
         beforeAutomaticSubmission: !this.preparationOnly && automaticTargetAuthorized && this.submissionAuthority && session.request.campaign.submissionPolicy.authority === "automatic"
           ? async () => {
               if (!submissionFence) submissionFence = this.submissionAuthority!.claim(session.request.application.id, session.request.careerJob.id, this.now());
@@ -621,8 +653,10 @@ export class ExecutionSessionRegistry {
         try {
           inspection = await this.executor.inspect(request());
         } finally {
-          this.addTelemetry(session, { preflightInspectionDurationMs: monotonicNow() - inspectionStartedAt });
+          if (session.runToken === token) this.addTelemetry(session, { preflightInspectionDurationMs: monotonicNow() - inspectionStartedAt });
         }
+        if (session.runToken !== token) return;
+        heartbeat("read the form");
         this.addTelemetry(session, {
           domInspectionCount: inspection.domInspectionCount ?? 0,
           ...(inspection.boundaries ? { boundaries: inspection.boundaries } : {}),
@@ -651,7 +685,9 @@ export class ExecutionSessionRegistry {
       this.update(session, "executing");
       this.addTelemetry(session, { boundaries: { executorStarted: true } });
       let result: ApplicationExecutorResult;
+      heartbeat("filling the form");
       result = await this.executor.execute(request());
+      if (session.runToken !== token) return;
       if (session.terminal) {
         this.addTelemetry(session, { lateCompletionCount: 1 });
         return;
@@ -677,6 +713,8 @@ export class ExecutionSessionRegistry {
       await this.finish(session, result);
       this.startCaptchaWatch(session, result);
     } catch (error) {
+      // The watchdog closed this run's browser and moved on.
+      if (session.runToken !== token) return;
       const diagnostic = browserDiagnosticForError(
         error,
         session.snapshot.telemetry?.boundaries?.executorStarted ? "executor_start" : "preflight_inspection",
@@ -701,6 +739,55 @@ export class ExecutionSessionRegistry {
         });
       }
     } finally {
+      if (session.runToken === token) this.finishRun(session, browserPreparationStartedAt);
+    }
+  }
+
+  /**
+   * The stuck-run watchdog. A run is stuck when its form fill has sent no
+   * heartbeat for `stallTimeoutMs`: CircleCI's sat on its first field for
+   * 10 minutes and only a manual cancel and reopen fixed it (2026-11-18). The
+   * browser is closed and the same session runs again, with the saved answers;
+   * a second stall fails the run with a plain reason, which the agent's
+   * alerts report. Nothing is ever submitted by this path.
+   */
+  private checkForStalledRuns(): void {
+    const now = monotonicNow();
+    for (const session of this.sessions.values()) {
+      if (session.terminal || !session.running || session.lastProgressAt === undefined) continue;
+      if (now - session.lastProgressAt < this.stallTimeoutMs) continue;
+      void this.handleStalledRun(session);
+    }
+  }
+
+  private async handleStalledRun(session: ExecutionSession): Promise<void> {
+    const minutes = Math.max(1, Math.round(this.stallTimeoutMs / 60_000));
+    const step = session.lastProgressStep ?? "the form";
+    // Abandon the stuck run: its token goes stale and the session is free.
+    session.runToken += 1;
+    session.running = false;
+    session.lastProgressAt = undefined;
+    this.log(session, "failed", `stalled: no progress for ${minutes} min while ${step}`);
+    await this.closeExecutor(session);
+    if (session.terminal) return;
+    if (session.stallRetriesUsed < this.stallRetries) {
+      session.stallRetriesUsed += 1;
+      session.attempt += 1;
+      session.snapshot = { ...session.snapshot, attempt: session.attempt, retryReasonCode: "timeout" };
+      this.log(session, "status", `retrying after a stall (retry ${session.stallRetriesUsed} of ${this.stallRetries})`);
+      void this.run(session, false);
+      return;
+    }
+    await this.finish(session, {
+      state: "failed",
+      reason: `The browser got stuck while ${step} (no progress for ${minutes} minutes), and again after a retry, so the agent stopped. Nothing was submitted.`,
+      retryable: true,
+    });
+  }
+
+  private finishRun(session: ExecutionSession, browserPreparationStartedAt: number): void {
+    {
+      session.lastProgressAt = undefined;
       this.addTelemetry(session, { browserPreparationDurationMs: monotonicNow() - browserPreparationStartedAt });
       session.running = false;
       const pending = session.pendingResume;

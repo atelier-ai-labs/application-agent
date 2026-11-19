@@ -175,6 +175,7 @@ export function createExecutionHostServer(options: ExecutionHostServerOptions): 
     ...(options.createId ? { createId: options.createId } : {}),
     ...(options.maxConcurrent !== undefined ? { maxConcurrent: options.maxConcurrent } : {}),
     ...(options.sessionTimeoutMs !== undefined ? { sessionTimeoutMs: options.sessionTimeoutMs } : {}),
+    ...(options.stallTimeoutMs !== undefined ? { stallTimeoutMs: options.stallTimeoutMs } : {}),
     ...(options.logger ? { logger: options.logger } : {}),
   });
   const tracker = options.tracker ?? new UnavailableJobTracker(
@@ -428,6 +429,7 @@ export function createConfiguredExecutionHostServer(
     allowNonLoopback: config.allowNonLoopback,
     maxConcurrent: config.maxConcurrent,
     sessionTimeoutMs: config.sessionTimeoutMs,
+    stallTimeoutMs: config.stallTimeoutMs,
     allowAutomaticSubmission: config.submissionAuthority === "automatic" && !config.preparationOnly,
     preparationOnly: config.preparationOnly,
     submissionWorkerId: config.submissionWorkerId,
