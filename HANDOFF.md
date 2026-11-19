@@ -248,6 +248,31 @@ the day (6cba053). Everything after that is on the branch only.
     it.
   - Replay: CircleCI goes from 2 questions to 0, with no regressions. The host was restarted (only
     CircleCI's window was open) and CircleCI reopened.
+- **More CircleCI fixes:**
+  - 2072d53: the location Yes is selected as a plain choice. Location matching had searched
+    for a place called "Yes".
+  - 97763df: "salary within the posted band?" answers Yes, not the midpoint figure, and the
+    question is no longer classified `salary`. "I do not identify as a protected veteran" is
+    now read as "no".
+  - A fill once sat stuck for 10 minutes. It was cancelled and reopened, and Nate submitted
+    CircleCI (applied).
+- **Stuck-run watchdog (6bae53e).** The executor sends `reportProgress` once per field.
+  `ExecutionSessionRegistry.checkForStalledRuns` runs every 30 s, and a run with no heartbeat for
+  `ATELIER_EXECUTION_STALL_TIMEOUT_MS` (default 5 min) has its browser closed and reruns in the
+  same session. A second stall fails the run with "got stuck while … Nothing was submitted".
+  `runToken` makes an abandoned run's late return a no-op.
+- **Alerts (83b1e9f, `runtime/agentAlerts.ts`).** One Slack message, "The application agent
+  needs your attention", for:
+  - daily-run phase failures (stderr is now captured; an expired Google login is named, with
+    the fix)
+  - dead job sources (weekly)
+  - failed browser runs (not the normal 4-hour close)
+  - a listener crash loop (3+ starts in 15 min; checked on start)
+  - the local model failing every call for an hour (checked hourly)
+
+  Each alert key repeats at most once a day (`alerts-sent.v0` in state).
+  `ATELIER_AGENT_ALERTS=disabled` turns off the listener checks. The Muse 404 should produce the
+  first real alert on the next daily run.
 - **MCA Connect skipped** (16 questions; Nate's call, no automatic cap). Its second role was
   skipped by the one-per-company rule.
 - **Software-engineer résumé:** drafted in

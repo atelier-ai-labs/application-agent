@@ -27,9 +27,8 @@ The last few days showed the weak spot. When I was busy for three days, nothing 
   - Go through the questions that still reach me, using the form replay, and turn the common ones into profile facts or standing answers.
   - A standing answer for postings with no pay range.
   - Hold drafts to a form's word limit.
-- **A daily health line.**
-  - The evening summary says plainly when something is broken: an expired login, a dead job source (The Muse is returning 404 right now), the local model not responding.
-  - The Slack listener retries a busy database instead of crashing on startup.
+- **Alerts when something breaks.** _Done 2026-11-18._ Slack gets one "needs your attention" message for: an expired login, a dead job source, a run that got stuck twice, the listener crash-looping, or the local model not answering. A **stuck-run watchdog** also retries a fill that stops making progress for 5 minutes.
+  - Still to do: the Slack listener should retry a busy database instead of crashing on startup.
 - **Tidier inbox reading.** Newsletters and webinars ("Evaluating agents with Langfuse") never count as interview requests.
 - **Confirm before saving an answer**, plus a "remember this for every company?" button. A typo or a joke ("100 lol") never becomes a permanent answer.
 
