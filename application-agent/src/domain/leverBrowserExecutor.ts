@@ -318,6 +318,39 @@ function isEmploymentScreeningQuestion(field: Pick<LeverBrowserField, "id" | "la
     /\b(?:fired|terminated|asked\s+to\s+resign)\b/.test(text);
 }
 
+/**
+ * "Are your salary expectations for this role within the posted salary band?"
+ * is a yes/no question, even in a text box. CircleCI's got the midpoint
+ * figure "153000" typed in (2026-11-18). When the profile's rule is the
+ * posting's midpoint and the posting lists a range, the expectation is in
+ * the range by definition, so the answer is Yes. Without a posted range it
+ * stays a question.
+ */
+export function withinPostedSalaryRangeValueForField(field: ApplicationFieldDescriptor, request: ApplicationExecutionRequest): string | undefined {
+  const text = normalized(inspectedPromptText(field));
+  // The inspected text can start with a section heading, so look for the
+  // yes/no shape anywhere rather than at the start.
+  if (!/\b(?:are|is|do|does|would|will) (?:your|you)\b/.test(text)) return undefined;
+  if (!/\b(?:salary|pay|compensation)\b/.test(text) || !/\bwithin\b.{0,40}\b(?:band|range)\b/.test(text)) return undefined;
+  const compensation = request.careerJob.job.compensation;
+  if (request.profile?.workPreferences.salaryStrategy !== "posting_midpoint" || compensation?.minimum === undefined || compensation.maximum === undefined) return undefined;
+  if (field.options?.length) return field.options.find((option) => /^yes\b/.test(normalized(option.label)))?.label;
+  return field.type === "text" || field.type === "textarea" ? "Yes" : undefined;
+}
+
+/** A Yes/No question asking whether the candidate is in (or can work in) the posting's own location. */
+export function isPostedLocationEligibilityQuestion(field: Pick<ApplicationFieldDescriptor, "label" | "options"> & { questionDescriptor?: ApplicationFieldDescriptor["questionDescriptor"] }): boolean {
+  const labels = (field.options ?? []).map((option) => normalized(option.label));
+  if (labels.length !== 2 || !labels.includes("yes") || !labels.includes("no")) return false;
+  const text = normalized(`${field.questionDescriptor?.promptText ?? ""} ${field.label}`);
+  return /\b(?:located|live|living|reside|residing|based)\b.{0,60}\b(?:the )?location (?:where|that) (?:the |this )?(?:job|role|position) is (?:posted|listed|based|located)\b/.test(text) ||
+    /\bwilling to work in the location (?:where|that) (?:the |this )?(?:job|role|position) is (?:posted|listed|based)\b/.test(text);
+}
+
+function yesOption(field: Pick<ApplicationFieldDescriptor, "options">): string | undefined {
+  return field.options?.find((option) => normalized(option.label) === "yes")?.label;
+}
+
 function approvedDemographicValueForField(
   field: Pick<LeverBrowserField, "id" | "label" | "section" | "options">,
   profile: CandidateProfile,
@@ -362,9 +395,10 @@ function approvedDemographicValueForField(
   // definitions as nearby text, so decide by the question's own title first.
   const title = normalized([field.id, field.label, (field as { questionDescriptor?: { promptText?: string } }).questionDescriptor?.promptText]
     .filter(Boolean).join(" ")).replace(/[_-]+/g, " ");
-  if (/\brace\b/.test(title) && !/\bhispanic\b|\blatin[oax]\b/.test(title)) return approved.race_ethnicity?.trim();
+  // "Which races/ethnicities do you belong to?" (CircleCI, 2026-11-18) is plural.
+  if (/\braces?\b/.test(title) && !/\bhispanic\b|\blatin[oax]\b/.test(title)) return approved.race_ethnicity?.trim();
   if (/\bhispanic\b|\blatino\b|\blatina\b|\blatinx\b/.test(text)) return approved.hispanic_latino?.trim();
-  if (/\brace\b|\bethnic(?:ity| origin)?\b/.test(text)) return approved.race_ethnicity?.trim();
+  if (/\braces?\b|\bethnic(?:ity|ities| origin)?\b/.test(text)) return approved.race_ethnicity?.trim();
   if (/\bdemographic\b.{0,32}\b(?:consent|data)\b|\b(?:consent|data)\b.{0,32}\bdemographic\b/.test(text)) {
     return approved.demographic_consent?.trim();
   }
@@ -916,7 +950,9 @@ export function classifyLeverApplicationField(
   const smsConsent = isSmsConsentField(field);
   if (isAgeRequirementField(field)) return "legal_attestation";
   if (isEmploymentScreeningQuestion(field)) return "unknown";
-  const text = isAmbiguousYesNoControl(field) && !smsConsent ? fieldText(field) : directFieldPromptText(field);
+  // Underscores become spaces so ids like `question_race` still meet the word
+  // boundaries below (`_` counts as a word character in a regex).
+  const text = (isAmbiguousYesNoControl(field) && !smsConsent ? fieldText(field) : directFieldPromptText(field)).replace(/_/g, " ");
   const factField = profileFactField(field);
   const compactId = field.id.toLowerCase().replace(/[^a-z0-9]/g, "");
   // Ashby exposes the canonical applicant name control as this exact
@@ -931,13 +967,13 @@ export function classifyLeverApplicationField(
   // A text box that mentions résumés ("We know resumes only tell part of the
   // story...") is a question, not the upload; only a file control or a short
   // "Resume/CV" field is the upload.
-  if (hasPhrase(text, /resume|résumé|cv|curriculum vitae/) && !isResumeMentioningQuestion(field)) return "resume_upload";
+  if (hasPhrase(text, /resume|résumé|\bcv\b|curriculum vitae/) && !isResumeMentioningQuestion(field)) return "resume_upload";
   // Rippling's native resume dropzone exposes only its accepted extensions
   // ("Drop or select (.doc / .docx / .pdf)") and no Resume/CV text.
   if (field.type === "file" && hasPhrase(text, /drop\s+or\s+select|\.docx?|\.pdf/)) return "resume_upload";
   if (field.type === "file" && hasPhrase(text, /attachment|file upload|upload (?:a )?file|upload (?:a )?document/)) return "resume_upload";
   const genderOptions = field.options?.map((option) => normalized(option.label)).filter(Boolean) ?? [];
-  if (hasPhrase(text, /demographic|\bgender\b|transgender|sexual orientation|sexuality|race|ethnicity|hispanic|latino|veteran|disability|voluntary self|first[- ]generation/) || (field.type !== "textarea" && /\bpronouns?\b/.test(text)) ||
+  if (hasPhrase(text, /demographic|\bgender\b|transgender|sexual orientation|sexuality|\brac(?:es?|ial)\b|ethnicity|hispanic|latino|veteran|disability|voluntary self|first[- ]generation/) || (field.type !== "textarea" && /\bpronouns?\b/.test(text)) ||
     (genderOptions.includes("male") && genderOptions.includes("female") && genderOptions.some((option) => option === "non-binary" || option === "nonbinary"))) return "demographic";
   if (hasPhrase(text, /how did you hear|how did you learn|where did you hear|how did you discover|(?:job|role|opportunity) source|source of (?:this )?(?:job|role|opportunity)/)) return "unknown";
   if (smsConsent) return "legal_attestation";
@@ -949,10 +985,11 @@ export function classifyLeverApplicationField(
   if (isExactAcknowledgmentPrompt(text) || isPrivacyAcknowledgmentPrompt(text)) return "legal_attestation";
   // The visa disclaimer contains sponsorship language but is a legal
   // acknowledgment, not the candidate's sponsorship-required answer.
-  if (hasPhrase(text, /sponsor|visa|immigration status/)) return "sponsorship";
+  // Word boundaries: "advisable" is not "visa", "embrace" is not "race" (from PR #7).
+  if (hasPhrase(text, /\bsponsor|\bvisas?\b|immigration status/)) return "sponsorship";
   // "Degree or Certification Earned" names a credential, not a statement to certify.
   if (/\beducation\b/.test(sectionTitleOf(field)) || hasPhrase(text, /\binstitution\b|\bdegree or certification\b|\b(?:degree|certification) earned\b/)) return "education";
-  if (hasPhrase(text, /\blegal\b|attest|certif(?:y|ication)|agree to|authorize|terms|accurate and complete|sign your name for acknowledgement/)) return "legal_attestation";
+  if (hasPhrase(text, /\blegal\b|attest|certif(?:y|ication)|agree to|\bauthorize|\bterms\b|accurate and complete|sign your name for acknowledgement/)) return "legal_attestation";
   if (hasPhrase(text, /\bmost interesting problem\b|\byour take\b|\bwhy does it pull you in\b/)) return asFreeText();
   if (hasPhrase(text, /\b(?:ai|ml|machine\s+learning|aws|terraform|cloudformation|startup|early[ -]stage|production)\b/)) return asFreeText();
   if (hasPhrase(text, /salary|compensation|pay expectation|desired pay|desired annual compensation/)) {
@@ -961,17 +998,21 @@ export function classifyLeverApplicationField(
     // after every answer (Samsara, 2026-11-12).
     const labels = (field.options ?? []).map((option) => normalized(option.label));
     const yesNo = labels.length > 0 && labels.length <= 3 && labels.some((label) => /^yes\b/.test(label)) && labels.some((label) => /^no\b/.test(label));
-    return yesNo ? "unknown" : "salary";
+    // "Are your salary expectations within the posted band?" in a text box is
+    // a yes/no question too; as "salary" its Yes was parsed as an amount and
+    // the fill stopped (CircleCI, 2026-11-18).
+    const asksWithinRange = /\b(?:are|is|do|does|would|will) (?:your|you)\b/.test(text) && /\bwithin\b.{0,40}\b(?:band|range)\b/.test(text);
+    return yesNo || asksWithinRange ? "unknown" : "salary";
   }
   // Overall experience ("total work experience in a similar role") is a résumé
   // summary for a reviewed draft; years with one named system stays unknown.
   if (hasPhrase(text, /\b(?:total|overall|relevant|prior) (?:work |professional )?experience\b/)) return asFreeText();
-  if (hasPhrase(text, /relocat/)) return "relocation";
-  if (hasPhrase(text, /travel/)) return "travel";
-  if (hasPhrase(text, /education|degree|university|college|school|major|study/)) return "education";
-  if (hasPhrase(text, /why|interest|motivat|cover letter|tell us|anything else|additional information/)) return asFreeText();
+  if (hasPhrase(text, /\brelocat/)) return "relocation";
+  if (hasPhrase(text, /\btravel/)) return "travel";
+  if (hasPhrase(text, /\beducation|\bdegree|\buniversit|\bcollege|\bschool|\bmajors?\b|\bstud(?:y|ied|ying)\b/)) return "education";
+  if (hasPhrase(text, /\bwhy\b|\binterest|\bmotivat|cover letter|tell us|anything else|additional information/)) return asFreeText();
   if (factField) return factField;
-  if (hasPhrase(text, /employ|employer|company|work history|job history|position held|job title|occupation|start date|end date/)) return "employment_history";
+  if (hasPhrase(text, /\bemploy|\bcompan(?:y|ies)\b|work history|job history|position held|job title|occupation|start date|end date/)) return "employment_history";
   // Contact (incl. email/e-mail) must win over bare "address" in location (e.g. "Email address").
   if (hasPhrase(text, /first name|given name|last name|family name|surname|full name|your name|applicant name|email|e-mail|phone|telephone|mobile|linkedin|portfolio|website/)) return "contact";
   // Whole words only: "capacity" contains "city" and "statement" contains "state".
@@ -1679,6 +1720,9 @@ function explicitValueForField(
   if (request.profile && isSmsConsentField(field)) {
     return { value: "No", explicit: true };
   }
+  // Before the prepared salary figure: this question wants Yes, not a number.
+  const withinPostedRange = withinPostedSalaryRangeValueForField(field, request);
+  if (withinPostedRange) return { value: withinPostedRange, explicit: true };
   if (field.classification === "employment_history" &&
     /\b(?:current|present|most recent)\b.{0,24}\b(?:company|employer)\b/.test(fieldText(field))) {
     const approvedCompany = request.profile?.approvedReusableAnswers.current_company?.trim();
@@ -1753,6 +1797,9 @@ function explicitValueForField(
     // Dialing-code country lists need the grounded country component, not a full city string.
     return { explicit: false };
   }
+  // A Yes/No "are you in the job's location?" is answered by the grounded
+  // rule, never by the prepared address string (CircleCI, 2026-11-18).
+  if (field.classification === "location" && isPostedLocationEligibilityQuestion(field)) return { explicit: false };
   if (field.classification === "location" && hasPhrase(inspectedPromptText(field), /\b(?:country|states?)\b/)) {
     return { explicit: false };
   }
@@ -1828,6 +1875,11 @@ function profileValueForField(
   }
   if (field.classification === "location") {
     const location = profile.identity.location ?? profile.location;
+    // "Are you located in and willing to work in the location where the job is
+    // posted?" with Yes/No (CircleCI, 2026-11-18). The agent only applies to
+    // postings open to where the candidate lives (discovery and the pre-apply
+    // location filter), so the truthful answer is Yes.
+    if (isPostedLocationEligibilityQuestion(field)) return yesOption(field);
     if (isPhoneCountrySelector(field)) {
       return groundedPhoneCountryFromProfile(profile) ?? groundedCountryFromLocation(location);
     }
@@ -1990,7 +2042,8 @@ export function optionValue(
       // ...and "No, I don’t have a disability" (Samsara, curly apostrophe).
       // "I identify as a veteran but not a protected veteran" is a veteran, not
       // a "no" (Twilio, 2026-11-17).
-      (demographicAliases.includes("no") && labels.some((label) => /not\s+(?:a\s+)?(?:protected\s+)?veteran|(?:do\s+not|don['’]?t)\s+have\s+(?:a\s+)?disability/.test(label) &&
+      // "I do not identify as a protected veteran" (CircleCI, 2026-11-18).
+      (demographicAliases.includes("no") && labels.some((label) => /not\s+(?:a\s+)?(?:protected\s+)?veteran|(?:do\s+not|don['’]?t)\s+identify\s+as\s+(?:a\s+|an\s+)?(?:protected\s+)?veteran|(?:do\s+not|don['’]?t)\s+have\s+(?:a\s+)?disability/.test(label) &&
         !/\b(?:identify as|i am|am) a veteran\b/.test(label))) ||
       // Greenhouse's phone-country control appends the dialing code to the
       // grounded country name (for example, "United States +1"). Preserve
@@ -3002,6 +3055,8 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
     for (let pass = 0; pass < 3 && pending.length > 0; pass += 1) {
       for (const field of pending) {
         const fieldDescriptor = descriptor(field);
+        // Heartbeat for the host's stuck-run watchdog.
+        request.reportProgress?.(`filling ${fieldDescriptor.label.slice(0, 60)}`);
         let current: string | boolean | null | undefined;
         try {
           current = field.readValue ? await field.readValue() : undefined;
@@ -3153,7 +3208,10 @@ export class LeverBrowserExecutor implements ApplicationExecutor {
             }
             // A work-from state option ("Pennsylvania (PA)") is an exact listed
             // choice, not the full grounded place, so it skips location matching.
+            // So is the Yes of "are you in the job's location?": location
+            // matching searched for a place called "Yes" (CircleCI, 2026-11-18).
             await field.select(selected, fieldDescriptor.classification === "location" && request.profile &&
+              !isPostedLocationEligibilityQuestion(fieldDescriptor) &&
               workLocationStateValueForField(fieldDescriptor, request.profile) !== selected
               ? { groundedLocation: request.profile.identity.location ?? request.profile.location ?? undefined }
               : undefined);

@@ -29,7 +29,7 @@ export interface QueueJob {
   fit?: string;
 }
 
-export interface CommandResult { code: number; stdout: string; timedOut?: boolean }
+export interface CommandResult { code: number; stdout: string; timedOut?: boolean; stderr?: string }
 
 export interface DailyCycleDependencies {
   run(script: string, args: readonly string[], timeoutMs: number): Promise<CommandResult>;
@@ -52,6 +52,8 @@ export interface DailyRunRecord {
   startedAt: string;
   finishedAt: string;
   discovered?: { added: number; jobs: string[] } | { error: string };
+  /** "themuse-live: … failed with HTTP 404": job sources that returned nothing usable. */
+  sourceProblems?: string[];
   /** Tracked jobs whose posting had closed, now marked Expired. */
   closed?: { expired: string[] } | { error: string };
   /** Job-board links swapped for the employer's own posting. */
@@ -93,8 +95,16 @@ function lastJson<T>(stdout: string, key: string): T | undefined {
   return undefined;
 }
 
+/**
+ * The reason a phase failed, from its last meaningful output line. Errors go
+ * to stderr, so it is read first: on 11-16 the summary only said "exited 1"
+ * while stderr said the Google login had expired (2026-11-18).
+ */
 function failure(result: CommandResult, label: string): string {
-  const lastLine = result.stdout.trim().split("\n").filter(Boolean).pop() ?? "";
+  const meaningful = (text: string | undefined) => (text ?? "").trim().split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !/ExperimentalWarning|--trace-warnings|^\(node:\d+\)|^at /.test(line));
+  const lastLine = meaningful(result.stderr).pop() ?? meaningful(result.stdout).pop() ?? "";
   return result.timedOut ? `${label} timed out` : `${label} exited ${result.code}${lastLine ? `: ${lastLine.slice(0, 200)}` : ""}`;
 }
 
@@ -108,6 +118,11 @@ export async function runDailyCycle(deps: DailyCycleDependencies, options: Daily
     const jobs = result.stdout.split("\n").filter((line) => line.startsWith("+ ")).map((line) => line.slice(2).split(" | ").slice(0, 2).join(" — "));
     const added = Number(/(\d+) added to the tracker/.exec(result.stdout)?.[1] ?? 0);
     record.discovered = result.code === 0 ? { added, jobs: jobs.slice(0, added) } : { error: failure(result, "Job search") };
+    // Only whole sources that failed, not one odd posting ("Skipped an Ashby posting without an id").
+    const problems = `${result.stdout}\n${result.stderr ?? ""}`.split("\n")
+      .map((line) => /\[career-agent-discover\] source problem: (.+)$/.exec(line)?.[1]?.trim())
+      .filter((line): line is string => Boolean(line) && /failed|HTTP \d{3}|timed out|unreachable|error/i.test(line!));
+    if (problems.length > 0) record.sourceProblems = [...new Set(problems)].slice(0, 10);
   }
 
   // Closed postings leave the tracker and queue first, so nothing below spends time on them.
@@ -186,6 +201,18 @@ const STATUS_WORDING: Record<string, string> = {
   Skipped: "skipped",
 };
 
+/** The phases that failed, labelled the way the summary names them. */
+export function failedDailyPhases(record: DailyRunRecord): { phase: string; label: string; error: string }[] {
+  const phases: [keyof DailyRunRecord, string][] = [
+    ["discovered", "Job search"], ["closed", "Open-posting check"], ["links", "Link check"],
+    ["queueImport", "Queue import"], ["inbox", "Inbox check"], ["apply", "Applying"],
+  ];
+  return phases.flatMap(([phase, label]) => {
+    const outcome = record[phase] as { error?: string } | undefined;
+    return outcome && typeof outcome === "object" && "error" in outcome && outcome.error ? [{ phase: String(phase), label, error: outcome.error }] : [];
+  });
+}
+
 export function formatDailySummary(record: DailyRunRecord): string {
   const lines = [`*Daily run* (${new Date(record.startedAt).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })})`];
   const d = record.discovered;
@@ -224,10 +251,11 @@ export function npmScriptRunner(cwd = process.cwd()) {
   return (script: string, args: readonly string[], timeoutMs: number): Promise<CommandResult> => new Promise((resolvePromise) => {
     const child = spawn("npm", ["run", "-s", script, "--", ...args], { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
+    let stderr = "";
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, timeoutMs);
     child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); process.stdout.write(chunk); });
-    child.stderr.on("data", (chunk: Buffer) => { process.stderr.write(chunk); });
-    child.on("close", (code) => { clearTimeout(timer); resolvePromise({ code: code ?? 1, stdout, timedOut }); });
+    child.stderr.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-20_000); process.stderr.write(chunk); });
+    child.on("close", (code) => { clearTimeout(timer); resolvePromise({ code: code ?? 1, stdout, timedOut, stderr }); });
   });
 }

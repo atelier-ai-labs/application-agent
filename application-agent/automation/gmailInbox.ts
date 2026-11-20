@@ -37,7 +37,11 @@ export function gmailInbox(accessToken: () => Promise<string>, fetcher: typeof f
   };
   return {
     async recentEmails(sinceDays, options = {}) {
-      const list = await get(`/messages?maxResults=${options.maxResults ?? 100}&q=${encodeURIComponent(`${GMAIL_JOB_QUERY} newer_than:${Math.max(1, Math.floor(sinceDays))}d`)}`);
+      // Trash and Spam too: Samsara's and Arize's rejections had been moved to
+      // Trash and were never seen, so the tracker still said Applied
+      // (2026-11-18). Gmail empties Trash after 30 days and this runs nightly.
+      // Still read-only: nothing is moved, labeled or deleted.
+      const list = await get(`/messages?maxResults=${options.maxResults ?? 100}&includeSpamTrash=true&q=${encodeURIComponent(`${GMAIL_JOB_QUERY} newer_than:${Math.max(1, Math.floor(sinceDays))}d`)}`);
       const emails: InboxEmail[] = [];
       for (const summary of list.messages ?? []) {
         if (options.skipIds?.has(summary.id)) continue;

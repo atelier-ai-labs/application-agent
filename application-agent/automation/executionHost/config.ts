@@ -28,6 +28,8 @@ export interface ExecutionHostEnvironment extends GoogleSheetsEnvironment {
   ATELIER_EXECUTION_BROWSER_TIMEOUT_MS?: string;
   ATELIER_EXECUTION_MAX_CONCURRENT?: string;
   ATELIER_EXECUTION_SESSION_TIMEOUT_MS?: string;
+  /** Stuck-run watchdog: no form-fill progress for this long means stuck (default 5 minutes). */
+  ATELIER_EXECUTION_STALL_TIMEOUT_MS?: string;
   /** Server-only final-submission capability. Defaults to never. */
   ATELIER_EXECUTION_SUBMISSION_AUTHORITY?: string;
   /** Allow browser preparation for review while withholding every submit capability. */
@@ -68,6 +70,7 @@ export interface ExecutionHostConfig {
   browserTimeoutMs: number;
   maxConcurrent: number;
   sessionTimeoutMs: number;
+  stallTimeoutMs: number;
   submissionAuthority: Extract<SubmissionAuthority, "never" | "automatic">;
   preparationOnly: boolean;
   submissionWorkerId: string;
@@ -197,6 +200,7 @@ export function resolveExecutionHostConfig(env: ExecutionHostEnvironment): Execu
   const browserTimeoutMs = positiveInteger(env.ATELIER_EXECUTION_BROWSER_TIMEOUT_MS, 15_000, "ATELIER_EXECUTION_BROWSER_TIMEOUT_MS");
   const maxConcurrent = positiveInteger(env.ATELIER_EXECUTION_MAX_CONCURRENT, 1, "ATELIER_EXECUTION_MAX_CONCURRENT");
   const sessionTimeoutMs = positiveInteger(env.ATELIER_EXECUTION_SESSION_TIMEOUT_MS, 30 * 60 * 1_000, "ATELIER_EXECUTION_SESSION_TIMEOUT_MS");
+  const stallTimeoutMs = positiveInteger(env.ATELIER_EXECUTION_STALL_TIMEOUT_MS, 5 * 60 * 1_000, "ATELIER_EXECUTION_STALL_TIMEOUT_MS");
   const configuredSubmissionAuthority = submissionAuthority(env.ATELIER_EXECUTION_SUBMISSION_AUTHORITY);
   const preparationOnly = booleanValue(env.ATELIER_EXECUTION_PREPARATION_ONLY, false, "ATELIER_EXECUTION_PREPARATION_ONLY");
   const submissionWorkerId = env.ATELIER_EXECUTION_WORKER_ID?.trim() || "local-execution-host";
@@ -217,6 +221,7 @@ export function resolveExecutionHostConfig(env: ExecutionHostEnvironment): Execu
     browserTimeoutMs,
     maxConcurrent,
     sessionTimeoutMs,
+    stallTimeoutMs,
     submissionAuthority: configuredSubmissionAuthority,
     preparationOnly,
     submissionWorkerId,

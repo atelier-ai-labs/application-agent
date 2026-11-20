@@ -122,6 +122,17 @@ try {
     setInterval(() => { void tidy(); }, 60 * 60_000).unref?.();
   }
 
+  // Health alerts: a crash loop (checked on start) and the local model not
+  // answering (checked hourly). ATELIER_AGENT_ALERTS=disabled turns them off.
+  if (process.env.ATELIER_AGENT_ALERTS?.trim() !== "disabled") {
+    const activeRuntime = runtime;
+    const check = (started: boolean) => activeRuntime.checkHealth({ started }).then((posted) => {
+      if (posted > 0) console.log(`[career-agent-runtime] posted ${posted} health alert(s)`);
+    }).catch((error: unknown) => console.warn(`[career-agent-runtime] health check failed: ${error instanceof Error ? error.message.slice(0, 200) : "unknown error"}`));
+    void check(true);
+    setInterval(() => { if (!shuttingDown) void check(false); }, 60 * 60_000).unref?.();
+  }
+
   console.log(`[career-agent-runtime] durable state: ${runtime.stateFilePath ?? "injected storage"}`);
   console.log("[career-agent-runtime] Slack attention listener is active; routine discovery activity remains quiet.");
   process.once("SIGINT", () => { void shutdown(0); });

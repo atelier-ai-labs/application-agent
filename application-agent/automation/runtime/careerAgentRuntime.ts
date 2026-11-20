@@ -73,6 +73,8 @@ const SUBMISSION_REVIEW_CARDS_KEY = "atelier.application-agent.submission-review
 const APPROVED_FORMS_KEY = "atelier.application-agent.approved-forms.v0";
 interface ApprovedForm { applicationId: string; executionId: string; filled: ExecutionReviewEntry[]; savedAt: string }
 import { compareApprovedForm } from "./approvedFormCheck";
+import { AgentAlerts, crashLoopAlert, failedRunAlert, modelHealthAlert, type AgentAlert } from "./agentAlerts";
+import { readModelCallLog } from "../modelCallLog";
 import type { ExecutionReviewEntry } from "../../src/domain/executor";
 import { gmailInbox, type InboxSource } from "../gmailInbox";
 import { createGoogleOAuthAccessTokenProvider, gmailSecurityCodesEnabled, resolveGoogleAuthMode } from "../googleOAuth";
@@ -206,6 +208,8 @@ export interface BackgroundCareerAgentRuntime {
   tidySlack(now?: Date, options?: { maxDeletes?: number; pauseMs?: number }): Promise<number>;
   /** When the saved answers changed, answers waiting questions they now cover; returns one line per job. */
   answerWaitingFromBankIfChanged(): Promise<string[]>;
+  /** Crash-loop and local-model checks; posts an alert when something is wrong. Returns how many were posted. */
+  checkHealth(options?: { started?: boolean }): Promise<number>;
   stop(): Promise<void>;
   createCampaign(input: CreateCampaignInput): Campaign;
   runCampaign(campaignId: string): Promise<CampaignRunResult>;
@@ -1353,7 +1357,45 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
     await this.announceSubmissionReview(campaignId, jobId, final).catch(() => {
       console.warn("[career-agent-runtime] submission review notice could not be published");
     });
+    // A run that failed (stuck twice, browser crash…) is an alert, not just a status.
+    if (final.status === "failed" && final.result?.state === "failed") {
+      const job = this.service.getJob(jobId);
+      const alert = failedRunAlert({ executionId: final.id, company: job.job.company, role: job.job.title, reason: final.result.reason });
+      if (alert) await this.alerts.raise([alert]).catch(() => undefined);
+    }
     return final;
+  }
+
+  private get alerts(): AgentAlerts {
+    const adapter = this.notification?.adapter as { publishInfoNotice?: (text: string) => Promise<void> } | undefined;
+    const sink = adapter?.publishInfoNotice ? { publishInfoNotice: (text: string) => adapter.publishInfoNotice!(text) } : undefined;
+    return new AgentAlerts(sink, this.stateStorage);
+  }
+
+  /**
+   * Listener-side health (2026-11-18): call on start and hourly. Records this
+   * start to spot a crash loop, and checks whether the local model answered
+   * any call in the last hour.
+   */
+  async checkHealth(options: { started?: boolean } = {}): Promise<number> {
+    const now = new Date();
+    const alerts: AgentAlert[] = [];
+    if (options.started && this.stateStorage) {
+      const key = "atelier.application-agent.listener-starts.v0";
+      let starts: string[] = [];
+      try { starts = JSON.parse(this.stateStorage.getItem(key) ?? "[]") as string[]; } catch { starts = []; }
+      starts = [...starts.filter((at) => now.getTime() - Date.parse(at) < 60 * 60 * 1_000), now.toISOString()].slice(-20);
+      this.stateStorage.setItem(key, JSON.stringify(starts));
+      const loop = crashLoopAlert(starts, now);
+      if (loop) alerts.push(loop);
+    }
+    if (this.stateFilePath) {
+      try {
+        const model = modelHealthAlert(readModelCallLog(resolve(dirname(this.stateFilePath), "model-calls.jsonl")).slice(-200), now);
+        if (model) alerts.push(model);
+      } catch { /* no model log yet */ }
+    }
+    return (await this.alerts.raise(alerts)).length;
   }
 
   /** Posts the pre-submit review once per prepared browser execution. */

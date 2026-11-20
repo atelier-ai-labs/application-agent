@@ -21,6 +21,11 @@ export interface ApplicationExecutionRequest {
   beforeAutomaticSubmission?: () => void | Promise<void>;
   /** Trusted host callback records the click outcome without accepting browser proof. */
   recordAutomaticSubmissionOutcome?: (outcome: BrowserSubmissionResult) => void | Promise<void>;
+  /**
+   * Heartbeat: the executor calls this as it works through a form (once per
+   * field), so the host can tell a long form from a stuck one (2026-11-18).
+   */
+  reportProgress?: (step: string) => void;
 }
 
 /** Whether an executor can only prepare a form or may return submission proof. */

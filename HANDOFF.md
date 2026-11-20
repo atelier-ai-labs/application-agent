@@ -224,6 +224,67 @@ the day (6cba053). Everything after that is on the branch only.
 - The Muse job source returns 404.
 - The inbox check read a Langfuse webinar email as an interview. No row matched.
 
+## 2026-11-18
+
+- **The inbox check reads Trash and Spam too** (fad0589, `includeSpamTrash=true`, still
+  read-only). Samsara's and Arize's rejections had been sitting in Trash unseen.
+- **New rejection wordings:**
+  - Arize: "don't see a strong mutual fit"
+  - Mercury: "move forward with other candidates whose skills…"
+
+  Mercury's email had already been handled as "received" by the 17:34 run. Its id was removed
+  from `inbox-processed.json` (backup `inbox-processed.json.before-mercury-reread-*.backup`) and it
+  was re-read.
+- **Tracker now Rejected:**
+  - Arize Applied AI
+  - Samsara SWE Data Platform
+  - Upstart SWE Unsecured Installments
+  - Mercury SWE Product
+- **CircleCI fixes (2ab23c6):**
+  - Plural "races/ethnicities" now matches race_ethnicity. The "Hispanic/Latinx" option had
+    pulled it into the Hispanic yes/no answer.
+  - `isPostedLocationEligibilityQuestion`: a Yes/No "are you located in and willing to work in the
+    location where the job is posted?" answers Yes, and the prepared address no longer overrides
+    it.
+  - Replay: CircleCI goes from 2 questions to 0, with no regressions. The host was restarted (only
+    CircleCI's window was open) and CircleCI reopened.
+- **More CircleCI fixes:**
+  - 2072d53: the location Yes is selected as a plain choice. Location matching had searched
+    for a place called "Yes".
+  - 97763df: "salary within the posted band?" answers Yes, not the midpoint figure, and the
+    question is no longer classified `salary`. "I do not identify as a protected veteran" is
+    now read as "no".
+  - A fill once sat stuck for 10 minutes. It was cancelled and reopened, and Nate submitted
+    CircleCI (applied).
+- **Stuck-run watchdog (6bae53e).** The executor sends `reportProgress` once per field.
+  `ExecutionSessionRegistry.checkForStalledRuns` runs every 30 s, and a run with no heartbeat for
+  `ATELIER_EXECUTION_STALL_TIMEOUT_MS` (default 5 min) has its browser closed and reruns in the
+  same session. A second stall fails the run with "got stuck while … Nothing was submitted".
+  `runToken` makes an abandoned run's late return a no-op.
+- **Alerts (83b1e9f, `runtime/agentAlerts.ts`).** One Slack message, "The application agent
+  needs your attention", for:
+  - daily-run phase failures (stderr is now captured; an expired Google login is named, with
+    the fix)
+  - dead job sources (weekly)
+  - failed browser runs (not the normal 4-hour close)
+  - a listener crash loop (3+ starts in 15 min; checked on start)
+  - the local model failing every call for an hour (checked hourly)
+
+  Each alert key repeats at most once a day (`alerts-sent.v0` in state).
+  `ATELIER_AGENT_ALERTS=disabled` turns off the listener checks. The Muse 404 should produce the
+  first real alert on the next daily run.
+- **OpenAI Applied AI Engineer, Enterprise – EDU skipped (11-19):** the form required an active
+  Full Scope Polygraph clearance and 5 days on-site in Maryland. Nate's call.
+- **MCA Connect skipped** (16 questions; Nate's call, no automatic cap). Its second role was
+  skipped by the one-per-company rule.
+- **Software-engineer résumé:** drafted in
+  `.local/career-agent/resumes/software-engineer-2026-11-DRAFT.md` and waiting on Nate's review.
+  Six real rejections since 11-01, three of them for plain "Software Engineer" roles, and 22 of
+  39 applications were plain "Software Engineer" roles.
+  - Résumé families are fixed in code (`validation.ts`, `fit.ts`, `policies.ts`), so a fourth
+    family needs a code change. The proposed rule: plain SWE / Full Stack / Backend titles get the
+    new résumé.
+
 ## Known gaps / next
 
 - **Step 3 of Nate's plan:** one daily Slack message with every open question, so they can be

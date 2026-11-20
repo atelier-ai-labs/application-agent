@@ -1,5 +1,7 @@
 import { loadEnv } from "vite";
-import { appendDailyRun, DAILY_PHASES, npmScriptRunner, runDailyCycle, type DailyPhase } from "./dailyCycle";
+import { appendDailyRun, DAILY_PHASES, failedDailyPhases, npmScriptRunner, runDailyCycle, type DailyPhase } from "./dailyCycle";
+import { AgentAlerts, dailyRunAlerts } from "./runtime/agentAlerts";
+import { openStateStorage } from "./runtime/stateStorage";
 import { resolveSlackConfig } from "./slack/config";
 import { SlackNotificationAdapter } from "./slack/slackNotificationAdapter";
 import { writeApplicationHistoryReport } from "./applicationHistory";
@@ -39,6 +41,12 @@ async function main(): Promise<void> {
     ...(slack ? { notify: (text: string) => slack!.publishInfoNotice(text) } : {}),
   }, { phases, ...(maxStarts !== undefined ? { maxStarts } : {}) });
   appendDailyRun(record);
+  // A broken phase or job source gets its own alert, not a line in the summary.
+  try {
+    await new AgentAlerts(slack, openStateStorage()).raise(dailyRunAlerts(failedDailyPhases(record), record.sourceProblems ?? []));
+  } catch (error) {
+    console.error(`[career-agent-daily] alert failed: ${error instanceof Error ? error.message : error}`);
+  }
   try { writeApplicationHistoryReport(); } catch (error) { console.error(`[career-agent-daily] history report failed: ${error instanceof Error ? error.message : error}`); }
   console.log(`[career-agent-daily] done: ${JSON.stringify(record)}`);
 }

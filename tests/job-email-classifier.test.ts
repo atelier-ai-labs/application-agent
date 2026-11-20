@@ -11,6 +11,11 @@ describe("job email classification", () => {
     expect(classifyJobEmail(email("Plane - Software Engineer", "We regret to inform you that the position has been filled."))).toBe("rejection");
     // Upstart's application limit (2026-11-11).
     expect(classifyJobEmail(email("Update on Your Application at Upstart", "Please note that candidates may apply to up to three roles within a 60 day period. At this time, you have reached that limit, so we will not be able to move forward with your most recent application.", "no-reply@upstart.com"))).toBe("rejection");
+    // Arize (2026-11-12) and Mercury (2026-11-18), both missed before.
+    expect(classifyJobEmail(email("Application Update - Thank you for applying with Arize AI!", "We receive applications from qualified candidates daily and are flattered that you would consider a career here. While we are impressed by your background, we unfortunately don't see a strong mutual fit at this time for the role."))).toBe("rejection");
+    expect(classifyJobEmail(email("Update from Mercury", "After careful consideration, we've made the difficult decision to move forward with other candidates whose skills and experiences are more closely aligned with what our team is looking for at this time."))).toBe("rejection");
+    // A receipt that says "if there's a fit" is still a receipt.
+    expect(classifyJobEmail(email("Thank you for your application to Arize AI!", "We'll review your application, and if there's a fit, you can expect to hear from a member of our team soon to set up an intro call."))).not.toBe("rejection");
     expect(classifyJobEmail(email("Follow up from Upstart", "Thank you for your interest in joining Upstart and applying to the DevOps Engineer II, Cloud Platform position. Regrettably, we have decided to move forward with others at this time.", "no-reply@recruiting.upstart.com"))).toBe("rejection");
   });
 
