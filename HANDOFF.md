@@ -273,6 +273,8 @@ the day (6cba053). Everything after that is on the branch only.
   Each alert key repeats at most once a day (`alerts-sent.v0` in state).
   `ATELIER_AGENT_ALERTS=disabled` turns off the listener checks. The Muse 404 should produce the
   first real alert on the next daily run.
+- **OpenAI Applied AI Engineer, Enterprise – EDU skipped (11-19):** the form required an active
+  Full Scope Polygraph clearance and 5 days on-site in Maryland. Nate's call.
 - **MCA Connect skipped** (16 questions; Nate's call, no automatic cap). Its second role was
   skipped by the one-per-company rule.
 - **Software-engineer résumé:** drafted in
