@@ -960,45 +960,6 @@ h2 {
   line-height: 1;
 }
 
-.skeleton-card {
-  pointer-events: none;
-}
-
-.skeleton-line,
-.skeleton-panel {
-  background: linear-gradient(90deg, var(--line), rgba(241, 238, 232, 0.07), var(--line));
-  background-size: 200% 100%;
-  animation: shimmer 1.5s ease-in-out infinite;
-}
-
-.skeleton-short {
-  width: 28px;
-  height: 11px;
-}
-
-.skeleton-title {
-  width: 52%;
-  height: 32px;
-  margin-top: 63px;
-}
-
-.skeleton-copy {
-  width: 82%;
-  height: 48px;
-  margin-top: 20px;
-}
-
-.skeleton-panel {
-  height: 145px;
-  margin-top: auto;
-}
-
-.skeleton-footer {
-  width: 42%;
-  height: 12px;
-  margin-top: 21px;
-}
-
 @media (max-width: 860px) {
   .shell-container {
     width: min(100% - 42px, 680px);

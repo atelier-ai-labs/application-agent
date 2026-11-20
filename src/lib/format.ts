@@ -25,10 +25,7 @@ export function formatRelativeTime(timestamp: string | undefined, now = Date.now
   }
 
   const deltaSeconds = Math.floor((now - time) / 1_000);
-  if (deltaSeconds < 0) {
-    return "Timestamp not supplied";
-  }
-
+  // A timestamp slightly ahead of this browser's clock (clock skew) is still recent, not missing.
   if (deltaSeconds < 10) {
     return "just now";
   }
