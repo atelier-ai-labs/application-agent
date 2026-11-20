@@ -5,10 +5,11 @@ import type {
 
 const NHL_DASHBOARD_API_BASE_URL =
   "https://nhl-dashboard-api.bravecoast-a5240643.westus2.azurecontainerapps.io";
-const NHL_DASHBOARD_URL = "https://ashy-sky-01e4eba1e.7.azurestaticapps.net";
-const NHL_REPOSITORY_URL = "https://github.com/atelier-ai-labs/nhl-intelligence";
+const NHL_DASHBOARD_URL = "https://puckpulse.io";
+// Public repositories only: a private repo's link is a 404 for every visitor but the owner.
+const NHL_REPOSITORY_URL = "https://github.com/atelier-ai-labs/puckpulse";
 const QUANT_REPOSITORY_URL = "https://github.com/atelier-ai-labs/quant-intelligence";
-const ATELIER_HQ_REPOSITORY_URL = "https://github.com/atelier-ai-labs/atelier-hq";
+const APPLICATION_AGENT_REPOSITORY_URL = "https://github.com/atelier-ai-labs/application-agent";
 
 function optionalUrl(value: string | undefined): string | null {
   const trimmed = value?.trim();
@@ -41,7 +42,7 @@ export const departments: readonly DepartmentConfig[] = [
       "A grounded application-preparation core with a persistent campaign worker for provenance-aware job search and review.",
     status: "IN DEVELOPMENT",
     metricLabel: "Ready for review",
-    repositoryUrl: ATELIER_HQ_REPOSITORY_URL,
+    repositoryUrl: APPLICATION_AGENT_REPOSITORY_URL,
     deploymentUrl: null,
     techStack: ["React", "Local persistence", "Policy-driven workflow"],
     adapterId: "application-agent",

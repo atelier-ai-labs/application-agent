@@ -72,14 +72,6 @@ export function Layers({ size = 16, ...props }: IconProps) {
   );
 }
 
-export function Menu({ size = 20, ...props }: IconProps) {
-  return (
-    <svg {...baseProps(size, props)} aria-hidden="true">
-      <path d="M4 7h16M4 12h16M4 17h16" />
-    </svg>
-  );
-}
-
 export function Check({ size = 14, ...props }: IconProps) {
   return (
     <svg {...baseProps(size, props)} aria-hidden="true">
