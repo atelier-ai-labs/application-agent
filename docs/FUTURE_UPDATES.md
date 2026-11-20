@@ -1,6 +1,6 @@
 # Future updates
 
-These are ideas we've parked for later. The ones that are scheduled, and in what order, are in [ROADMAP.md](ROADMAP.md). Nate picks what's next.
+These are ideas we've parked for later. The ones that are scheduled, and in what order, are in [ROADMAP.md](../ROADMAP.md). Nate picks what's next.
 
 ## For other users (open-source prep)
 
