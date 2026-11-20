@@ -96,7 +96,7 @@ Some other useful commands:
 - [application-agent/README.md](application-agent/README.md) and [application-agent/automation/README.md](application-agent/automation/README.md): how the agent and its services fit together.
 - [docs/CASE_STUDY.md](docs/CASE_STUDY.md): the short portfolio version.
 - [docs/LEARNING.md](docs/LEARNING.md): notes on the bugs that taught me something.
-- [docs/ROADMAP.md](docs/ROADMAP.md): what's next, in order, and how I'll know each stage is done.
+- [ROADMAP.md](ROADMAP.md): what's next, in order, and how I'll know each stage is done.
 - [docs/FUTURE_UPDATES.md](docs/FUTURE_UPDATES.md): ideas I've parked for later.
 
 The repo also has a small React dashboard (`npm run dev`) that started as a hub for my other projects. That's where the "Atelier HQ" name in some files comes from.
