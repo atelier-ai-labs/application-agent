@@ -950,7 +950,9 @@ export function classifyLeverApplicationField(
   const smsConsent = isSmsConsentField(field);
   if (isAgeRequirementField(field)) return "legal_attestation";
   if (isEmploymentScreeningQuestion(field)) return "unknown";
-  const text = isAmbiguousYesNoControl(field) && !smsConsent ? fieldText(field) : directFieldPromptText(field);
+  // Underscores become spaces so ids like `question_race` still meet the word
+  // boundaries below (`_` counts as a word character in a regex).
+  const text = (isAmbiguousYesNoControl(field) && !smsConsent ? fieldText(field) : directFieldPromptText(field)).replace(/_/g, " ");
   const factField = profileFactField(field);
   const compactId = field.id.toLowerCase().replace(/[^a-z0-9]/g, "");
   // Ashby exposes the canonical applicant name control as this exact
@@ -965,13 +967,13 @@ export function classifyLeverApplicationField(
   // A text box that mentions résumés ("We know resumes only tell part of the
   // story...") is a question, not the upload; only a file control or a short
   // "Resume/CV" field is the upload.
-  if (hasPhrase(text, /resume|résumé|cv|curriculum vitae/) && !isResumeMentioningQuestion(field)) return "resume_upload";
+  if (hasPhrase(text, /resume|résumé|\bcv\b|curriculum vitae/) && !isResumeMentioningQuestion(field)) return "resume_upload";
   // Rippling's native resume dropzone exposes only its accepted extensions
   // ("Drop or select (.doc / .docx / .pdf)") and no Resume/CV text.
   if (field.type === "file" && hasPhrase(text, /drop\s+or\s+select|\.docx?|\.pdf/)) return "resume_upload";
   if (field.type === "file" && hasPhrase(text, /attachment|file upload|upload (?:a )?file|upload (?:a )?document/)) return "resume_upload";
   const genderOptions = field.options?.map((option) => normalized(option.label)).filter(Boolean) ?? [];
-  if (hasPhrase(text, /demographic|\bgender\b|transgender|sexual orientation|sexuality|race|ethnicity|hispanic|latino|veteran|disability|voluntary self|first[- ]generation/) || (field.type !== "textarea" && /\bpronouns?\b/.test(text)) ||
+  if (hasPhrase(text, /demographic|\bgender\b|transgender|sexual orientation|sexuality|\brac(?:es?|ial)\b|ethnicity|hispanic|latino|veteran|disability|voluntary self|first[- ]generation/) || (field.type !== "textarea" && /\bpronouns?\b/.test(text)) ||
     (genderOptions.includes("male") && genderOptions.includes("female") && genderOptions.some((option) => option === "non-binary" || option === "nonbinary"))) return "demographic";
   if (hasPhrase(text, /how did you hear|how did you learn|where did you hear|how did you discover|(?:job|role|opportunity) source|source of (?:this )?(?:job|role|opportunity)/)) return "unknown";
   if (smsConsent) return "legal_attestation";
@@ -983,10 +985,11 @@ export function classifyLeverApplicationField(
   if (isExactAcknowledgmentPrompt(text) || isPrivacyAcknowledgmentPrompt(text)) return "legal_attestation";
   // The visa disclaimer contains sponsorship language but is a legal
   // acknowledgment, not the candidate's sponsorship-required answer.
-  if (hasPhrase(text, /sponsor|visa|immigration status/)) return "sponsorship";
+  // Word boundaries: "advisable" is not "visa", "embrace" is not "race" (from PR #7).
+  if (hasPhrase(text, /\bsponsor|\bvisas?\b|immigration status/)) return "sponsorship";
   // "Degree or Certification Earned" names a credential, not a statement to certify.
   if (/\beducation\b/.test(sectionTitleOf(field)) || hasPhrase(text, /\binstitution\b|\bdegree or certification\b|\b(?:degree|certification) earned\b/)) return "education";
-  if (hasPhrase(text, /\blegal\b|attest|certif(?:y|ication)|agree to|authorize|terms|accurate and complete|sign your name for acknowledgement/)) return "legal_attestation";
+  if (hasPhrase(text, /\blegal\b|attest|certif(?:y|ication)|agree to|\bauthorize|\bterms\b|accurate and complete|sign your name for acknowledgement/)) return "legal_attestation";
   if (hasPhrase(text, /\bmost interesting problem\b|\byour take\b|\bwhy does it pull you in\b/)) return asFreeText();
   if (hasPhrase(text, /\b(?:ai|ml|machine\s+learning|aws|terraform|cloudformation|startup|early[ -]stage|production)\b/)) return asFreeText();
   if (hasPhrase(text, /salary|compensation|pay expectation|desired pay|desired annual compensation/)) {
@@ -1004,12 +1007,12 @@ export function classifyLeverApplicationField(
   // Overall experience ("total work experience in a similar role") is a résumé
   // summary for a reviewed draft; years with one named system stays unknown.
   if (hasPhrase(text, /\b(?:total|overall|relevant|prior) (?:work |professional )?experience\b/)) return asFreeText();
-  if (hasPhrase(text, /relocat/)) return "relocation";
-  if (hasPhrase(text, /travel/)) return "travel";
-  if (hasPhrase(text, /education|degree|university|college|school|major|study/)) return "education";
-  if (hasPhrase(text, /why|interest|motivat|cover letter|tell us|anything else|additional information/)) return asFreeText();
+  if (hasPhrase(text, /\brelocat/)) return "relocation";
+  if (hasPhrase(text, /\btravel/)) return "travel";
+  if (hasPhrase(text, /\beducation|\bdegree|\buniversit|\bcollege|\bschool|\bmajors?\b|\bstud(?:y|ied|ying)\b/)) return "education";
+  if (hasPhrase(text, /\bwhy\b|\binterest|\bmotivat|cover letter|tell us|anything else|additional information/)) return asFreeText();
   if (factField) return factField;
-  if (hasPhrase(text, /employ|employer|company|work history|job history|position held|job title|occupation|start date|end date/)) return "employment_history";
+  if (hasPhrase(text, /\bemploy|\bcompan(?:y|ies)\b|work history|job history|position held|job title|occupation|start date|end date/)) return "employment_history";
   // Contact (incl. email/e-mail) must win over bare "address" in location (e.g. "Email address").
   if (hasPhrase(text, /first name|given name|last name|family name|surname|full name|your name|applicant name|email|e-mail|phone|telephone|mobile|linkedin|portfolio|website/)) return "contact";
   // Whole words only: "capacity" contains "city" and "statement" contains "state".
