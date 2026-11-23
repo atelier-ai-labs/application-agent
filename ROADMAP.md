@@ -43,19 +43,26 @@ Goal: a busy week still produces applications, and my part takes about 5 minutes
 for two weeks straight, every daily run starts its applications, questions average under 1.5 per form on the
 replay set, and nothing waits more than a day without me hearing about it.
 
-#### AA-001 — One daily question round-up
+#### AA-001 — Answer every open question from one message
 
 - **Status:** planned
 - **Priority:** P1
-- **Goal:** Every open question across every application goes into one Slack message, so I clear them in one
-  sitting instead of a trickle all evening.
+- **Goal:** The "Waiting on you" board already lists every open question across every application in one
+  Slack message. Next, answer them from there too, so I clear everything in one sitting instead of jumping
+  between each application's message.
 
-**Why it matters:** Questions trickling in all evening is why a busy few days stopped every application.
+**Why it matters:** Questions trickling in all evening is why a busy few days stopped every application. The
+board shows them all at once; answering in one place is the last step.
 
 **Done when:**
-- One Slack message lists every open question across all applications.
-- Answering from that message unblocks the applications that were waiting.
+- I can answer the questions listed on the board with one reply to the board, covering several applications.
+- Answering there unblocks every application that was waiting, the same as answering in its own message.
 - The test suite passes.
+
+**Out of scope:** Changing how each application's own question message works (it keeps working as today).
+
+**References:** 201c967 ("Waiting on you" board, 2026-11-04), which covers "one message lists every open
+question"; each application's questions already arrive in one message with one numbered reply.
 
 #### AA-002 — Confirm before saving an answer
 
