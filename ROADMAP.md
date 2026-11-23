@@ -227,17 +227,6 @@ interruptions)
 - **Goal:** Track questions per application, the share of applications that reach Submit with no questions,
   fixes I make on the Submit card, and interviews per application.
 
-#### AA-014 — Workday support
-
-- **Status:** idea
-- **Priority:** P4
-- **Goal:** Apply to Workday postings.
-
-**Why it matters:** Big employers use it, but every company has its own Workday account with a password and
-sign-in. Only worth doing if the numbers say Workday jobs are a large share of the good matches.
-
-**Depends on:** AA-013
-
 ### Stage 4 — Other people can use it (2–3 months out)
 
 Goal: someone who isn't me can install it and get their first application out in one evening. The stage is
@@ -292,6 +281,7 @@ done when one other person uses it for two weeks with only the docs to go on.
 
 ## Future ideas
 
+- **Workday support:** Apply to Workday postings.
 - Redo command: a Slack command to restart an application from scratch.
 - Title-drift check: flag when the posting's title differs from the tracker row's.
 - Structured output for unknown questions: map a question to a known answer topic as strict JSON with a
