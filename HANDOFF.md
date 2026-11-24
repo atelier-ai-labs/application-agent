@@ -273,6 +273,9 @@ the day (6cba053). Everything after that is on the branch only.
   Each alert key repeats at most once a day (`alerts-sent.v0` in state).
   `ATELIER_AGENT_ALERTS=disabled` turns off the listener checks. The Muse 404 should produce the
   first real alert on the next daily run.
+- **Age wording (11-23, ece0cb6):** "Are you over the age of 18?" now answers Yes like "18 or older".
+  Host NOT restarted yet (Hex's window was open on a post-Submit CAPTCHA), so the running host still
+  has the old rule; Supabase's age question was left for Nate to tap.
 - **Hex checkbox group (11-23, f9a89b6):** Ashby names group boxes `q[]`, `q[]--2`; `checkboxGroupKey`
   only knew Greenhouse's `q[]_0`, so each box went to Slack as a bare Yes/No. Fixed, plus the
   work-location rule now matches "from where do you intend to work?" and reads
