@@ -18,19 +18,6 @@ export function stringValue(value: unknown): string | undefined {
     : undefined;
 }
 
-export function finiteNumber(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-
-  if (typeof value === "string" && value.trim().length > 0) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : undefined;
-  }
-
-  return undefined;
-}
-
 export function timestampFrom(...values: unknown[]): string | undefined {
   for (const value of values) {
     const candidate = stringValue(value);
@@ -96,12 +83,4 @@ export function unavailableSnapshot(
     activities,
     fetchedAt: now(),
   };
-}
-
-export function nestedRecord(
-  record: Record<string, unknown>,
-  key: string,
-): Record<string, unknown> | undefined {
-  const value = record[key];
-  return isRecord(value) ? value : undefined;
 }

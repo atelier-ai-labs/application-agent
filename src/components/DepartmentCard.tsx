@@ -56,6 +56,8 @@ export function DepartmentCard({ config, index }: { config: DepartmentConfig; in
         ) : null}
         {resource.errorMessage ? (
           <p className="data-note">{resource.errorMessage}</p>
+        ) : metric?.state === "unavailable" && metric.note ? (
+          <p className="data-note">{metric.note}</p>
         ) : null}
       </div>
 

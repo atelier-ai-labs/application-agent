@@ -117,7 +117,3 @@ export const nhlIntelligenceAdapter: DepartmentAdapter = {
     };
   },
 };
-
-export function isNhlResponse(payload: unknown): boolean {
-  return standingsRows(payload);
-}

@@ -1,6 +1,6 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 import { AppRoutes } from "../src/App";
 import { clearDepartmentCache, type AdapterRegistry } from "../src/hooks/useDepartmentData";
 import type { DepartmentAdapter } from "../src/departments/adapters/types";
@@ -44,7 +44,42 @@ describe("Atelier HQ routes and resilient states", () => {
 
     expect(screen.getByRole("heading", { name: "Quant Intelligence" })).toBeInTheDocument();
     expect(screen.getByText("Project profile")).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByText("API base URL not configured")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText(/Not connected yet/).length).toBeGreaterThanOrEqual(1));
+  });
+
+  it("survives moving between a real department and an unknown id in the same router", async () => {
+    clearDepartmentCache();
+    let go: (path: string) => void = () => {};
+    function Navigator() {
+      const navigate = useNavigate();
+      go = (path) => navigate(path);
+      return null;
+    }
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(
+      <MemoryRouter initialEntries={["/departments/no-such-department"]}
+        future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+        <Navigator />
+        <Routes>
+          <Route path="/departments/:departmentId" element={<DepartmentPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    act(() => go("/departments/quant-intelligence"));
+    expect(screen.getByRole("heading", { name: "Quant Intelligence" })).toBeInTheDocument();
+    act(() => go("/departments/no-such-department"));
+    expect(screen.queryByRole("heading", { name: "Quant Intelligence" })).not.toBeInTheDocument();
+    act(() => go("/departments/nhl-intelligence"));
+    expect(screen.getByRole("heading", { name: "NHL Intelligence" })).toBeInTheDocument();
+    const logged = errors.mock.calls.map((c) => c.map(String).join(" ")).join("\n");
+    errors.mockRestore();
+    expect(logged).not.toMatch(/order of Hooks|Rendered (more|fewer) hooks|Internal React error/);
+  });
+
+  it("shows why Quant has no number on the overview card", async () => {
+    clearDepartmentCache();
+    renderAt("/");
+    await waitFor(() => expect(screen.getByText(/Not connected yet/)).toBeInTheDocument());
   });
 
   it("renders a validated live metric from an adapter", async () => {

@@ -9,9 +9,5 @@ export const adapters: Readonly<Record<string, DepartmentAdapter>> = {
   [quantIntelligenceAdapter.id]: quantIntelligenceAdapter,
 };
 
-export function getAdapter(adapterId: string): DepartmentAdapter | undefined {
-  return adapters[adapterId];
-}
-
 export { applicationAgentAdapter, nhlIntelligenceAdapter, quantIntelligenceAdapter };
 export type { AdapterRequestContext, DepartmentAdapter } from "./types";

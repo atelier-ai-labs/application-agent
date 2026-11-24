@@ -149,7 +149,7 @@ export const quantIntelligenceAdapter: DepartmentAdapter = {
     if (!apiBaseUrl) {
       return unavailableSnapshot(
         METRIC_LABEL,
-        "API base URL not configured",
+        "Not connected yet: Quant Intelligence runs locally and has no hosted API, so there's no live number to show.",
         "Quant Intelligence API",
         now,
       );
@@ -231,7 +231,3 @@ export const quantIntelligenceAdapter: DepartmentAdapter = {
     };
   },
 };
-
-export function isQuantResponse(payload: unknown): boolean {
-  return isExperimentList(payload) || isExperimentDetail(payload);
-}

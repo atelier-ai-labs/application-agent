@@ -6,6 +6,7 @@ import { MetricValue } from "../components/MetricValue";
 import { useDepartmentData } from "../hooks/useDepartmentData";
 import type { AdapterRegistry } from "../hooks/useDepartmentData";
 import { getDepartment } from "../departments/config";
+import type { DepartmentConfig } from "../types/department";
 import { formatRelativeTime, stateClass, stateLabel } from "../lib/format";
 
 function ExternalResourceLink({ href, children }: { href: string; children: React.ReactNode }) {
@@ -25,6 +26,12 @@ export function DepartmentPage({ registry }: { registry?: AdapterRegistry } = {}
     return <DepartmentNotFound />;
   }
 
+  // The data hook lives in DepartmentDetail, so this component's hook count never depends on whether the
+  // id is valid (React throws if it changes between renders). The key gives each department fresh state.
+  return <DepartmentDetail key={config.id} config={config} registry={registry} />;
+}
+
+function DepartmentDetail({ config, registry }: { config: DepartmentConfig; registry?: AdapterRegistry }) {
   const resource = useDepartmentData(config, { registry });
   const metric = resource.data?.metric;
   const activities = resource.data?.activities ?? [];
