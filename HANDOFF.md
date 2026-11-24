@@ -273,6 +273,15 @@ the day (6cba053). Everything after that is on the branch only.
   Each alert key repeats at most once a day (`alerts-sent.v0` in state).
   `ATELIER_AGENT_ALERTS=disabled` turns off the listener checks. The Muse 404 should produce the
   first real alert on the next daily run.
+- **Standing-topic model ON (11-23, 0b1b067).** Off switch: `ATELIER_CAREER_AGENT_STANDING_TOPIC_MODEL=disabled`.
+  Additive only; rule matches are checked by the model only for `ruleNeedsCheck` topics
+  (security_clearance, certifications). Eval: main 78/8/0, held-out 25/5/0 (held-out partly tuned
+  now: write fresh cases before the next prompt change). Replay off→on 167→166, nothing lost.
+  New standing answers set by Nate: military No, clearance No, notice 2 weeks, certifications None,
+  work_location "Remote from Pittsburgh, PA". Profile `identity.location` → Pittsburgh (street and
+  ZIP unchanged; backup in .local/career-agent/profile.json.before-pittsburgh-*.backup).
+  WSL memory raised to 10GB by Nate (.wslconfig): it had 7.3GB with swap full and Ollama under
+  memory pressure (model was on the GPU all along).
 - **Standing-topic eval + model matcher (11-23, 15f3c50), NOT switched on.**
   `npm run career-agent:eval-topics [-- --holdout|--rules-only]`. Cases in
   `application-agent/evals/standing-topic-{cases,holdout}.json`; when a held-out case drives a
