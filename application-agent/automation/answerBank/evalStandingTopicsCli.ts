@@ -57,7 +57,7 @@ const line = (name: string, summary: TopicSummary) =>
 console.log("");
 console.log(line("Rules only", summarize(results, "rules")));
 if (classifier) console.log(line("Rules + model", summarize(results, "combined")));
-if (checker) console.log(line("+ check rules", summarize(results, "checked")));
+if (checker) console.log(line("Agent (checked)", summarize(results, "checked")));
 console.log(`model ${classifier ? model : "(not used)"} · prompt ${STANDING_TOPIC_PROMPT_VERSION}`);
 
 mkdirSync(OUT_DIR, { recursive: true });

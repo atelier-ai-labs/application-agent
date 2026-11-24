@@ -1,4 +1,4 @@
-import { STANDING_TOPICS, type StandingTopicChecker, type StandingTopicClassifier, type StandingTopicId } from "../../src/domain/answerBank";
+import { STANDING_TOPICS, type StandingTopicChecker, type StandingTopicClassifier, type StandingTopicId, type StandingTopicModel } from "../../src/domain/answerBank";
 import { promptVersion, type ModelCallLogger } from "../modelCallLog";
 import { OLLAMA_KEEP_ALIVE } from "./ollamaAnswerBankMatcher";
 
@@ -198,4 +198,9 @@ export function createOllamaStandingTopicClassifier(options: OllamaStandingTopic
       clearTimeout(timer);
     }
   };
+}
+
+/** Both steps, as the agent uses them. */
+export function createOllamaStandingTopicModel(options: OllamaStandingTopicClassifierOptions): StandingTopicModel {
+  return { classify: createOllamaStandingTopicClassifier(options), check: createOllamaStandingTopicChecker(options) };
 }

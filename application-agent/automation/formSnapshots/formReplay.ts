@@ -10,7 +10,7 @@ import { LeverBrowserExecutor } from "../../src/domain/leverBrowserExecutor";
 import { normalizeJobPosting } from "../../src/domain/job";
 import { buildDraftAnswer, prepareApplicationAnswers } from "../../src/domain/answers";
 import { classifyJobUrl } from "../../src/domain/jobUrlClassifier";
-import { findAnswerBankMatch, questionFromBlocker, type AnswerBankEntry, type AnswerBankSemanticMatcher, type StandingRecordsLookup } from "../../src/domain/answerBank";
+import { findAnswerBankMatch, questionFromBlocker, type AnswerBankEntry, type AnswerBankSemanticMatcher, type StandingRecordsLookup, type StandingTopicModel } from "../../src/domain/answerBank";
 import type { FormSnapshot } from "./formSnapshot";
 
 /**
@@ -137,7 +137,7 @@ export function snapshotKey(snapshot: FormSnapshot): string {
 
 export async function replayForm(
   snapshot: FormSnapshot,
-  options: { profile: CandidateProfile; answerBank?: readonly AnswerBankEntry[]; matcher?: AnswerBankSemanticMatcher; records?: StandingRecordsLookup; now?: string; showValues?: boolean; answers?: readonly ApplicationAnswer[]; compensation?: JobPosting["compensation"] },
+  options: { profile: CandidateProfile; answerBank?: readonly AnswerBankEntry[]; matcher?: AnswerBankSemanticMatcher; topicModel?: StandingTopicModel; records?: StandingRecordsLookup; now?: string; showValues?: boolean; answers?: readonly ApplicationAnswer[]; compensation?: JobPosting["compensation"] },
 ): Promise<FormReplay> {
   const now = options.now ?? new Date().toISOString();
   const session = new ReplaySession(snapshot);
@@ -175,7 +175,7 @@ export async function replayForm(
     if (outcome === "asked" && blocker && options.answerBank) {
       const match = await findAnswerBankMatch(options.answerBank, questionFromBlocker({
         ...blocker, context: { company: base.company, role: base.role } as never, status: "open",
-      } as never), options.matcher, options.records);
+      } as never), options.matcher, options.records, options.topicModel);
       if (match) outcome = "bank";
     }
     const prompt = (field.questionDescriptor?.promptText ?? field.fullPrompt ?? "").replace(/\s+/g, " ").trim().slice(0, 160);

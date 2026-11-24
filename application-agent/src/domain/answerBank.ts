@@ -82,6 +82,13 @@ export const STANDING_TOPICS: readonly {
   textOnly?: boolean;
   /** The value for a Yes/No list, when the standing value is text ("None" → "No"). */
   asYesNo?: (value: string) => "Yes" | "No" | undefined;
+  /**
+   * The wording rules for this topic keep matching look-alike questions ("a
+   * clearance that has since lapsed", "certifications you'd like us to
+   * sponsor"), so a rule match also needs the model's check, when the model is
+   * on. Only for topics where the eval showed this (2026-11-23).
+   */
+  ruleNeedsCheck?: boolean;
 }[] = [
   { id: "criminal_conviction", label: "Convicted of, or pled guilty / no contest to, a crime", pattern: /\bconvicted\b|\bple(?:d|aded) guilty\b|\bnolo contendere\b|\bno contest\b/ },
   { id: "terminated", label: "Fired, or asked to resign", pattern: /\b(?:been|were you|ever been) (?:fired|terminated|discharged|dismissed)\b|\basked to resign\b/ },
@@ -116,10 +123,11 @@ export const STANDING_TOPICS: readonly {
   },
   {
     id: "security_clearance", label: "Currently holds an active security clearance",
+    ruleNeedsCheck: true,
     pattern: /\b(?:hold|have|possess)\b.{0,40}\bclearance\b|\b(?:active|current)\b.{0,30}\bclearance\b/,
     // Being able to get one is a different question with a different answer.
     // "Ever held one in the past" is a different fact from holding one now (topic eval, 2026-11-23).
-    exclude: /\b(?:obtain|eligib\w*|able to (?:get|acquire|receive)|willing to|maintain|sponsor|ever held|previously held|in the past)\b/,
+    exclude: /\b(?:obtain|eligib\w*|able to (?:get|acquire|receive)|willing to|maintain|sponsor|ever held|previously held|in the past|previous|prior|former)\b/,
   },
   {
     id: "military_service", label: "Veteran, or served in the military",
@@ -139,10 +147,11 @@ export const STANDING_TOPICS: readonly {
   },
   {
     id: "certifications", label: "Professional certifications you hold (or None)",
+    ruleNeedsCheck: true,
     pattern: /\b(?:list|what|which|any|relevant)\b.{0,30}\bcertifications?\b|\bcertifications?\b.{0,30}\b(?:you (?:have|hold)|held)\b/,
     // A question about one named certification is answered per form.
     // "Working toward" or "pursuing" asks about future ones (topic eval, 2026-11-23).
-    exclude: /\b(?:aws|azure|gcp|google|cissp|security\+?|comptia|pmp|cka|ckad|terraform|kubernetes|scrum|itil|ccna|cpa|license)\b|\b(?:working (?:toward|towards|on)|pursuing|planning to|studying for)\b/,
+    exclude: /\b(?:aws|azure|gcp|google|cissp|security\+?|comptia|pmp|cka|ckad|terraform|kubernetes|scrum|itil|ccna|cpa|license)\b|\b(?:working (?:toward|towards|on)|pursuing|planning to|plan to|hop(?:e|ing) to|want to|studying for|earn)\b/,
     anyPhrasing: true,
     asYesNo: (value) => /^(?:none|no)\b/i.test(value.trim()) ? "No" : value.trim() ? "Yes" : undefined,
   },
@@ -170,6 +179,29 @@ export type StandingTopicClassifier = (
 
 /** The model's narrow check of one topic for one question: does the saved answer fit? */
 export type StandingTopicChecker = (topic: StandingTopicId, question: AnswerBankQuestion) => Promise<"yes" | "no" | "error">;
+
+/**
+ * The model step; on when the local model is configured
+ * (ATELIER_CAREER_AGENT_STANDING_TOPIC_MODEL). `classify` already runs its own
+ * check before naming a topic; `check` is kept for the eval.
+ */
+export interface StandingTopicModel {
+  classify: StandingTopicClassifier;
+  check: StandingTopicChecker;
+}
+
+/**
+ * Only questions shaped like a standing one are sent to the model, so ordinary
+ * fields (name, email, "why us") don't each cost a model call.
+ */
+export function isStandingTopicCandidate(question: Pick<AnswerBankQuestion, "question" | "fieldType" | "options">): boolean {
+  const options = (question.options ?? []).map((option) => normalizedText(option).replace(/[^a-z]/g, ""));
+  const yesNo = options.length === 2 && options.includes("yes") && options.includes("no");
+  const textBox = options.length === 0 && (question.fieldType === "text" || question.fieldType === "textarea");
+  if (!yesNo && !textBox) return false;
+  const text = normalizedText(innerQuestion(question.question));
+  return text.length <= 300 && /\?|^(?:have|are|do|did|were|is|has|can|would|will|which|what|where|how|if)\b/.test(text);
+}
 
 export const STANDING_TOPIC_MODEL_CONFIDENCE = 0.85;
 
@@ -450,11 +482,25 @@ export async function findAnswerBankMatch(
   question: AnswerBankQuestion,
   semanticMatcher?: AnswerBankSemanticMatcher,
   records?: StandingRecordsLookup,
+  topicModel?: StandingTopicModel,
 ): Promise<AnswerBankMatch | undefined> {
   if (isOpaqueQuestion(question.question)) return undefined;
   const experience = experienceMatch(entries, question);
   if (experience) return experience;
-  const topic = standingTopicFor(question.question, question.company);
+  const hasStanding = (id: StandingTopicId) => entries.some((candidate) => candidate.topic === id && !candidate.disabled);
+  let topic = standingTopicFor(question.question, question.company);
+  // Checking every rule match was tried and cost six correct answers on the 57
+  // saved forms (felony, liens, work location), so only the topics whose rules
+  // proved leaky are checked. A model error keeps today's behavior.
+  if (topic && topicModel && hasStanding(topic) && STANDING_TOPICS.find((candidate) => candidate.id === topic)?.ruleNeedsCheck) {
+    const verdict = await topicModel.check(topic, question).catch(() => "error" as const);
+    if (verdict === "no") return undefined;
+  }
+  // No rule matched: the model may recognize the wording.
+  if (!topic && topicModel && isStandingTopicCandidate(question)) {
+    const picked = acceptedModelTopic(question, await topicModel.classify(question).catch(() => undefined));
+    if (picked && hasStanding(picked)) topic = picked;
+  }
   if (topic) {
     const definition = STANDING_TOPICS.find((candidate) => candidate.id === topic);
     const entry = entries.find((candidate) => candidate.topic === topic && !candidate.disabled);

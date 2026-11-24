@@ -1,4 +1,4 @@
-import { acceptedModelTopic, standingTopicFor, type StandingTopicChecker, type StandingTopicClassifier, type StandingTopicId } from "../../src/domain/answerBank";
+import { STANDING_TOPICS, acceptedModelTopic, standingTopicFor, type StandingTopicChecker, type StandingTopicClassifier, type StandingTopicId } from "../../src/domain/answerBank";
 
 /**
  * Scores how well questions are matched to standing topics (2026-11-23).
@@ -29,7 +29,7 @@ export interface TopicResult {
   combined?: StandingTopicId;
   /** The model's check of the rules' own pick. */
   ruleCheck?: "yes" | "no" | "error";
-  /** Like combined, but a rule pick also has to pass the model's check. */
+  /** What the agent does: combined, plus the model's check on rule picks for topics marked ruleNeedsCheck. */
   checked?: StandingTopicId;
   outcomes: { rules: TopicOutcome; combined: TopicOutcome; checked: TopicOutcome };
 }
@@ -52,7 +52,8 @@ export async function scoreStandingTopicCase(testCase: StandingTopicCase, classi
   // The model is only asked when the rules found nothing, as in the agent.
   const model = rules === undefined && classifier ? await classifier(question) : undefined;
   const combined = rules ?? acceptedModelTopic(question, model);
-  const ruleCheck = rules && checker ? await checker(rules, question) : undefined;
+  // As in the agent: only topics marked ruleNeedsCheck have their rule match checked.
+  const ruleCheck = rules && checker && STANDING_TOPICS.find((topic) => topic.id === rules)?.ruleNeedsCheck ? await checker(rules, question) : undefined;
   const checked = rules ? (ruleCheck === "no" ? undefined : rules) : combined;
   return {
     id: testCase.id,

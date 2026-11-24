@@ -122,7 +122,7 @@ import {
 } from "../domain/jobUrlClassifier";
 import { isVerifiedAshbyApplicationUrl, isVerifiedAshbyHostedUrl } from "../domain/jobUrlClassifier";
 import { isPostSubmitHumanCheck } from "../domain/applicationReceipt";
-import { answerBankKey, answerRiskTier, findAnswerBankMatch, isBankableQuestion, questionFromBlocker, standingRecordsFromJobs, withRecordedAnswer, type AnswerBankEntry, type AnswerBankSemanticMatcher, type AnswerBankStore } from "../domain/answerBank";
+import { answerBankKey, answerRiskTier, findAnswerBankMatch, isBankableQuestion, questionFromBlocker, standingRecordsFromJobs, withRecordedAnswer, type AnswerBankEntry, type AnswerBankSemanticMatcher, type AnswerBankStore, type StandingTopicModel } from "../domain/answerBank";
 import { isVerifiedLeverApplicationUrl, isVerifiedLeverHostedUrl } from "../domain/leverJobSource";
 
 let fallbackId = 0;
@@ -166,6 +166,8 @@ export interface CareerAgentDependencies {
   answerBank?: AnswerBankStore;
   /** Optional local-model matcher for low-risk questions worded differently. */
   answerBankMatcher?: AnswerBankSemanticMatcher;
+  /** The local model recognizing standing questions the wording rules miss (2026-11-23). */
+  standingTopicModel?: StandingTopicModel;
   /**
    * The search settings as they are now (search-intent.json), read for every
    * job. A campaign keeps the criteria it was created with, so settings added
@@ -805,6 +807,7 @@ export class CareerAgentService {
   private readonly confirmPostSubmitDone?: (campaignId: string, jobId: string) => Promise<CareerJob>;
   private readonly answerBank?: AnswerBankStore;
   private readonly answerBankMatcher?: AnswerBankSemanticMatcher;
+  private readonly standingTopicModel?: StandingTopicModel;
   private readonly liveSearchPolicy?: () => LiveSearchPolicy | undefined;
   private readonly attentionResponseInFlight = new Map<
     string,
@@ -836,6 +839,7 @@ export class CareerAgentService {
     this.confirmPostSubmitDone = dependencies.confirmPostSubmitDone;
     this.answerBank = dependencies.answerBank;
     this.answerBankMatcher = dependencies.answerBankMatcher;
+    this.standingTopicModel = dependencies.standingTopicModel;
     this.liveSearchPolicy = dependencies.liveSearchPolicy;
   }
 
@@ -3527,7 +3531,7 @@ export class CareerAgentService {
       let entries;
       try { entries = this.answerBank.entries(); } catch { return current; }
       const match = await findAnswerBankMatch(entries, questionFromBlocker(blocker), this.answerBankMatcher,
-        standingRecordsFromJobs(this.careerRepository.listJobs(), current.id));
+        standingRecordsFromJobs(this.careerRepository.listJobs(), current.id), this.standingTopicModel);
       if (!match) continue;
       current = await this.resolveCareerBlocker(campaign.id, current.id, blocker.id, match.value, {
         deferResume: true,
@@ -3591,7 +3595,7 @@ export class CareerAgentService {
           let entries;
           try { entries = this.answerBank.entries(); } catch { entries = undefined; }
           const match = entries ? await findAnswerBankMatch(entries, question, this.answerBankMatcher,
-            standingRecordsFromJobs(this.careerRepository.listJobs(), current.id)) : undefined;
+            standingRecordsFromJobs(this.careerRepository.listJobs(), current.id), this.standingTopicModel) : undefined;
           // Only the answer just given travels now; older bank entries already
           // had their chance when this form was first read.
           if (match && match.entry.jobId === sourceJobId) {
@@ -3645,7 +3649,7 @@ export class CareerAgentService {
         if (blocker.status !== "open" || blocker.unit !== "submission" || questionProvenanceForBlocker(blocker) !== "ATS_FORM") continue;
         if (blocker.evidence.includes(ANSWER_BANK_REJECTED)) continue;
         const match = await findAnswerBankMatch(entries, questionFromBlocker(blocker), this.answerBankMatcher,
-          standingRecordsFromJobs(this.careerRepository.listJobs(), current.id));
+          standingRecordsFromJobs(this.careerRepository.listJobs(), current.id), this.standingTopicModel);
         if (!match) continue;
         current = await this.resolveCareerBlocker(current.campaignId, current.id, blocker.id, match.value, {
           deferResume: true,

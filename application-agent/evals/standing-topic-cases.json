@@ -932,6 +932,27 @@
    "fieldType": "textarea",
    "question": "Are you currently working toward any certifications?",
    "expected": "none"
+  },
+  {
+   "id": "ho2-clearance-was",
+   "source": "made-up",
+   "company": "Contoso",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Did you hold a government clearance at any previous job?",
+   "expected": "none",
+   "note": "Past clearance, not a current one."
+  },
+  {
+   "id": "ho2-certs-plans",
+   "source": "made-up",
+   "company": "Contoso",
+   "fieldType": "textarea",
+   "question": "Which certifications are you hoping to earn in the next year?",
+   "expected": "none"
   }
  ]
 }

@@ -1,3 +1,4 @@
+import { createOllamaStandingTopicModel } from "../answerBank/ollamaStandingTopicClassifier";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadEnv } from "vite";
@@ -44,6 +45,7 @@ export async function runReplayCli(argv: readonly string[] = process.argv.slice(
   bankStore.close();
   const model = env.ATELIER_CAREER_AGENT_OLLAMA_MODEL?.trim();
   const matcher = argv.includes("--with-model") && model ? createOllamaAnswerBankMatcher({ model }) : undefined;
+  const topicModel = argv.includes("--with-model") && model ? createOllamaStandingTopicModel({ model }) : undefined;
 
   const replays: FormReplay[] = [];
   const only = argv.includes("--form") ? argv[argv.indexOf("--form") + 1]?.toLowerCase() : undefined;
@@ -55,7 +57,7 @@ export async function runReplayCli(argv: readonly string[] = process.argv.slice(
     const live = jobs.find((job) => job.applicationId === snapshot.applicationId);
     const records = standingRecordsFromJobs(jobs, live?.id);
     const compensation = live?.job.compensation;
-    replays.push(await replayForm(snapshot, { profile, answerBank: bank, ...(matcher ? { matcher } : {}), records, showValues, ...(compensation ? { compensation } : {}) }));
+    replays.push(await replayForm(snapshot, { profile, answerBank: bank, ...(matcher ? { matcher } : {}), ...(topicModel ? { topicModel } : {}), records, showValues, ...(compensation ? { compensation } : {}) }));
   }
 
   console.log("Form                                              fields  filled  bank  ask  blank");

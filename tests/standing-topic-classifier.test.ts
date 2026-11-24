@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { acceptedModelTopic, standingTopicFor } from "../application-agent/src/domain/answerBank";
+import { acceptedModelTopic, findAnswerBankMatch, standingTopicFor, withStandingAnswer } from "../application-agent/src/domain/answerBank";
 import { createOllamaStandingTopicChecker, createOllamaStandingTopicClassifier } from "../application-agent/automation/answerBank/ollamaStandingTopicClassifier";
 import { outcomeFor, scoreStandingTopicCase, summarize } from "../application-agent/automation/answerBank/standingTopicEval";
 
@@ -55,6 +55,8 @@ describe("standing topic from the local model (2026-11-23)", () => {
     expect(standingTopicFor("Are you able to perform the essential functions of the position with or without reasonable accommodations?")).toBe("essential_functions");
     expect(standingTopicFor("Have you ever held a security clearance in the past?")).toBeUndefined();
     expect(standingTopicFor("Are you currently working toward any certifications?")).toBeUndefined();
+    expect(standingTopicFor("Did you hold a government clearance at any previous job?")).toBeUndefined();
+    expect(standingTopicFor("Which certifications are you hoping to earn in the next year?")).toBeUndefined();
   });
 
   it("scores right, asked and wrong, with the check able to overrule a rule", async () => {
@@ -66,5 +68,32 @@ describe("standing topic from the local model (2026-11-23)", () => {
       undefined, async () => "no");
     expect(result.outcomes).toEqual({ rules: "correct", combined: "correct", checked: "missed" });
     expect(summarize([result], "checked")).toEqual({ correct: 0, missed: 1, wrong: 0, total: 1 });
+  });
+});
+
+describe("the answer lookup with the topic model on", () => {
+  const now = "2026-11-23T23:00:00.000Z";
+  const entries = withStandingAnswer(withStandingAnswer([], "related_to_employee", "No", now), "security_clearance", "No", now);
+  const model = (topic: string, check: "yes" | "no" | "error" = "yes") => ({
+    classify: async () => ({ topic: topic as never, confidence: 1 }),
+    check: async () => check,
+  });
+
+  it("answers a reworded question the rules miss", async () => {
+    const match = await findAnswerBankMatch(entries, { question: "Is anyone in your family an Acme employee?", company: "Acme", ...yesNo }, undefined, undefined, model("related_to_employee"));
+    expect(match?.value).toBe("No");
+    expect(await findAnswerBankMatch(entries, { question: "Is anyone in your family an Acme employee?", company: "Acme", ...yesNo })).toBeUndefined();
+  });
+
+  it("checks a rule match only on the leaky topics, and keeps today's answer when the model errors", async () => {
+    const clearance = { question: "Do you currently hold an active security clearance?", ...yesNo };
+    expect(await findAnswerBankMatch(entries, clearance, undefined, undefined, model("none", "no"))).toBeUndefined();
+    expect((await findAnswerBankMatch(entries, clearance, undefined, undefined, model("none", "error")))?.value).toBe("No");
+    const related = { question: "Are you related to anyone at Acme?", company: "Acme", ...yesNo };
+    expect((await findAnswerBankMatch(entries, related, undefined, undefined, model("none", "no")))?.value).toBe("No");
+  });
+
+  it("never uses a topic with no saved answer", async () => {
+    expect(await findAnswerBankMatch(entries, { question: "How much notice must you give?", fieldType: "text" }, undefined, undefined, model("notice_period"))).toBeUndefined();
   });
 });

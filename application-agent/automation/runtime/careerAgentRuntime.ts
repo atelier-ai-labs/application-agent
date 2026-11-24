@@ -79,6 +79,7 @@ import type { ExecutionReviewEntry } from "../../src/domain/executor";
 import { gmailInbox, type InboxSource } from "../gmailInbox";
 import { createGoogleOAuthAccessTokenProvider, gmailSecurityCodesEnabled, resolveGoogleAuthMode } from "../googleOAuth";
 import { createOllamaAnswerBankMatcher } from "../answerBank/ollamaAnswerBankMatcher";
+import { createOllamaStandingTopicModel } from "../answerBank/ollamaStandingTopicClassifier";
 import { isUsableResumeArtifact } from "../resume/resumeArtifact";
 import { normalizeJobSearchIntent, searchCriteriaFromJobSearchIntent, type JobSearchIntent } from "../../src/domain/searchIntent";
 import { DEFAULT_CAREER_AGENT_STATE_DB, openStateStorage, stateDatabasePath } from "./stateStorage";
@@ -177,6 +178,7 @@ export interface BackgroundCareerAgentRuntimeOptions {
   postingEnricher?: (input: import("../../src/domain/types").JobIntakeInput) => Promise<import("../../src/domain/types").JobIntakeInput>;
   answerBank?: import("../../src/domain/answerBank").AnswerBankStore;
   answerBankMatcher?: import("../../src/domain/answerBank").AnswerBankSemanticMatcher;
+  standingTopicModel?: import("../../src/domain/answerBank").StandingTopicModel;
   /** Current search settings for the pre-apply check (see CareerAgentService). */
   liveSearchPolicy?: () => import("../../src/service/careerAgentService").LiveSearchPolicy | undefined;
   /** Read-only inbox checked for "thanks for applying" emails while a job waits on DONE. */
@@ -593,6 +595,7 @@ export class BackgroundCareerAgentRuntimeImpl implements BackgroundCareerAgentRu
         ...(options.postingEnricher ? { postingEnricher: options.postingEnricher } : {}),
         ...(options.answerBank ? { answerBank: options.answerBank } : {}),
         ...(options.answerBankMatcher ? { answerBankMatcher: options.answerBankMatcher } : {}),
+        ...(options.standingTopicModel ? { standingTopicModel: options.standingTopicModel } : {}),
         ...(options.liveSearchPolicy ? { liveSearchPolicy: options.liveSearchPolicy } : {}),
         ...(this.executionHost
           ? {
@@ -1656,7 +1659,7 @@ function parsePositiveInteger(value: string | undefined, fallback: number, label
  * When the local model is configured it also matches low-risk questions
  * worded differently from the saved ones.
  */
-function createConfiguredAnswerBank(env: Partial<Record<"ATELIER_CAREER_AGENT_ANSWER_BANK" | "ATELIER_CAREER_AGENT_ANSWER_BANK_FILE" | "ATELIER_CAREER_AGENT_OLLAMA_MODEL" | "ATELIER_CAREER_AGENT_OLLAMA_BASE_URL", string | undefined>>, logger?: ModelCallLogger, stateFilePath?: string) {
+function createConfiguredAnswerBank(env: Partial<Record<"ATELIER_CAREER_AGENT_ANSWER_BANK" | "ATELIER_CAREER_AGENT_ANSWER_BANK_FILE" | "ATELIER_CAREER_AGENT_OLLAMA_MODEL" | "ATELIER_CAREER_AGENT_OLLAMA_BASE_URL" | "ATELIER_CAREER_AGENT_STANDING_TOPIC_MODEL", string | undefined>>, logger?: ModelCallLogger, stateFilePath?: string) {
   const setting = env.ATELIER_CAREER_AGENT_ANSWER_BANK?.trim() || "enabled";
   if (setting === "disabled") return {};
   if (setting !== "enabled") throw new Error("ATELIER_CAREER_AGENT_ANSWER_BANK must be enabled or disabled.");
@@ -1666,6 +1669,11 @@ function createConfiguredAnswerBank(env: Partial<Record<"ATELIER_CAREER_AGENT_AN
     // In the state database (answer_bank table) since 2026-11-17.
     answerBank: openAnswerBankStore(env, stateDatabasePath(stateFilePath)),
     ...(model ? { answerBankMatcher: createOllamaAnswerBankMatcher({ model, ...(baseUrl ? { baseUrl } : {}), ...(logger ? { logger } : {}) }) } : {}),
+    // On with the local model unless ATELIER_CAREER_AGENT_STANDING_TOPIC_MODEL=disabled
+    // (2026-11-23; measured by `npm run career-agent:eval-topics`).
+    ...(model && env.ATELIER_CAREER_AGENT_STANDING_TOPIC_MODEL?.trim() !== "disabled"
+      ? { standingTopicModel: createOllamaStandingTopicModel({ model, ...(baseUrl ? { baseUrl } : {}), ...(logger ? { logger } : {}) }) }
+      : {}),
   };
 }
 
