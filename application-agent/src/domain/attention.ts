@@ -1,5 +1,6 @@
 import type { CareerBlocker, CareerBlockerKind, QuestionProvenance } from "./campaignTypes";
 import type { JobCompensation } from "./types";
+import { withCheckboxLabel } from "./answerBank";
 
 /** `resume_choice`: a posting matched two résumés equally, before any application exists. */
 export type AttentionEventType = "needs_input" | "configuration_required" | "resume_choice";
@@ -440,9 +441,11 @@ function questionKind(options: readonly AttentionOption[]): AttentionQuestionKin
 
 export function questionForBlocker(blocker: CareerBlocker): AttentionQuestion | undefined {
   if (!isHumanAttentionBlockerKind(blocker.kind)) return undefined;
-  const prompt = promptFor(blocker);
-  if (!prompt || !blocker.context.applicationId) return undefined;
+  const groupPrompt = promptFor(blocker);
+  if (!groupPrompt || !blocker.context.applicationId) return undefined;
   const options = questionOptions(blocker);
+  // A box in a checkbox group: show which box the Yes/No is about.
+  const prompt = withCheckboxLabel(groupPrompt, evidenceValue(blocker, "field-type:", 32), fieldLabelFor(blocker), evidenceValue(blocker, "field-id:", MAX_CONTEXT_LENGTH));
   return {
     prompt,
     kind: questionKind(options),

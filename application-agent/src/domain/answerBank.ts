@@ -293,13 +293,31 @@ export function isReusableValue(value: AnswerValue | null | undefined): value is
   return Boolean(text) && text !== OPTIONAL_ANSWER_SKIPPED && text.length <= MAX_REUSABLE_TEXT && !/\n/.test(text);
 }
 
+/**
+ * One box of a checkbox group ("From where do you intend to work?" with San
+ * Francisco, New York and Remote boxes) shares the group's prompt. Its own
+ * label goes into the question, so a Yes for one box is never saved, or
+ * reused, as the answer for every box (Hex, 2026-11-23).
+ */
+export function withCheckboxLabel(prompt: string, fieldType: string | undefined, label: string | undefined, fieldId: string | undefined): string {
+  const box = label?.trim();
+  // Only a group: its boxes share a name ending in "[]" ("question_123[]",
+  // "question_123[]--2"). A lone "I acknowledge" box keeps its plain prompt.
+  if (fieldType !== "checkbox" || !box || !fieldId?.includes("[]")) return prompt;
+  const normalize = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const promptKey = normalize(prompt);
+  const boxKey = normalize(box);
+  if (!boxKey || promptKey === boxKey || promptKey.includes(boxKey) || boxKey.includes(promptKey)) return prompt;
+  return `${prompt.trim()} — ${box}`;
+}
+
 /** Field type and option labels the executor recorded on a blocker. */
 export function questionFromBlocker(blocker: Pick<CareerBlocker, "question" | "evidence" | "kind" | "context">): AnswerBankQuestion {
   const evidence = (prefix: string) => blocker.evidence.find((item) => item.startsWith(prefix))?.slice(prefix.length);
   const options = evidence("options:")?.split("|").map((option) => option.trim()).filter(Boolean);
   const fieldType = evidence("field-type:");
   return {
-    question: evidence("question-prompt:") || blocker.question,
+    question: withCheckboxLabel(evidence("question-prompt:") || blocker.question, fieldType, evidence("field-label:"), evidence("field-id:")),
     ...(blocker.context.company ? { company: blocker.context.company } : {}),
     ...(fieldType ? { fieldType } : {}),
     ...(options && options.length > 0 ? { options } : {}),

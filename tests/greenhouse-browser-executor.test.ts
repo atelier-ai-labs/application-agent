@@ -1164,6 +1164,17 @@ describe("Greenhouse destination execution through the existing browser policy",
     expect(options.map((field) => field.current === true)).toEqual([false, false, true]);
   });
 
+  it("answers Hex's \"From where do you intend to work?\" boxes the same way (2026-11-23)", async () => {
+    const descriptor = { promptText: "From where do you intend to work?", sourceStrategy: "question_container", confidence: "high" } as const;
+    const options = ["San Francisco (Hybrid)", "New York City (Hybrid)", "Remote - US"].map((label, index) =>
+      new FakeField({ id: index === 0 ? "question_13539607004[]" : `question_13539607004[]--${index + 1}`, label, type: "checkbox", required: true, questionDescriptor: descriptor }));
+    const session = new FakeSession(options);
+    const result = await new LeverBrowserExecutor({ sessionFactory: new FakeSessionFactory(session), provider: "greenhouse" }).execute(request(session));
+
+    expect(result.state).toBe("ready_to_submit");
+    expect(options.map((field) => field.current === true)).toEqual([false, false, true]);
+  });
+
   it("asks a 'select all that apply' group once, with its boxes as choices, and checks only the chosen box", async () => {
     // Gusto (2026-11-10): every box was asked on its own with no choices, and a
     // saved "Job Board" answer fit no box, so the question looped.

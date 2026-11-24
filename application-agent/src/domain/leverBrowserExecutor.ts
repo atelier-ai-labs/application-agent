@@ -442,19 +442,37 @@ function checkboxGroupChoice(group: string, boxes: readonly ApplicationFieldDesc
   return matches.length === 1 ? matches[0]!.label : undefined;
 }
 
-/** The shared name of a multi-choice checkbox group ("question_1[]_42" → "question_1[]"). */
+/**
+ * The shared name of a multi-choice checkbox group. Greenhouse numbers its
+ * boxes "question_1[]_42"; Ashby names the first "question_1[]" and the rest
+ * "question_1[]--2", "--3" (Hex, 2026-11-23). Both give "question_1[]".
+ */
 function checkboxGroupKey(field: Pick<LeverBrowserField, "id" | "type">): string | undefined {
   if (field.type !== "checkbox") return undefined;
-  return /^(.+\[\])_[^_]+$/.exec(field.id)?.[1];
+  return /^(.+\[\])(?:_[^_]+|--\d+)?$/.exec(field.id)?.[1];
 }
 
+/**
+ * One box of a "where do you want to work?" checkbox group. The box that
+ * names the profile's preferred work location is ticked and the rest are left
+ * unticked. Hex asks "From where do you intend to work?" with San Francisco,
+ * New York and Remote - US boxes; that wording was missed, so each box went to
+ * Slack as a bare Yes/No (2026-11-23). With no saved preference, it asks.
+ */
 function remotePreferenceCheckboxValue(
   field: Pick<LeverBrowserField, "id" | "label" | "section" | "type">,
+  profile: CandidateProfile,
 ): boolean | undefined {
   if (field.type !== "checkbox") return undefined;
   const prompt = inspectedPromptText(field);
-  if (!/\blocation preferences?\b|\bpreferred (?:work )?locations?\b|\bwhere (?:would you like|do you prefer|do you want) to work\b|\b(?:desired|preferred) work (?:location|arrangement)\b/.test(prompt)) return undefined;
-  return /\bremote\b/.test(normalized(field.label ?? ""));
+  if (!/\blocation preferences?\b|\bpreferred (?:work )?locations?\b|\bwhere (?:would you like|do you prefer|do you want) to work\b|\b(?:desired|preferred) work (?:location|arrangement)\b|\b(?:from )?where (?:do|will|would) you (?:intend|plan|expect)(?: to)? (?:work|be (?:based|working))\b|\bfrom where\b.{0,30}\bwork\b/.test(prompt)) return undefined;
+  // An older profile only says it is open to remote work ("Open to remote roles").
+  const preferred = normalized(profile.workPreferences.preferredWorkLocation ?? (profile.workPreferences.remote?.trim() ? "remote" : ""));
+  if (!preferred) return undefined;
+  const label = normalized(field.label ?? "");
+  if (/^remote\b/.test(preferred)) return /\bremote\b/.test(label);
+  // A named place: tick its box, and ask about the others rather than guess.
+  return label.includes(preferred) ? true : undefined;
 }
 
 function approvedDemographicCheckboxValueForField(
@@ -1734,7 +1752,7 @@ function explicitValueForField(
     return { value: "Yes", explicit: true };
   }
   if (request.profile) {
-    const remotePreference = remotePreferenceCheckboxValue(field);
+    const remotePreference = remotePreferenceCheckboxValue(field, request.profile);
     if (remotePreference !== undefined) return { value: remotePreference, explicit: true };
     const ageBracket = approvedAgeBracketValueForField(field, request.profile);
     if (ageBracket) return { value: ageBracket, explicit: true };
