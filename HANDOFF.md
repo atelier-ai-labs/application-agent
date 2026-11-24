@@ -273,6 +273,12 @@ the day (6cba053). Everything after that is on the branch only.
   Each alert key repeats at most once a day (`alerts-sent.v0` in state).
   `ATELIER_AGENT_ALERTS=disabled` turns off the listener checks. The Muse 404 should produce the
   first real alert on the next daily run.
+- **Hex checkbox group (11-23, f9a89b6):** Ashby names group boxes `q[]`, `q[]--2`; `checkboxGroupKey`
+  only knew Greenhouse's `q[]_0`, so each box went to Slack as a bare Yes/No. Fixed, plus the
+  work-location rule now matches "from where do you intend to work?" and reads
+  `preferredWorkLocation` (falls back to Remote when only `workPreferences.remote` is set). A lone
+  group box names its label in Slack and in the answer-bank key. Host and listener restarted;
+  Hex reopened, only "How did you hear about Hex?" is left.
 - **OpenAI Applied AI Engineer, Enterprise – EDU skipped (11-19):** the form required an active
   Full Scope Polygraph clearance and 5 days on-site in Maryland. Nate's call.
 - **MCA Connect skipped** (16 questions; Nate's call, no automatic cap). Its second role was

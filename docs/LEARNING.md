@@ -197,3 +197,31 @@ keys short at a hidden NUL character (fixed by storing bytes), and switching sto
 some tests had been writing into the real state file (now they use a temporary database).
 Interview line: "I verified the migration by reading every value back before retiring the old
 file, and that check caught a data-loss bug before it shipped."
+
+## Two job sites, two names for the same thing: Hex's checkbox group (2026-11-23)
+
+**What happened.** Hex asked "From where do you intend to work?" with three checkboxes: San
+Francisco (Hybrid), New York City (Hybrid) and Remote - US. Slack showed me the same question
+three times, each with Yes/No, and none of them said which box it was about.
+
+**Why.** The agent already knew how to treat a group of checkboxes as one question with the boxes
+as its options. But it found the group by the boxes' shared name, and it only knew Greenhouse's
+naming (`question_1[]_0`, `question_1[]_1`). Hex uses Ashby, which names the same thing
+`question_1[]`, `question_1[]--2`, `question_1[]--3`. Not recognized as a group, each box was
+asked on its own. A second rule that ticks the box matching my preferred work location also
+missed this wording ("from where do you intend to work" instead of "where would you like to work").
+
+**The fix.**
+- The group check reads both naming styles.
+- The location rule knows the new wording, and reads the preference from the profile instead of
+  assuming Remote, so it works for someone who prefers an office.
+- As a safety net, a box that still gets asked alone now names its box. The answer bank also
+  saves it under that name. Before, a Yes for the San Francisco box would have been saved as "Yes"
+  to the whole question and reused for every box.
+
+**Checked by** the form replay: Hex went from 4 questions to 1 and no other form changed. The
+live application was reopened and ticked Remote by itself.
+
+**What I'd say in an interview.** "Supporting a second vendor exposed an assumption: the code
+recognized a concept by one vendor's naming. I made the check cover both naming styles, and
+added a safety net so a mistake there can't turn into a wrong answer being saved and reused."
