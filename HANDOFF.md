@@ -273,6 +273,15 @@ the day (6cba053). Everything after that is on the branch only.
   Each alert key repeats at most once a day (`alerts-sent.v0` in state).
   `ATELIER_AGENT_ALERTS=disabled` turns off the listener checks. The Muse 404 should produce the
   first real alert on the next daily run.
+- **Standing-topic eval + model matcher (11-23, 15f3c50), NOT switched on.**
+  `npm run career-agent:eval-topics [-- --holdout|--rules-only]`. Cases in
+  `application-agent/evals/standing-topic-{cases,holdout}.json`; when a held-out case drives a
+  prompt change, move it to cases and write a fresh one. Classifier =
+  `automation/answerBank/ollamaStandingTopicClassifier.ts` (topic enum + second "check" call);
+  `acceptedModelTopic` guards it (Yes/No or text box only, confidence, topic `exclude`). Results:
+  main 65/19/0 → 70/14/0, held-out 16/12/2 → 22/8/0 (right/asked/wrong) with the check also run on
+  rule picks. Next: wire into `findAnswerBankMatch` (classifier when rules miss, checker on rule
+  picks), behind an env switch, then compare on the form replay.
 - **Age wording (11-23, ece0cb6):** "Are you over the age of 18?" now answers Yes like "18 or older".
   Host NOT restarted yet (Hex's window was open on a post-Submit CAPTCHA), so the running host still
   has the old rule; Supabase's age question was left for Nate to tap.

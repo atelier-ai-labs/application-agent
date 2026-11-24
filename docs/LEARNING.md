@@ -225,3 +225,40 @@ live application was reopened and ticked Remote by itself.
 **What I'd say in an interview.** "Supporting a second vendor exposed an assumption: the code
 recognized a concept by one vendor's naming. I made the check cover both naming styles, and
 added a safety net so a mistake there can't turn into a wrong answer being saved and reused."
+
+## Measure before you switch it on: letting the model recognize questions (2026-11-23)
+
+**The problem.** The agent recognizes "standing" questions (clearance, related to an employee,
+non-compete, criminal record…) by wording rules. Every new phrasing ("over the age of 18",
+"family ties to current staff") was a miss, so it came to me, and fixing it meant writing one
+more rule. I wanted the local model to recognize the question, without ever letting it write
+the answer.
+
+**Eval first.** Before changing any real behavior I wrote 84 test questions: real ones from my
+saved forms, rewordings, and traps that look similar but need a different answer ("laid off" vs
+"fired", "first time applying?" where Yes means the opposite, "where do you live" vs "where will
+you work from"). Each result is right, asked a person, or **wrong**. Wrong is the only error
+that matters: it puts a saved answer on a question it doesn't fit.
+
+**What the numbers said.**
+- Building the eval alone found a real bug in the existing rules: "Do you **require**
+  accommodations to perform the essential functions?" matched "**can** perform the essential
+  functions", where my saved answer is Yes.
+- The model on its own caught every miss but made 12 wrong picks, **all at confidence 1.00**.
+  A small model's self-reported confidence was worthless as a safety signal.
+- A second, narrower call ("restate what this asks; does the saved answer fully answer it?")
+  took that to 0 wrong.
+- I had tuned that second call while looking at the traps, so I wrote 30 held-out questions and
+  scored them once. Today's rules got 2 wrong on them; rules plus the model's check got 0
+  wrong, and questions that reach me fell from 12 to 8.
+
+**Design choices.**
+- The model picks from a fixed list (a JSON enum), and code supplies the answer.
+- A pick only counts on a plain Yes/No or a text box.
+- If the model is down, it falls back to today's behavior.
+
+**What I'd say in an interview.** "I didn't trust the model's confidence. I measured it, and
+it was 1.00 on every wrong answer. I built an eval that separates 'asked a person' from 'wrong',
+since only wrong is harmful. I added a verification step, and kept a held-out set so I wasn't
+grading my own homework. The eval also caught a bug in the old rule-based code, which tells you
+the eval was worth having on its own."
