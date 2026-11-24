@@ -308,7 +308,12 @@ function isSmsConsentField(field: Pick<LeverBrowserField, "id" | "label" | "sect
 function isAgeRequirementField(field: Pick<LeverBrowserField, "id" | "label" | "section">): boolean {
   const text = directFieldPromptText(field);
   return /\b(?:eighteen|18)\s+(?:years?|yrs?)\s+(?:of\s+age\s+)?or\s+older\b/.test(text) ||
-    /\b(?:at\s+least\s+eighteen|18\s+or\s+older)\b/.test(text);
+    /\b(?:at\s+least\s+eighteen|18\s+or\s+older)\b/.test(text) ||
+    // "Are you over the age of 18?" (Supabase, 2026-11-23). A bare "over 18"
+    // or "at least 18" only counts as the whole question ending in "?", never inside one
+    // like "over 18 months of experience".
+    /\b(?:over|at\s+least|above)\s+the\s+age\s+of\s+(?:eighteen|18)\b/.test(text) ||
+    /\bare\s+you\s+(?:over|at\s+least)\s+(?:eighteen|18)(?:\s+years?\s+(?:old|of\s+age))?\s*\?/.test(text);
 }
 
 /** These are personal screening questions, not employment-history fields. */
