@@ -90,7 +90,13 @@ export const STANDING_TOPICS: readonly {
   { id: "regulatory_discipline", label: "Disciplined by a regulator", pattern: /\bdisciplin\w*\b.{0,60}\b(?:regulat\w*|finra|self regulatory|agency|body)\b/ },
   { id: "restrictive_agreements", label: "Signed a non-compete, non-solicitation, or confidentiality agreement", pattern: /\b(?:signed|bound by|subject to|party to|entered into)\b.{0,60}\b(?:non ?compet\w*|non ?solicit\w*|confidentiality|restrictive covenants?)\b/ },
   { id: "background_check", label: "Willing to undergo a background check or drug screen", pattern: /\b(?:willing|able|agree) to (?:undergo|complete|pass|submit to|take)\b.{0,30}\b(?:background|drug)\b/ },
-  { id: "essential_functions", label: "Can perform the essential functions with or without reasonable accommodation", pattern: /\bessential functions\b/ },
+  {
+    id: "essential_functions", label: "Can perform the essential functions with or without reasonable accommodation", pattern: /\bessential functions\b/,
+    // "Do you require any reasonable accommodations to … perform the essential
+    // functions?" asks the opposite: the saved Yes ("I can") would read as
+    // "Yes, I need accommodations" (Kapitus, found by the topic eval 2026-11-23).
+    exclude: /\b(?:require|requires|need|needs|request)\b.{0,40}\baccommodat/,
+  },
   { id: "previously_applied", label: "Previously applied to this company", pattern: /\b(?:previously|ever|before)\b.{0,20}\bappl(?:ied|y)\b.{0,40}\{company\}|\bappl(?:ied)\b.{0,30}\{company\}.{0,20}\b(?:before|previously)\b/ },
   { id: "previously_interviewed", label: "Previously interviewed at this company", pattern: /\b(?:previously|ever|before)\b.{0,20}\binterview(?:ed)?\b.{0,40}\{company\}/ },
   {
@@ -112,7 +118,8 @@ export const STANDING_TOPICS: readonly {
     id: "security_clearance", label: "Currently holds an active security clearance",
     pattern: /\b(?:hold|have|possess)\b.{0,40}\bclearance\b|\b(?:active|current)\b.{0,30}\bclearance\b/,
     // Being able to get one is a different question with a different answer.
-    exclude: /\b(?:obtain|eligib\w*|able to (?:get|acquire|receive)|willing to|maintain|sponsor)\b/,
+    // "Ever held one in the past" is a different fact from holding one now (topic eval, 2026-11-23).
+    exclude: /\b(?:obtain|eligib\w*|able to (?:get|acquire|receive)|willing to|maintain|sponsor|ever held|previously held|in the past)\b/,
   },
   {
     id: "military_service", label: "Veteran, or served in the military",
@@ -134,7 +141,8 @@ export const STANDING_TOPICS: readonly {
     id: "certifications", label: "Professional certifications you hold (or None)",
     pattern: /\b(?:list|what|which|any|relevant)\b.{0,30}\bcertifications?\b|\bcertifications?\b.{0,30}\b(?:you (?:have|hold)|held)\b/,
     // A question about one named certification is answered per form.
-    exclude: /\b(?:aws|azure|gcp|google|cissp|security\+?|comptia|pmp|cka|ckad|terraform|kubernetes|scrum|itil|ccna|cpa|license)\b/,
+    // "Working toward" or "pursuing" asks about future ones (topic eval, 2026-11-23).
+    exclude: /\b(?:aws|azure|gcp|google|cissp|security\+?|comptia|pmp|cka|ckad|terraform|kubernetes|scrum|itil|ccna|cpa|license)\b|\b(?:working (?:toward|towards|on)|pursuing|planning to|studying for)\b/,
     anyPhrasing: true,
     asYesNo: (value) => /^(?:none|no)\b/i.test(value.trim()) ? "No" : value.trim() ? "Yes" : undefined,
   },
@@ -149,6 +157,41 @@ export function standingTopicFor(question: string, company?: string): StandingTo
   const topics = STANDING_TOPICS.filter((topic) =>
     (interrogative || (conditional && topic.conditional) || topic.anyPhrasing) && topic.pattern.test(key) && !topic.exclude?.test(key));
   return topics.length === 1 ? topics[0]!.id : undefined;
+}
+
+/**
+ * The local model's pick of a standing topic for a question the wording rules
+ * missed (2026-11-23). It only names a topic; the answer is always the one the
+ * candidate saved for it.
+ */
+export type StandingTopicClassifier = (
+  question: AnswerBankQuestion,
+) => Promise<{ topic: StandingTopicId | "none"; confidence: number } | undefined>;
+
+/** The model's narrow check of one topic for one question: does the saved answer fit? */
+export type StandingTopicChecker = (topic: StandingTopicId, question: AnswerBankQuestion) => Promise<"yes" | "no" | "error">;
+
+export const STANDING_TOPIC_MODEL_CONFIDENCE = 0.85;
+
+/**
+ * Whether to trust the model's topic. The topic's own "different question"
+ * wording still rules it out, and the model must be confident.
+ */
+export function acceptedModelTopic(
+  question: Pick<AnswerBankQuestion, "question" | "company" | "fieldType" | "options">,
+  pick: { topic: StandingTopicId | "none"; confidence: number } | undefined,
+): StandingTopicId | undefined {
+  if (!pick || pick.topic === "none" || pick.confidence < STANDING_TOPIC_MODEL_CONFIDENCE) return undefined;
+  const definition = STANDING_TOPICS.find((topic) => topic.id === pick.topic);
+  if (!definition) return undefined;
+  // Only a plain Yes/No question or a text box. A list of other choices ("None |
+  // Secret | Top Secret") means the question asks for more than the saved fact.
+  const options = (question.options ?? []).map((option) => normalizedText(option).replace(/[^a-z]/g, ""));
+  const yesNo = options.length === 2 && options.includes("yes") && options.includes("no");
+  const textBox = options.length === 0 && (question.fieldType === "text" || question.fieldType === "textarea");
+  if (!yesNo && !textBox) return undefined;
+  const key = answerBankKey(question.question, question.company);
+  return definition.exclude?.test(key) ? undefined : definition.id;
 }
 
 export function standingEntryKey(topic: StandingTopicId): string {

@@ -11,7 +11,7 @@ import { dirname, resolve } from "node:path";
 export interface ModelCallRecord {
   at: string;
   /** What the call was for: an essay draft or an answer-bank match. */
-  purpose: "essay_draft" | "answer_bank_match";
+  purpose: "essay_draft" | "answer_bank_match" | "standing_topic";
   model: string;
   /** Changes whenever the prompt text or template changes. */
   promptVersion: string;

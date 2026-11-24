@@ -1,0 +1,937 @@
+{
+ "about": "Which standing topic (if any) a job-application question asks about. 'form' cases are real questions from saved application forms; 'made-up' cases are rewordings and traps. A wrong topic is the dangerous error: it puts a saved answer on a question it does not answer. 'none' means the agent should not use any standing answer.",
+ "cases": [
+  {
+   "id": "form-related-cargomatic",
+   "source": "form",
+   "company": "Cargomatic",
+   "fieldType": "select",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you related to any current or former Cargomatic Employees?",
+   "expected": "related_to_employee"
+  },
+  {
+   "id": "form-related-instructure",
+   "source": "form",
+   "company": "Instructure",
+   "fieldType": "text",
+   "question": "If you are related to anyone at Instructure, what is your relationship?",
+   "expected": "related_to_employee"
+  },
+  {
+   "id": "form-know-smartsheet",
+   "source": "form",
+   "company": "Smartsheet",
+   "fieldType": "textarea",
+   "question": "Do you know anyone who works at Smartsheet?",
+   "expected": "knows_employee"
+  },
+  {
+   "id": "form-restrictions-gitlab",
+   "source": "form",
+   "company": "GitLab",
+   "fieldType": "select",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you subject to any employment agreements and/or post-employment restrictions with your current employer or a past employer?",
+   "expected": "restrictive_agreements"
+  },
+  {
+   "id": "form-restrictive-turquoise",
+   "source": "form",
+   "company": "Turquoise Health",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you signed any confidentiality, noncompetition, or non-solicitation agreements with your current or former employer?",
+   "expected": "restrictive_agreements"
+  },
+  {
+   "id": "form-veteran-cargomatic",
+   "source": "form",
+   "company": "Cargomatic",
+   "fieldType": "select",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you a veteran or active member of the United States Armed Forces?",
+   "expected": "military_service"
+  },
+  {
+   "id": "form-veteran-circleci",
+   "source": "form",
+   "company": "CircleCI",
+   "fieldType": "select",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you a veteran/have you served in the military?",
+   "expected": "military_service"
+  },
+  {
+   "id": "form-background-drug",
+   "source": "form",
+   "company": "Kapitus",
+   "fieldType": "select",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you willing to submit to a drug test and a background check upon an offer?",
+   "expected": "background_check"
+  },
+  {
+   "id": "form-clearance-details",
+   "source": "form",
+   "company": "Sparksoft Corporation",
+   "fieldType": "text",
+   "question": "Do you currently hold an active security clearance? If yes, please provide details.",
+   "expected": "security_clearance"
+  },
+  {
+   "id": "form-clearance-polygraph",
+   "source": "form",
+   "company": "OpenAI",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Do you have an active Full Scope Polygraph clearance?",
+   "expected": "security_clearance"
+  },
+  {
+   "id": "form-certs",
+   "source": "form",
+   "company": "Kapitus",
+   "fieldType": "textarea",
+   "question": "Do you have any certifications?",
+   "expected": "certifications"
+  },
+  {
+   "id": "form-interviewed-teamworks",
+   "source": "form",
+   "company": "Teamworks",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you previously interviewed for a role at Teamworks or a Teamworks acquired company?",
+   "expected": "previously_interviewed"
+  },
+  {
+   "id": "form-applied-dad",
+   "source": "form",
+   "company": "D.A. Davidson",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you previously applied for employment with D.A. Davidson Companies?",
+   "expected": "previously_applied"
+  },
+  {
+   "id": "form-essential-dad",
+   "source": "form",
+   "company": "D.A. Davidson",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you able to perform the essential functions of the position(s) for which you are applying with or without reasonable accommodations?",
+   "expected": "essential_functions"
+  },
+  {
+   "id": "form-felony-dad",
+   "source": "form",
+   "company": "D.A. Davidson",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you been convicted of, or pled guilty or nolo contendere (\"no contest\") in a domestic, foreign, or military court to any felony in the past 10 years?",
+   "expected": "criminal_conviction"
+  },
+  {
+   "id": "form-license-dad",
+   "source": "form",
+   "company": "D.A. Davidson",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you ever been licensed in the insurance or securities industry?",
+   "expected": "financial_license"
+  },
+  {
+   "id": "form-bond-dad",
+   "source": "form",
+   "company": "D.A. Davidson",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Has a bonding company ever denied, paid out on, or revoked a bond for you?",
+   "expected": "financial_judgments"
+  },
+  {
+   "id": "form-liens-dad",
+   "source": "form",
+   "company": "D.A. Davidson",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Do you have an unsatisfied judgements or liens against you?",
+   "expected": "financial_judgments"
+  },
+  {
+   "id": "form-discipline-dad",
+   "source": "form",
+   "company": "D.A. Davidson",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "If you answered \"Yes\" to either licensing question above, have you ever been disciplined by a regulatory authority, or had a license suspended or revoked?",
+   "expected": "regulatory_discipline"
+  },
+  {
+   "id": "form-intend-work-teamworks",
+   "source": "form",
+   "company": "Teamworks",
+   "fieldType": "text",
+   "question": "If hired, from where do you intend to work?",
+   "expected": "work_location"
+  },
+  {
+   "id": "form-intend-work-temporal",
+   "source": "form",
+   "company": "Temporal",
+   "fieldType": "text",
+   "question": "What location do you intend to work from?",
+   "expected": "work_location"
+  },
+  {
+   "id": "trap-accommodation-needed",
+   "source": "form",
+   "company": "Kapitus",
+   "fieldType": "select",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Do you require any reasonable accommodations to participate in the application process or to perform the essential functions of this job, as outlined in the job description?",
+   "expected": "none",
+   "note": "Asks whether you NEED accommodations, the opposite of 'can you perform the essential functions'."
+  },
+  {
+   "id": "trap-worked-here-before",
+   "source": "form",
+   "company": "Figma",
+   "fieldType": "select",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you ever worked for Figma before, as an employee or a contractor/consultant?",
+   "expected": "none"
+  },
+  {
+   "id": "trap-current-employee",
+   "source": "form",
+   "company": "Stack AV",
+   "fieldType": "select",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you a current Stack employee? If yes, please apply via our Internal Job Board.",
+   "expected": "none"
+  },
+  {
+   "id": "trap-referred-by",
+   "source": "form",
+   "company": "Kapitus",
+   "fieldType": "text",
+   "question": "Were you referred by a Kapitus employee? If yes, please provide the employee's full name",
+   "expected": "none"
+  },
+  {
+   "id": "trap-referral-name",
+   "source": "form",
+   "company": "Phantom",
+   "fieldType": "text",
+   "question": "If you were referred by a Phantom employee, please provide their name and your relationship to them.",
+   "expected": "none"
+  },
+  {
+   "id": "trap-list-acquainted",
+   "source": "form",
+   "company": "D.A. Davidson",
+   "fieldType": "textarea",
+   "question": "Please list all employees of D.A. Davidson Companies with whom you are acquainted, and indicate whether you are related",
+   "expected": "none",
+   "note": "Asks for a list covering two topics at once."
+  },
+  {
+   "id": "trap-protected-veteran",
+   "source": "form",
+   "company": "GC AI",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you a veteran or protected veteran?",
+   "expected": "none",
+   "note": "The protected-veteran self-identification is answered from the profile, not this topic."
+  },
+  {
+   "id": "trap-onsite-maryland",
+   "source": "form",
+   "company": "OpenAI",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you willing to work on-site at our clients office 5 days a week in Maryland?",
+   "expected": "none"
+  },
+  {
+   "id": "trap-office-3-days",
+   "source": "form",
+   "company": "OpenAI",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you able to work from our US office three days per week?",
+   "expected": "none"
+  },
+  {
+   "id": "trap-certify-true",
+   "source": "form",
+   "company": "OpenAI",
+   "fieldType": "checkbox",
+   "question": "I hereby certify that I have not knowingly withheld any information that might adversely affect my chances for employment and that the answers given by me are true and correct.",
+   "expected": "none"
+  },
+  {
+   "id": "trap-references-permission",
+   "source": "form",
+   "company": "Kapitus",
+   "fieldType": "select",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Do you grant Kapitus permission to contact the supervisory references listed above?",
+   "expected": "none"
+  },
+  {
+   "id": "trap-coding-challenge",
+   "source": "form",
+   "company": "Reflow",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you willing to do a hands-on coding challenge as part of the interview process?",
+   "expected": "none"
+  },
+  {
+   "id": "trap-travel",
+   "source": "form",
+   "company": "mcaconnect",
+   "fieldType": "textarea",
+   "question": "Are you able to travel up to 25% of the time to client sites (US-based travel)?",
+   "expected": "none"
+  },
+  {
+   "id": "trap-sanctioned-countries",
+   "source": "form",
+   "company": "Stack AV",
+   "fieldType": "select",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Please indicate whether you are either a citizen or resident of any of the following countries: Cuba, Iran, North Korea, Syria or Crimea Region of Ukraine",
+   "expected": "none"
+  },
+  {
+   "id": "trap-degree-or-cert",
+   "source": "form",
+   "company": "D.A. Davidson",
+   "fieldType": "text",
+   "question": "Degree or Certification Earned",
+   "expected": "none",
+   "note": "Part of an education entry, not a list of certifications."
+  },
+  {
+   "id": "trap-age",
+   "source": "form",
+   "company": "Supabase",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you over the age of 18?",
+   "expected": "none",
+   "note": "Age is handled by its own rule."
+  },
+  {
+   "id": "trap-sponsorship",
+   "source": "form",
+   "company": "Stack AV",
+   "fieldType": "select",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Do you need, or will you need in the future, any immigration-related support or sponsorship from the Company in order to begin or continue employment?",
+   "expected": "none"
+  },
+  {
+   "id": "trap-interview-recording",
+   "source": "form",
+   "company": "Temporal",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Interview Recording Consent",
+   "expected": "none"
+  },
+  {
+   "id": "trap-on-call",
+   "source": "form",
+   "company": "GitLab",
+   "fieldType": "select",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you been part of an on-call rotation and personally involved in responding to production incidents?",
+   "expected": "none"
+  },
+  {
+   "id": "trap-golang",
+   "source": "form",
+   "company": "GitLab",
+   "fieldType": "select",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Do you have experience with GoLang?",
+   "expected": "none"
+  },
+  {
+   "id": "made-related-family",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Do any of your family members currently work for Acme?",
+   "expected": "related_to_employee"
+  },
+  {
+   "id": "made-related-relatives",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Do you have relatives employed by Acme or its subsidiaries?",
+   "expected": "related_to_employee"
+  },
+  {
+   "id": "made-related-household",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Is anyone in your immediate family or household an Acme employee?",
+   "expected": "related_to_employee"
+  },
+  {
+   "id": "made-know-friends",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Do you have any friends or former colleagues at Acme?",
+   "expected": "knows_employee"
+  },
+  {
+   "id": "made-know-connections",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "text",
+   "question": "Are there people currently on the Acme team you know personally?",
+   "expected": "knows_employee"
+  },
+  {
+   "id": "made-noncompete",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you currently bound by a non-compete?",
+   "expected": "restrictive_agreements"
+  },
+  {
+   "id": "made-noncompete-2",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Is there any agreement with a previous employer that would limit your ability to work here?",
+   "expected": "restrictive_agreements"
+  },
+  {
+   "id": "made-veteran-1",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you ever served in the armed forces?",
+   "expected": "military_service"
+  },
+  {
+   "id": "made-veteran-2",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you a former member of the military?",
+   "expected": "military_service"
+  },
+  {
+   "id": "made-veteran-3",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Did you serve in the U.S. Army, Navy, Air Force, Marines or Coast Guard?",
+   "expected": "military_service"
+  },
+  {
+   "id": "made-clearance-1",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Do you have a current TS/SCI clearance?",
+   "expected": "security_clearance"
+  },
+  {
+   "id": "made-clearance-2",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you currently cleared at the Secret level or above?",
+   "expected": "security_clearance"
+  },
+  {
+   "id": "made-clearance-trap-obtain",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you able to obtain a U.S. government security clearance?",
+   "expected": "none",
+   "note": "Able to get one is a different question from holding one."
+  },
+  {
+   "id": "made-clearance-trap-willing",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Would you be willing to go through the process of getting a security clearance?",
+   "expected": "none"
+  },
+  {
+   "id": "made-background-1",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "If offered the job, would you consent to a pre-employment screening, including a criminal background check?",
+   "expected": "background_check"
+  },
+  {
+   "id": "made-background-2",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Can you pass a drug screening?",
+   "expected": "background_check"
+  },
+  {
+   "id": "made-conviction-1",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Do you have any criminal convictions?",
+   "expected": "criminal_conviction"
+  },
+  {
+   "id": "made-conviction-2",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you ever been found guilty of a felony?",
+   "expected": "criminal_conviction"
+  },
+  {
+   "id": "made-fired-1",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you ever been let go from a job for cause?",
+   "expected": "terminated"
+  },
+  {
+   "id": "made-fired-2",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you ever been dismissed or asked to leave a position?",
+   "expected": "terminated"
+  },
+  {
+   "id": "made-fired-trap-laid-off",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you ever been laid off?",
+   "expected": "none",
+   "note": "A layoff is not being fired."
+  },
+  {
+   "id": "made-essential-1",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Can you perform the essential duties of this job, with or without reasonable accommodation?",
+   "expected": "essential_functions"
+  },
+  {
+   "id": "made-essential-trap-disability",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No",
+    "I don't wish to answer"
+   ],
+   "question": "Do you have a disability?",
+   "expected": "none"
+  },
+  {
+   "id": "made-applied-1",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you applied to a position at Acme in the last 12 months?",
+   "expected": "previously_applied"
+  },
+  {
+   "id": "made-applied-2",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Is this your first time applying to Acme?",
+   "expected": "none",
+   "note": "Same fact, but Yes and No are flipped; a saved 'No (not applied before)' would answer it wrongly."
+  },
+  {
+   "id": "made-interviewed-1",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you interviewed with Acme before?",
+   "expected": "previously_interviewed"
+  },
+  {
+   "id": "made-notice-1",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "text",
+   "question": "How much notice do you need to give your current employer?",
+   "expected": "notice_period"
+  },
+  {
+   "id": "made-notice-2",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "text",
+   "question": "What is your notice period?",
+   "expected": "notice_period"
+  },
+  {
+   "id": "made-notice-trap-start",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "text",
+   "question": "What is your earliest possible start date?",
+   "expected": "none"
+  },
+  {
+   "id": "made-certs-1",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "textarea",
+   "question": "Please list any professional certifications you hold.",
+   "expected": "certifications"
+  },
+  {
+   "id": "made-certs-trap-aws",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Do you hold an AWS Solutions Architect certification?",
+   "expected": "none",
+   "note": "One named certification is answered per form."
+  },
+  {
+   "id": "made-license-1",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Do you hold a Series 7 or Series 63 license?",
+   "expected": "financial_license"
+  },
+  {
+   "id": "made-license-trap-driver",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Do you have a valid driver's license?",
+   "expected": "none"
+  },
+  {
+   "id": "made-bankruptcy",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you filed for personal bankruptcy in the last seven years?",
+   "expected": "financial_judgments"
+  },
+  {
+   "id": "made-work-location-1",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "text",
+   "question": "Which city and state will you be working from?",
+   "expected": "work_location"
+  },
+  {
+   "id": "made-work-location-trap-relocate",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you willing to relocate to Austin, TX?",
+   "expected": "none"
+  },
+  {
+   "id": "made-work-location-trap-current",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "text",
+   "question": "Where are you currently located?",
+   "expected": "none",
+   "note": "Where you live now is a profile fact, not where you intend to work."
+  },
+  {
+   "id": "made-none-why",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "textarea",
+   "question": "Why do you want to work at Acme?",
+   "expected": "none"
+  },
+  {
+   "id": "made-none-salary",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "text",
+   "question": "What are your salary expectations?",
+   "expected": "none"
+  },
+  {
+   "id": "made-none-hear",
+   "source": "made-up",
+   "company": "Acme",
+   "fieldType": "text",
+   "question": "How did you hear about this role?",
+   "expected": "none"
+  },
+  {
+   "id": "ho-clearance-level",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "select",
+   "options": [
+    "None",
+    "Confidential",
+    "Secret",
+    "Top Secret",
+    "TS/SCI"
+   ],
+   "question": "What is your current active security clearance level?",
+   "expected": "none",
+   "note": "Asks for a level from a list; a saved Yes/No can't answer it."
+  },
+  {
+   "id": "ho-clearance-trap-past",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you ever held a security clearance in the past?",
+   "expected": "none",
+   "note": "Ever held, not currently holds."
+  },
+  {
+   "id": "ho-certs-trap-pursuing",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "textarea",
+   "question": "Are you currently working toward any certifications?",
+   "expected": "none"
+  }
+ ]
+}

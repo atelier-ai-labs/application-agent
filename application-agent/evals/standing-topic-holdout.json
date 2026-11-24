@@ -1,0 +1,345 @@
+{
+ "about": "Held-out cases for the standing-topic eval, written after the prompt was tuned on standing-topic-cases.json and never used to tune it. Score these to see how the matcher does on wording it has not seen. When a prompt change is made because of one of these, move that case into standing-topic-cases.json and write a fresh one here.",
+ "cases": [
+  {
+   "id": "ho-related-spouse",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Is your spouse, parent, sibling or child employed by Northwind?",
+   "expected": "related_to_employee"
+  },
+  {
+   "id": "ho-related-kin",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "select",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Do you have any family ties to current Northwind staff?",
+   "expected": "related_to_employee"
+  },
+  {
+   "id": "ho-know-anyone-team",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Do you personally know anyone on the Northwind team?",
+   "expected": "knows_employee"
+  },
+  {
+   "id": "ho-restrict-ip",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Do you have any contractual obligations to a current or former employer (such as a non-compete or non-solicit) that could affect your work at Northwind?",
+   "expected": "restrictive_agreements"
+  },
+  {
+   "id": "ho-veteran-service",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you completed any active duty service in the U.S. military?",
+   "expected": "military_service"
+  },
+  {
+   "id": "ho-clearance-hold",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you a current holder of a DoD Secret clearance or higher?",
+   "expected": "security_clearance"
+  },
+  {
+   "id": "ho-background-consent",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Northwind conducts background checks for all new hires. Are you willing to undergo one?",
+   "expected": "background_check"
+  },
+  {
+   "id": "ho-background-trap-authorize",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "checkbox",
+   "question": "I authorize Northwind to obtain a consumer report about me for employment purposes.",
+   "expected": "none",
+   "note": "A legal authorization to sign, not a willingness question."
+  },
+  {
+   "id": "ho-conviction-misdemeanor",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you been convicted of a misdemeanor or felony within the last seven years?",
+   "expected": "criminal_conviction"
+  },
+  {
+   "id": "ho-conviction-trap-pending",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Do you have any criminal charges currently pending against you?",
+   "expected": "none",
+   "note": "Pending charges are not a conviction."
+  },
+  {
+   "id": "ho-fired-involuntary",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you ever been involuntarily terminated from employment for misconduct?",
+   "expected": "terminated"
+  },
+  {
+   "id": "ho-fired-trap-reason-leave",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "textarea",
+   "question": "Why are you leaving your current job?",
+   "expected": "none"
+  },
+  {
+   "id": "ho-essential-able",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "With or without reasonable accommodation, can you perform the essential job functions described above?",
+   "expected": "essential_functions"
+  },
+  {
+   "id": "ho-essential-trap-lift",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you able to lift up to 50 pounds?",
+   "expected": "none",
+   "note": "One specific physical requirement, not the general essential-functions statement."
+  },
+  {
+   "id": "ho-applied-before",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you ever submitted an application to Northwind in the past?",
+   "expected": "previously_applied"
+  },
+  {
+   "id": "ho-applied-trap-worked",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you previously been employed by Northwind?",
+   "expected": "none"
+  },
+  {
+   "id": "ho-interviewed",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Have you gone through Northwind's interview process before?",
+   "expected": "previously_interviewed"
+  },
+  {
+   "id": "ho-notice",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "text",
+   "question": "How many weeks' notice will you need to give before you can join us?",
+   "expected": "notice_period"
+  },
+  {
+   "id": "ho-notice-trap-available",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "text",
+   "question": "When are you available to start?",
+   "expected": "none"
+  },
+  {
+   "id": "ho-certs",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "textarea",
+   "question": "What industry certifications do you currently hold, if any?",
+   "expected": "certifications"
+  },
+  {
+   "id": "ho-license-finra",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you currently registered with FINRA?",
+   "expected": "financial_license"
+  },
+  {
+   "id": "ho-license-trap-cpa",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you a licensed CPA?",
+   "expected": "none"
+  },
+  {
+   "id": "ho-judgment-debt",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are there any outstanding civil judgments or tax liens against you?",
+   "expected": "financial_judgments"
+  },
+  {
+   "id": "ho-work-location-remote",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "text",
+   "question": "If hired, which state would you be working remotely from?",
+   "expected": "work_location"
+  },
+  {
+   "id": "ho-work-location-trap-timezone",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "select",
+   "options": [
+    "Pacific",
+    "Mountain",
+    "Central",
+    "Eastern"
+   ],
+   "question": "Which time zone are you able to work in?",
+   "expected": "none"
+  },
+  {
+   "id": "ho-trap-commute",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Can you reliably commute to our Chicago office?",
+   "expected": "none"
+  },
+  {
+   "id": "ho-trap-weekend",
+   "source": "made-up",
+   "company": "Northwind",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Are you available to work occasional weekends?",
+   "expected": "none"
+  },
+  {
+   "id": "ho2-clearance-was",
+   "source": "made-up",
+   "company": "Contoso",
+   "fieldType": "radio",
+   "options": [
+    "Yes",
+    "No"
+   ],
+   "question": "Did you hold a government clearance at any previous job?",
+   "expected": "none",
+   "note": "Past clearance, not a current one."
+  },
+  {
+   "id": "ho2-clearance-type",
+   "source": "made-up",
+   "company": "Contoso",
+   "fieldType": "select",
+   "options": [
+    "Public Trust",
+    "Secret",
+    "Top Secret",
+    "None"
+   ],
+   "question": "Which type of clearance do you have?",
+   "expected": "none"
+  },
+  {
+   "id": "ho2-certs-plans",
+   "source": "made-up",
+   "company": "Contoso",
+   "fieldType": "textarea",
+   "question": "Which certifications are you hoping to earn in the next year?",
+   "expected": "none"
+  }
+ ]
+}
