@@ -273,6 +273,12 @@ the day (6cba053). Everything after that is on the branch only.
   Each alert key repeats at most once a day (`alerts-sent.v0` in state).
   `ATELIER_AGENT_ALERTS=disabled` turns off the listener checks. The Muse 404 should produce the
   first real alert on the next daily run.
+- **Zero applications 11-25 to 11-27 (fixed 11-27, 1b4eb82).** The apply step picked 3 jobs, then
+  the one-per-company rule skipped all of them (second roles at Cohere, Hex, Render, Supabase,
+  Temporal), and skipped picks used up the slots. It now walks the ranked list until the free
+  windows are used (up to 12 skips), and `noApplicationsAlert` posts "No applications started
+  tonight". 36 Ready rows are at new companies. Nate took the night off; first run with the fix is
+  11-28. Source alert: Featherless AI's Ashby board 404s (harmless); The Muse still 404.
 - **Standing-topic model ON (11-23, 0b1b067).** Off switch: `ATELIER_CAREER_AGENT_STANDING_TOPIC_MODEL=disabled`.
   Additive only; rule matches are checked by the model only for `ruleNeedsCheck` topics
   (security_clearance, certifications). Eval: main 78/8/0, held-out 25/5/0 (held-out partly tuned
