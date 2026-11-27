@@ -43,8 +43,13 @@ export interface DailyCycleOptions {
   phases?: readonly DailyPhase[];
   /** Upper bound on applications started this run, below free host slots. */
   maxStarts?: number;
+  /** How many Skipped or Expired jobs to step past before giving up (default 12). */
+  maxSkips?: number;
   jobTimeoutMs?: number;
 }
+
+/** Outcomes that open no browser window, so they don't use up one of the night's slots. */
+export const NO_WINDOW_STATUSES: ReadonlySet<string> = new Set(["Skipped", "Expired"]);
 
 export interface StartedApplication { jobId: string; company: string; role: string; status: string; error?: string }
 
@@ -166,21 +171,30 @@ export async function runDailyCycle(deps: DailyCycleDependencies, options: Daily
       } else {
         const free = Math.max(0, capacity.max - capacity.active);
         const slots = Math.min(free, options.maxStarts ?? free);
-        const picked = pickJobsToStart(jobs, slots);
+        // Go down the whole list until `slots` applications really start. A
+        // job that comes back Skipped or Expired (a second role at a company
+        // already applied to, a closed posting) opens no window, so it must
+        // not use up a slot: on 11-25, 11-26 and 11-27 all three picks were
+        // second roles and nothing started for three nights.
+        const candidates = slots > 0 ? pickJobsToStart(jobs, Number.MAX_SAFE_INTEGER) : [];
+        const maxTries = slots + (options.maxSkips ?? 12);
         const started: StartedApplication[] = [];
+        let opened = 0;
         const workerId = `daily-${now().toISOString().slice(0, 10)}`;
-        for (const job of picked) {
+        for (const job of candidates) {
+          if (opened >= slots || started.length >= maxTries) break;
           const result = await deps.run("career-agent:queue", ["--processor", "career-service", "--worker-id", workerId, "--job-id", job.jobId], options.jobTimeoutMs ?? 15 * 60_000);
           const tick = lastJson<{ queue: { status?: string; error?: string } }>(result.stdout, "queue")?.queue;
+          const status = tick?.status ?? (result.timedOut ? "Timed out" : "Failed");
           started.push({
-            jobId: job.jobId, company: job.company, role: job.role,
-            status: tick?.status ?? (result.timedOut ? "Timed out" : "Failed"),
+            jobId: job.jobId, company: job.company, role: job.role, status,
             ...(tick?.error ? { error: tick.error.slice(0, 200) } : !tick ? { error: failure(result, "Application") } : {}),
           });
+          if (!NO_WINDOW_STATUSES.has(status)) opened += 1;
         }
         record.apply = {
-          started, waiting: Math.max(0, waiting - picked.length),
-          ...(picked.length === 0 ? { skippedReason: free === 0 ? `all ${capacity.max} browser windows are still waiting on you` : slots === 0 ? "starting applications was turned off for this run" : "no ready jobs with a supported application form" } : {}),
+          started, waiting: Math.max(0, waiting - started.length),
+          ...(started.length === 0 ? { skippedReason: free === 0 ? `all ${capacity.max} browser windows are still waiting on you` : slots === 0 ? "starting applications was turned off for this run" : "no ready jobs with a supported application form" } : {}),
         };
       }
     } catch (error) {

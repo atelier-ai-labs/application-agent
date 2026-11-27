@@ -82,6 +82,35 @@ describe("daily cycle", () => {
     expect(formatDailySummary(record)).toContain("No applications started: the browser host is not running.");
   });
 
+  it("steps past skipped jobs so they don't use up the night's slots (11-25 to 11-27)", async () => {
+    const many = ["j1", "j2", "j3", "j4", "j5"].map((id) => job(id));
+    const calls: string[] = [];
+    const run = async (script: string, args: readonly string[]): Promise<CommandResult> => {
+      const key = `${script} ${args.join(" ")}`;
+      calls.push(key);
+      if (key.startsWith("career-agent:queue --list")) return { code: 0, stdout: `${JSON.stringify({ jobs: many })}\n` };
+      const id = args[args.indexOf("--job-id") + 1];
+      if (id === "j1" || id === "j3") return { code: 0, stdout: `${JSON.stringify({ queue: { status: "Skipped", error: "Already 1 application to Co in the last 365 days" } })}\n` };
+      if (id) return { code: 0, stdout: `${JSON.stringify({ queue: { status: "Needs Input" } })}\n` };
+      return { code: 0, stdout: "" };
+    };
+    const record = await runDailyCycle({ run, hostCapacity: async () => ({ active: 1, max: 3 }) }, { phases: ["apply"] });
+    expect(calls.filter((call) => call.includes("--job-id")).map((call) => call.split(" ").pop())).toEqual(["j1", "j2", "j3", "j4"]);
+    expect(record.apply).toMatchObject({ waiting: 1 });
+  });
+
+  it("gives up after too many skips in a row", async () => {
+    const many = Array.from({ length: 20 }, (_, index) => job(`j${index + 1}`));
+    let tries = 0;
+    const run = async (script: string, args: readonly string[]): Promise<CommandResult> => {
+      if (args.includes("--list")) return { code: 0, stdout: `${JSON.stringify({ jobs: many })}\n` };
+      if (args.includes("--job-id")) { tries += 1; return { code: 0, stdout: `${JSON.stringify({ queue: { status: "Skipped" } })}\n` }; }
+      return { code: 0, stdout: "" };
+    };
+    await runDailyCycle({ run, hostCapacity: async () => ({ active: 0, max: 3 }) }, { phases: ["apply"], maxSkips: 4 });
+    expect(tries).toBe(7);
+  });
+
   it("says so when every browser window is still waiting on the user", async () => {
     const runner = fakeRunner({ "career-agent:queue --list": { code: 0, stdout: `${JSON.stringify({ jobs })}\n` } });
     const record = await runDailyCycle({ run: runner.run, hostCapacity: async () => ({ active: 3, max: 3 }) }, { phases: ["apply"] });

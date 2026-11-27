@@ -1,6 +1,6 @@
 /** @vitest-environment node */
 import { describe, expect, it } from "vitest";
-import { AgentAlerts, crashLoopAlert, dailyRunAlerts, failedRunAlert, formatAlerts, modelHealthAlert } from "../application-agent/automation/runtime/agentAlerts";
+import { AgentAlerts, crashLoopAlert, dailyRunAlerts, failedRunAlert, formatAlerts, modelHealthAlert, noApplicationsAlert } from "../application-agent/automation/runtime/agentAlerts";
 import { failedDailyPhases, runDailyCycle, type CommandResult } from "../application-agent/automation/dailyCycle";
 import type { KeyValueStorage } from "../application-agent/src/persistence/storage";
 
@@ -61,5 +61,21 @@ describe("agent alerts (2026-11-18)", () => {
     expect(modelHealthAlert(timeouts, now)?.key).toBe("model:not-answering");
     expect(modelHealthAlert([...timeouts, { at: minutesAgo(2), outcome: "matched:C1@0.90" }], now)).toBeUndefined();
     expect(modelHealthAlert(timeouts.slice(0, 2), now)).toBeUndefined();
+  });
+});
+
+describe("no applications started tonight (2026-11-27)", () => {
+  it("alerts when every pick was skipped", () => {
+    const alert = noApplicationsAlert({ started: [{ status: "Skipped" }, { status: "Skipped" }, { status: "Expired" }], waiting: 33 });
+    expect(alert?.title).toBe("No applications started tonight");
+    expect(alert?.detail).toContain("tried 3 jobs");
+    expect(alert?.detail).toContain("33 more");
+  });
+
+  it("stays quiet when one started, when windows are waiting on the user, or when the queue is empty", () => {
+    expect(noApplicationsAlert({ started: [{ status: "Skipped" }, { status: "Needs Input" }], waiting: 2 })).toBeUndefined();
+    expect(noApplicationsAlert({ started: [], waiting: 5, skippedReason: "all 3 browser windows are still waiting on you" })).toBeUndefined();
+    expect(noApplicationsAlert({ started: [], waiting: 0 })).toBeUndefined();
+    expect(noApplicationsAlert({ error: "x" })).toBeUndefined();
   });
 });

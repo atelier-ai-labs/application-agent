@@ -113,6 +113,29 @@ export function dailyRunAlerts(failed: readonly DailyPhaseOutcome[], sourceProbl
   return alerts;
 }
 
+/**
+ * Tonight's run found jobs and had free browser windows, yet opened none: every
+ * pick came back skipped or closed. On 11-25 to 11-27 this went three nights
+ * without anyone noticing, because a skip isn't an error (2026-11-27).
+ */
+export function noApplicationsAlert(apply: { started?: readonly { status: string }[]; waiting?: number; skippedReason?: string } | { error: string } | undefined): AgentAlert | undefined {
+  if (!apply || "error" in apply) return undefined;
+  if (/waiting on you|turned off/.test(apply.skippedReason ?? "")) return undefined;
+  const started = apply.started ?? [];
+  const opened = started.filter((app) => !/^(?:Skipped|Expired)$/.test(app.status)).length;
+  if (opened > 0) return undefined;
+  if (started.length === 0 && !(apply.waiting && apply.waiting > 0) && !apply.skippedReason) return undefined;
+  const skipped = started.length;
+  return {
+    key: "daily:no-applications",
+    title: "No applications started tonight",
+    detail: skipped > 0
+      ? `The agent tried ${skipped} job${skipped === 1 ? "" : "s"} and every one was skipped or had closed.${apply.waiting ? ` ${apply.waiting} more are in the queue.` : ""}`
+      : `Nothing was started${apply.skippedReason ? `: ${apply.skippedReason}` : ""}.`,
+    action: "Check the queue has new companies in it, or ask Claude to look.",
+  };
+}
+
 /** A browser run that failed for a reason other than the normal 4-hour window close. */
 export function failedRunAlert(input: { executionId: string; company: string; role: string; reason: string }): AgentAlert | undefined {
   if (/timed out; no application was submitted/i.test(input.reason)) return undefined;
